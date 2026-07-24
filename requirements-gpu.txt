@@ -1,0 +1,3 @@
+# Installed automatically by install.sh when an NVIDIA GPU is detected
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
