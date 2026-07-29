@@ -152,8 +152,10 @@ too just runs a second daemon.
   tell us which one has focus.
 - **Wayland: the clipboard is borrowed.** The previous contents are restored
   after ~0.4 s, which is best effort — a slow application may still fetch the
-  restored value instead of the transcript. `PTT_KEEP_CLIPBOARD=1` disables the
-  restore.
+  restored value instead of the transcript. Only *text* clipboards are restored:
+  if you had an image copied, the transcript stays and the image is not put
+  back, because rewriting arbitrary bytes as `text/plain` would corrupt it.
+  `PTT_KEEP_CLIPBOARD=1` disables the restore entirely.
 - The PTT key is grabbed globally while the daemon runs — pick one you don't
   otherwise use.
 - Transcription quality of names/jargon can be improved by switching to a

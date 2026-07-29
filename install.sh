@@ -47,7 +47,21 @@ fi
 "$VENV/bin/pip" -q install --upgrade pip
 
 echo "==> installing python dependencies"
-"$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
+# evdev is a C extension and has no wheels, so a machine without a compiler
+# fails here with a wall of gcc output. Retry once with build deps rather than
+# installing ~200 MB of toolchain up front on machines that don't need it.
+if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"; then
+  echo "    dependency build failed — installing compiler and Python headers"
+  pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  if command -v apt-get >/dev/null; then
+    install_pkg build-essential "python${pyver}-dev"
+  elif command -v dnf >/dev/null; then
+    install_pkg gcc "python3-devel"
+  else
+    install_pkg base-devel
+  fi
+  "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
+fi
 if command -v nvidia-smi >/dev/null; then
   echo "==> NVIDIA GPU detected — installing CUDA libraries"
   "$VENV/bin/pip" -q install -r "$DIR/requirements-gpu.txt"
@@ -78,6 +92,18 @@ if [ "$SESSION" = "wayland" ]; then
   fi
   if [ ! -f /etc/modules-load.d/uinput.conf ]; then
     printf 'uinput\n' | $SUDO tee /etc/modules-load.d/uinput.conf >/dev/null
+  fi
+
+  # Verify the rule actually applied. udevadm trigger does not always re-label
+  # an already-existing node, and a silent failure here would only surface much
+  # later as ydotool refusing to type.
+  if [ -e /dev/uinput ]; then
+    uinput_group="$(stat -c %G /dev/uinput)"
+    if [ "$uinput_group" != "input" ]; then
+      echo "    WARNING: /dev/uinput belongs to group '$uinput_group', not 'input'."
+      echo "             Typing will fail until the rule applies — reboot, or run:"
+      echo "               sudo udevadm control --reload-rules && sudo udevadm trigger"
+    fi
   fi
 
   # Reading the PTT key from /dev/input needs the 'input' group. This also

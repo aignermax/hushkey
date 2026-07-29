@@ -164,6 +164,21 @@ class WaylandInjector:
         self.keep_clipboard = os.environ.get("PTT_KEEP_CLIPBOARD") == "1"
         self._chord_args = None
 
+    @staticmethod
+    def _socket_path():
+        """The socket ydotool will talk to, resolved the same way ydotool does.
+
+        Resolving it ourselves (rather than only honouring an explicitly set
+        YDOTOOL_SOCKET) means a manual `python dictate.py` run validates the
+        same socket the systemd unit uses, instead of failing later inside
+        ydotool with a less obvious message.
+        """
+        explicit = os.environ.get("YDOTOOL_SOCKET")
+        if explicit:
+            return explicit
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        return os.path.join(runtime, ".ydotool_socket") if runtime else None
+
     def check(self):
         """Return a human-readable problem description, or None if usable."""
         for tool in ("wl-copy", "wl-paste", "ydotool"):
@@ -173,8 +188,11 @@ class WaylandInjector:
             self._chord_args = self._build_chord(self.chord)
         except ValueError as exc:
             return str(exc)
-        socket = os.environ.get("YDOTOOL_SOCKET", "")
-        if socket and not os.path.exists(socket):
+        socket = self._socket_path()
+        if socket is None:
+            return ("neither YDOTOOL_SOCKET nor XDG_RUNTIME_DIR is set — "
+                    "cannot locate the ydotoold socket")
+        if not os.path.exists(socket):
             return (f"ydotoold socket {socket} missing — "
                     "systemctl --user start ydotoold.service")
         return None
@@ -205,25 +223,38 @@ class WaylandInjector:
                 + [f"{c}:0" for c in reversed(codes)])
 
     def _clipboard_read(self):
+        """Previous clipboard contents, but only when they are plain text.
+
+        Pinning the type matters: without it a clipboard holding an image would
+        come back as raw bytes and get restored as text/plain, i.e. silently
+        corrupted. Failing to read is the safe outcome — we then simply leave
+        the transcript in place rather than writing something wrong back.
+        """
         try:
-            out = subprocess.run(["wl-paste", "--no-newline"],
-                                 capture_output=True, timeout=5)
+            out = subprocess.run(
+                ["wl-paste", "--no-newline", "--type", "text/plain"],
+                capture_output=True, timeout=5)
             return out.stdout if out.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
             return None
 
     def _clipboard_write(self, data: bytes):
-        subprocess.run(["wl-copy"], input=data, timeout=5,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["wl-copy", "--type", "text/plain"], input=data,
+                       timeout=5, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
 
     def insert(self, text):
         if self._chord_args is None:
             self._chord_args = self._build_chord(self.chord)
+        env = dict(os.environ)
+        socket = self._socket_path()
+        if socket:
+            env["YDOTOOL_SOCKET"] = socket  # keep client and daemon in sync
         previous = None if self.keep_clipboard else self._clipboard_read()
         self._clipboard_write(text.encode("utf-8"))
         subprocess.run(["ydotool", "key"] + self._chord_args, timeout=10,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       check=True)
+                       env=env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True)
         if previous is not None:
             # Best effort: the paste is asynchronous, so give the focused app
             # time to fetch the selection before handing the clipboard back.
