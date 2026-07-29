@@ -1,0 +1,11 @@
+# Let ydotoold create a virtual keyboard without running as root.
+#
+# /dev/uinput is root-only by default. Handing it to the 'input' group lets
+# ydotoold run as a plain systemd --user service. static_node is required
+# because uinput is a module: without it the rule only applies once the module
+# has already been loaded and the node created.
+#
+# Note this is a real privilege grant: a process that can write /dev/uinput can
+# synthesize arbitrary input, and 'input' group membership can also read every
+# keystroke via /dev/input/event*. Only do this on a machine you trust.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

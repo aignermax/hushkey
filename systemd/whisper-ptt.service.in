@@ -1,9 +1,14 @@
 [Unit]
-Description=whisper-ptt: local push-to-talk dictation (X11)
+Description=whisper-ptt: local push-to-talk dictation
 After=graphical-session.target
+# Wayland inserts text through ydotoold. On X11 that unit is never installed,
+# and Wants= on a missing unit is not an error, so one template covers both.
+Wants=ydotoold.service
+After=ydotoold.service
 
 [Service]
 ExecStart=@DIR@/.venv/bin/python @DIR@/dictate.py
+Environment=YDOTOOL_SOCKET=%t/.ydotool_socket
 Restart=on-failure
 RestartSec=3
 
