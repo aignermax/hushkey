@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.whisper-ptt</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@DIR@/.venv/bin/python</string>
+        <string>@DIR@/dictate.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@HOME@/Library/Logs/whisper-ptt/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/Library/Logs/whisper-ptt/launchd.log</string>
+    <!-- Optional config — edit, then: launchctl kickstart -k gui/$(id -u)/com.whisper-ptt
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PTT_KEY</key><string>ctrl_r</string>
+        <key>WHISPER_MODEL</key><string>small</string>
+        <key>WHISPER_LANG</key><string>de</string>
+    </dict>
+    -->
+</dict>
+</plist>

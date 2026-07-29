@@ -1,2 +1,3 @@
 faster-whisper>=1.2
 pynput>=1.7
+sounddevice>=0.5  # recording backend on Windows/macOS; Linux uses pw-record if present

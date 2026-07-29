@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""whisper-ptt: push-to-talk dictation for any X11 app, fully local.
+"""whisper-ptt: push-to-talk dictation, fully local — Linux, Windows, macOS.
 
 Hold the push-to-talk key (default: Right Ctrl), speak, release — the
 transcript is typed into the focused window (terminal, editor, browser, ...).
 Nothing is submitted automatically; review and hit Enter yourself.
 
-- Recording: pw-record (PipeWire) from the default source, 16 kHz mono.
+- Recording: pw-record (PipeWire) on Linux where available, otherwise
+  sounddevice/PortAudio (Windows WASAPI, macOS Core Audio) — see recorder.py.
 - Transcription: faster-whisper, local — GPU (CUDA) when available, else CPU.
   After the one-time model download nothing leaves the machine.
-- Typing: pynput (X11/XTEST). No sudo, no root daemon.
+- Typing: pynput. No sudo, no root daemon. On Linux this needs an X11
+  session; on macOS grant the terminal Accessibility + Input Monitoring.
 - Log stores metadata only (duration, char count), never dictated text.
 
 Config via environment:
@@ -16,26 +18,38 @@ Config via environment:
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
 
-Run:  .venv/bin/python dictate.py        (usually via whisper-ptt.service)
-Stop: Ctrl-C, or systemctl --user stop whisper-ptt.service
-Note: X11 only. Wayland needs a different backend (ydotool/evdev).
+Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
+Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
+Note: Linux Wayland needs a different backend (ydotool/evdev).
 """
 from __future__ import annotations
 
 import glob
+import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime
 
-STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME",
-                                        os.path.expanduser("~/.local/state")),
-                         "whisper-ptt")
+from recorder import pick_recorder
+
+
+def _state_dir():
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Logs/whisper-ptt")
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get(
+            "LOCALAPPDATA", os.path.expanduser("~/AppData/Local")),
+            "whisper-ptt")
+    return os.path.join(os.environ.get("XDG_STATE_HOME",
+                                       os.path.expanduser("~/.local/state")),
+                        "whisper-ptt")
+
+
+STATE_DIR = _state_dir()
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
@@ -48,9 +62,41 @@ def log(msg):
 
 
 def notify(title, body=""):
-    if shutil.which("notify-send"):
-        subprocess.Popen(["notify-send", "-t", "2000", title, body],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Best-effort desktop notification; never raises."""
+    try:
+        if shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-t", "2000", title, body],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "darwin" and shutil.which("osascript"):
+            script = (f"display notification {json.dumps(body, ensure_ascii=False)}"
+                      f" with title {json.dumps(title, ensure_ascii=False)}")
+            subprocess.Popen(["osascript", "-e", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "win32":
+            _notify_windows(title, body)
+        else:
+            print(f"{title} {body}".strip(), file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _notify_windows(title, body):
+    """Toast via a PowerShell NotifyIcon balloon — no extra dependencies."""
+    script = (
+        "param($t, $b) "
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$n = New-Object System.Windows.Forms.NotifyIcon; "
+        "$n.Icon = [System.Drawing.SystemIcons]::Information; "
+        "$n.Visible = $true; "
+        "$n.ShowBalloonTip(2000, $t, $b, [System.Windows.Forms.ToolTipIcon]::Info); "
+        "Start-Sleep -Milliseconds 1500; "
+        "$n.Dispose()")
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script,
+         title[:60], body[:250]],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def preload_cuda_libs():
@@ -63,10 +109,15 @@ def preload_cuda_libs():
         for pkg in (nvidia.cublas, nvidia.cudnn):
             pkg_dir = pkg.__path__[0] if pkg.__file__ is None \
                 else os.path.dirname(pkg.__file__)
-            libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
+            if sys.platform == "win32":
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "bin", "*.dll")))
+            else:
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
         for lib in libs:
+            if hasattr(os, "add_dll_directory"):  # Windows Python 3.8+
+                os.add_dll_directory(os.path.dirname(lib))
             try:
-                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                ctypes.CDLL(lib, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
             except OSError:
                 pass
     except ImportError:
@@ -88,7 +139,8 @@ def pick_device():
 class DictationDaemon:
     def __init__(self):
         self.model = None
-        self.recording = None  # (Popen, wav_path, start_time)
+        self.recorder = pick_recorder()
+        self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
         self.controller = None
 
@@ -110,33 +162,35 @@ class DictationDaemon:
     def start_recording(self):
         if self.recording is not None:
             return  # ignore key auto-repeat
-        if not shutil.which("pw-record"):
-            notify("dictation error", "pw-record not found (install pipewire)")
-            log("ERROR: pw-record missing")
+        if self.recorder is None:
+            notify("dictation error",
+                   "no recorder (install pipewire/pw-record or sounddevice)")
+            log("ERROR: no recording backend available")
             return
-        wav = os.path.join(tempfile.gettempdir(),
-                           f"whisper-ptt-{int(time.time() * 1000)}.wav")
-        proc = subprocess.Popen(
-            ["pw-record", "--rate", "16000", "--channels", "1", wav],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.recording = (proc, wav, time.time())
+        try:
+            self.recorder.start()
+        except Exception as exc:
+            log(f"ERROR starting recording: {exc}")
+            notify("dictation error", str(exc)[:80])
+            return
+        self.recording = time.time()
         notify("● recording", f"(release {PTT_KEY} to transcribe)")
 
     def stop_recording(self):
-        rec, self.recording = self.recording, None
-        if rec is None:
+        started, self.recording = self.recording, None
+        if started is None:
             return
-        proc, wav, started = rec
         duration = time.time() - started
-        proc.send_signal(signal.SIGINT)
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        if duration < MIN_SECONDS or not os.path.isfile(wav) \
-                or os.path.getsize(wav) < 1000:
+            wav = self.recorder.stop()
+        except Exception as exc:
+            log(f"ERROR stopping recording: {exc}")
+            notify("dictation error", str(exc)[:80])
+            return
+        if duration < MIN_SECONDS or not wav or os.path.getsize(wav) < 1000:
             log(f"ignored short/empty recording ({duration:.2f}s)")
-            os.path.exists(wav) and os.remove(wav)
+            if wav and os.path.exists(wav):
+                os.remove(wav)
             return
         threading.Thread(target=self._transcribe_and_type,
                          args=(wav, duration), daemon=True).start()
