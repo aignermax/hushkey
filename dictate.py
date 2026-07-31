@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
-"""whisper-ptt: push-to-talk dictation for any app, fully local.
+"""whisper-ptt: push-to-talk dictation, fully local — Linux, Windows, macOS.
 
 Hold the push-to-talk key (default: Right Ctrl), speak, release — the
 transcript lands in the focused window (terminal, editor, browser, ...).
 Nothing is submitted automatically; review and hit Enter yourself.
 
-- Recording: pw-record (PipeWire) from the default source, 16 kHz mono.
+- Recording: pw-record (PipeWire) on Linux where available, otherwise
+  sounddevice/PortAudio (Windows WASAPI, macOS Core Audio) — see recorder.py.
 - Transcription: faster-whisper, local — GPU (CUDA) when available, else CPU.
   After the one-time model download nothing leaves the machine.
 - Key grab and text insertion are backend-specific:
-    X11      pynput/XTEST for both. No group membership, no root daemon.
-    Wayland  evdev reads the key from /dev/input (needs the 'input' group);
-             text goes through the clipboard and a single synthetic Ctrl+V
-             via ydotool. Typing it out keycode-by-keycode is not an option:
-             ydotool assumes a US layout, so on a 'de' keymap 'z' would come
-             out as 'y' and umlauts not at all. The clipboard carries UTF-8,
-             so only one layout-stable chord has to be synthesized.
+    pynput   X11, Windows and macOS: pynput both reads the key and types the
+             text out character by character. No group membership, no root
+             daemon. On macOS grant the terminal Accessibility + Input
+             Monitoring.
+    wayland  Wayland gives clients neither a global key grab nor input
+             injection, so evdev reads the key from /dev/input (needs the
+             'input' group) and the text goes in via the clipboard plus a
+             single synthetic Ctrl+V through ydotool. Typing it out
+             keycode-by-keycode is not an option there: ydotool assumes a US
+             layout, so on a 'de' keymap 'z' would come out as 'y' and umlauts
+             not at all. The clipboard carries UTF-8, so only one
+             layout-stable chord has to be synthesized.
 - Log stores metadata only (duration, char count), never dictated text.
 
 Config via environment:
@@ -23,35 +29,71 @@ Config via environment:
                    evdev name like KEY_RIGHTCTRL)
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
-  PTT_BACKEND      force 'x11' or 'wayland' (default: from XDG_SESSION_TYPE)
+  PTT_BACKEND      force 'pynput' (alias: 'x11') or 'wayland'
+                   (default: from XDG_SESSION_TYPE)
+  PTT_TYPE_DELAY   pynput backend only: seconds between typed characters
+                   (default: 0.01); heavy editors drop/reorder fast synthetic
+                   keystrokes — raise it (e.g. 0.03) if dictation arrives
+                   garbled
   PTT_PASTE_KEY    Wayland paste chord (default: ctrl+v; terminals usually
                    need ctrl+shift+v)
   PTT_KEEP_CLIPBOARD  1 = leave the transcript in the clipboard instead of
                    restoring the previous contents
 
-Run:  .venv/bin/python dictate.py        (usually via whisper-ptt.service)
-Stop: Ctrl-C, or systemctl --user stop whisper-ptt.service
+Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
+Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
 """
 from __future__ import annotations
 
 import glob
+import json
+import math
 import os
 import shutil
-import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime
 
-STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME",
-                                        os.path.expanduser("~/.local/state")),
-                         "whisper-ptt")
+from recorder import pick_recorder
+
+
+def _state_dir():
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Logs/whisper-ptt")
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get(
+            "LOCALAPPDATA", os.path.expanduser("~/AppData/Local")),
+            "whisper-ptt")
+    return os.path.join(os.environ.get("XDG_STATE_HOME",
+                                       os.path.expanduser("~/.local/state")),
+                        "whisper-ptt")
+
+
+STATE_DIR = _state_dir()
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
+
+
+def _env_float(name, default):
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
+TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 CLIPBOARD_SETTLE = 0.4  # let the compositor deliver the paste before restoring
+
+try:
+    from pynput.keyboard import Key
+    # control chars type as their keys, same as pynput's Controller.type()
+    _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
+except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
+    _CONTROL_KEYS = {}
 
 
 def log(msg):
@@ -61,16 +103,54 @@ def log(msg):
 
 
 def notify(title, body=""):
-    if shutil.which("notify-send"):
-        subprocess.Popen(["notify-send", "-t", "2000", title, body],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Best-effort desktop notification; never raises."""
+    try:
+        if shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-t", "2000", title, body],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "darwin" and shutil.which("osascript"):
+            script = (f"display notification {json.dumps(body, ensure_ascii=False)}"
+                      f" with title {json.dumps(title, ensure_ascii=False)}")
+            subprocess.Popen(["osascript", "-e", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "win32":
+            _notify_windows(title, body)
+        else:
+            print(f"{title} {body}".strip(), file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _notify_windows(title, body):
+    """Toast via a PowerShell NotifyIcon balloon — no extra dependencies."""
+    script = (
+        "param($t, $b) "
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$n = New-Object System.Windows.Forms.NotifyIcon; "
+        "$n.Icon = [System.Drawing.SystemIcons]::Information; "
+        "$n.Visible = $true; "
+        "$n.ShowBalloonTip(2000, $t, $b, [System.Windows.Forms.ToolTipIcon]::Info); "
+        "Start-Sleep -Milliseconds 1500; "
+        "$n.Dispose()")
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script,
+         title[:60], body[:250]],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def backend_name():
+    """'wayland' or 'pynput' — which key-grab/insertion pair to use.
+
+    'pynput' covers X11, Windows and macOS; only Linux/Wayland needs the
+    evdev+ydotool pair. 'x11' stays accepted as an alias because earlier
+    versions documented PTT_BACKEND=x11.
+    """
     forced = os.environ.get("PTT_BACKEND")
     if forced:
-        return forced
-    return "wayland" if os.environ.get("XDG_SESSION_TYPE") == "wayland" else "x11"
+        return "pynput" if forced == "x11" else forced
+    return "wayland" if os.environ.get("XDG_SESSION_TYPE") == "wayland" else "pynput"
 
 
 def preload_cuda_libs():
@@ -83,10 +163,15 @@ def preload_cuda_libs():
         for pkg in (nvidia.cublas, nvidia.cudnn):
             pkg_dir = pkg.__path__[0] if pkg.__file__ is None \
                 else os.path.dirname(pkg.__file__)
-            libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
+            if sys.platform == "win32":
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "bin", "*.dll")))
+            else:
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
         for lib in libs:
+            if hasattr(os, "add_dll_directory"):  # Windows Python 3.8+
+                os.add_dll_directory(os.path.dirname(lib))
             try:
-                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                ctypes.CDLL(lib, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
             except OSError:
                 pass
     except ImportError:
@@ -134,20 +219,30 @@ def evdev_keycode(name):
 # Text insertion backends
 # --------------------------------------------------------------------------
 
-class X11Injector:
-    """Synthesize the text via XTEST. Layout-independent, no extra setup."""
+class PynputInjector:
+    """Type the text out via pynput (XTEST on X11, native APIs elsewhere).
+
+    Layout-independent, no extra setup. Characters go one at a time with a
+    small delay: heavy apps (Electron editors, browsers) drop or reorder
+    keystrokes fired at full speed.
+    """
 
     def __init__(self):
-        self._controller = None
+        self.controller = None
 
     def check(self):
         return None
 
     def insert(self, text):
-        if self._controller is None:
+        if self.controller is None:
             from pynput.keyboard import Controller
-            self._controller = Controller()
-        self._controller.type(text)
+            self.controller = Controller()
+        for ch in text:
+            key = _CONTROL_KEYS.get(ch, ch)
+            self.controller.press(key)
+            self.controller.release(key)
+            if TYPE_DELAY:
+                time.sleep(TYPE_DELAY)
 
 
 class WaylandInjector:
@@ -269,7 +364,7 @@ class WaylandInjector:
 # Key listener backends
 # --------------------------------------------------------------------------
 
-class X11Listener:
+class PynputListener:
     def __init__(self, key_name):
         self.key_name = key_name
 
@@ -367,7 +462,7 @@ class EvdevListener:
 def make_backends(key_name):
     if backend_name() == "wayland":
         return EvdevListener(key_name), WaylandInjector()
-    return X11Listener(key_name), X11Injector()
+    return PynputListener(key_name), PynputInjector()
 
 
 # --------------------------------------------------------------------------
@@ -375,7 +470,8 @@ def make_backends(key_name):
 class DictationDaemon:
     def __init__(self):
         self.model = None
-        self.recording = None  # (Popen, wav_path, start_time)
+        self.recorder = pick_recorder()
+        self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
         self.listener, self.injector = make_backends(PTT_KEY)
 
@@ -397,33 +493,35 @@ class DictationDaemon:
     def start_recording(self):
         if self.recording is not None:
             return  # ignore key auto-repeat
-        if not shutil.which("pw-record"):
-            notify("dictation error", "pw-record not found (install pipewire)")
-            log("ERROR: pw-record missing")
+        if self.recorder is None:
+            notify("dictation error",
+                   "no recorder (install pipewire/pw-record or sounddevice)")
+            log("ERROR: no recording backend available")
             return
-        wav = os.path.join(tempfile.gettempdir(),
-                           f"whisper-ptt-{int(time.time() * 1000)}.wav")
-        proc = subprocess.Popen(
-            ["pw-record", "--rate", "16000", "--channels", "1", wav],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.recording = (proc, wav, time.time())
+        try:
+            self.recorder.start()
+        except Exception as exc:
+            log(f"ERROR starting recording: {exc}")
+            notify("dictation error", str(exc)[:80])
+            return
+        self.recording = time.time()
         notify("● recording", f"(release {PTT_KEY} to transcribe)")
 
     def stop_recording(self):
-        rec, self.recording = self.recording, None
-        if rec is None:
+        started, self.recording = self.recording, None
+        if started is None:
             return
-        proc, wav, started = rec
         duration = time.time() - started
-        proc.send_signal(signal.SIGINT)
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        if duration < MIN_SECONDS or not os.path.isfile(wav) \
-                or os.path.getsize(wav) < 1000:
+            wav = self.recorder.stop()
+        except Exception as exc:
+            log(f"ERROR stopping recording: {exc}")
+            notify("dictation error", str(exc)[:80])
+            return
+        if duration < MIN_SECONDS or not wav or os.path.getsize(wav) < 1000:
             log(f"ignored short/empty recording ({duration:.2f}s)")
-            os.path.exists(wav) and os.remove(wav)
+            if wav and os.path.exists(wav):
+                os.remove(wav)
             return
         threading.Thread(target=self._transcribe_and_insert,
                          args=(wav, duration), daemon=True).start()

@@ -40,10 +40,15 @@ def preload_cuda_libs():
         for pkg in (nvidia.cublas, nvidia.cudnn):
             pkg_dir = pkg.__path__[0] if pkg.__file__ is None \
                 else os.path.dirname(pkg.__file__)
-            libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
+            if sys.platform == "win32":
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "bin", "*.dll")))
+            else:
+                libs += sorted(glob.glob(os.path.join(pkg_dir, "lib", "*.so*")))
         for lib in libs:
+            if hasattr(os, "add_dll_directory"):  # Windows Python 3.8+
+                os.add_dll_directory(os.path.dirname(lib))
             try:
-                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+                ctypes.CDLL(lib, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
             except OSError:
                 pass
     except ImportError:
