@@ -115,6 +115,7 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
 
 
 def test_typing_paces_each_character(monkeypatch, tmp_path):
+    from pynput.keyboard import Key
     d, _, _ = make_daemon(monkeypatch, tmp_path)
     events, sleeps = [], []
 
@@ -128,11 +129,21 @@ def test_typing_paces_each_character(monkeypatch, tmp_path):
     d.controller = FakeController()
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0.02)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
-    d._type_text("ab ")
+    d._type_text("ab\n")
     assert events == [("down", "a"), ("up", "a"),
                       ("down", "b"), ("up", "b"),
-                      ("down", " "), ("up", " ")]
+                      ("down", Key.enter), ("up", Key.enter)]  # \n types as Enter
     assert sleeps == [0.02] * 3
+
+
+def test_env_float_parsing(monkeypatch):
+    monkeypatch.setenv("PTT_TYPE_DELAY", "0.02")
+    assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.02
+    for bad in ("bogus", "", "-1", "nan", "inf"):
+        monkeypatch.setenv("PTT_TYPE_DELAY", bad)
+        assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
+    monkeypatch.delenv("PTT_TYPE_DELAY")
+    assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
 
 
 def test_missing_backend_does_not_crash(monkeypatch):

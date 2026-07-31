@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -55,10 +56,17 @@ def _state_dir():
 STATE_DIR = _state_dir()
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
-try:
-    TYPE_DELAY = float(os.environ.get("PTT_TYPE_DELAY", "0.01"))
-except ValueError:
-    TYPE_DELAY = 0.01
+
+
+def _env_float(name, default):
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
+TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 
 
@@ -228,12 +236,15 @@ class DictationDaemon:
     def _type_text(self, text):
         # Type char-by-char with a small delay: heavy apps (Electron editors,
         # browsers) drop or reorder keystrokes fired at full speed.
+        from pynput.keyboard import Controller, Key
         if self.controller is None:
-            from pynput.keyboard import Controller
             self.controller = Controller()
+        # control chars type as their keys, same as pynput's Controller.type()
+        control = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
         for ch in text:
-            self.controller.press(ch)
-            self.controller.release(ch)
+            key = control.get(ch, ch)
+            self.controller.press(key)
+            self.controller.release(key)
             if TYPE_DELAY:
                 time.sleep(TYPE_DELAY)
 
