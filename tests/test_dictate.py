@@ -416,7 +416,10 @@ def test_wayland_socket_prefers_explicit_env(monkeypatch):
     assert dictate.WaylandInjector._socket_path() == "/run/custom.sock"
     monkeypatch.delenv("YDOTOOL_SOCKET")
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-    assert dictate.WaylandInjector._socket_path() == "/run/user/1000/.ydotool_socket"
+    # os.path.join, so the separator is the host's — this asserts the lookup
+    # order, not the spelling. The path itself is only ever used on Linux.
+    assert dictate.WaylandInjector._socket_path() == os.path.join(
+        "/run/user/1000", ".ydotool_socket")
     monkeypatch.delenv("XDG_RUNTIME_DIR")
     assert dictate.WaylandInjector._socket_path() is None
 
