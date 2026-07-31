@@ -39,6 +39,9 @@ Config via environment:
                    need ctrl+shift+v)
   PTT_KEEP_CLIPBOARD  1 = leave the transcript in the clipboard instead of
                    restoring the previous contents
+  PTT_CLIPBOARD_SETTLE  Wayland: seconds to wait before restoring the previous
+                   clipboard (default: 0.4); raise it if a slow app ends up
+                   pasting the restored value instead of the transcript
 
 Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
 Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
@@ -86,7 +89,9 @@ def _env_float(name, default):
 
 TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
-CLIPBOARD_SETTLE = 0.4  # let the compositor deliver the paste before restoring
+# Let the focused app fetch the selection before the clipboard is handed back.
+# Configurable because the right value depends on how fast that app reacts.
+CLIPBOARD_SETTLE = _env_float("PTT_CLIPBOARD_SETTLE", 0.4)
 
 try:
     from pynput.keyboard import Key
@@ -334,9 +339,21 @@ class WaylandInjector:
             return None
 
     def _clipboard_write(self, data: bytes):
-        subprocess.run(["wl-copy", "--type", "text/plain"], input=data,
-                       timeout=5, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        """Put bytes on the clipboard, raising if wl-copy did not take them.
+
+        The failure must propagate: insert() synthesizes a paste right after,
+        so a silently-failed write would paste whatever was on the clipboard
+        before — the user sees text appear and has no reason to distrust it,
+        while the log records a successful dictation. Leaking the previous
+        clipboard (a password, say) into the focused window that way is far
+        worse than a visible error.
+        """
+        out = subprocess.run(["wl-copy", "--type", "text/plain"], input=data,
+                             timeout=5, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE)
+        if out.returncode != 0:
+            detail = out.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(f"wl-copy failed: {detail or out.returncode}")
 
     def insert(self, text):
         if self._chord_args is None:
@@ -356,8 +373,10 @@ class WaylandInjector:
             time.sleep(CLIPBOARD_SETTLE)
             try:
                 self._clipboard_write(previous)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                # Only the restore failed — the transcript is already inserted,
+                # so log it and leave the clipboard holding the transcript.
+                log(f"clipboard restore failed: {exc}")
 
 
 # --------------------------------------------------------------------------
@@ -369,7 +388,14 @@ class PynputListener:
         self.key_name = key_name
 
     def check(self):
-        from pynput import keyboard
+        # pynput raises on import when it cannot reach a display server, which
+        # is exactly what happens when this backend is forced on a Wayland or
+        # headless session. check() exists to explain that, not to traceback.
+        try:
+            from pynput import keyboard
+        except Exception as exc:
+            return (f"pynput unusable ({exc}) — on Wayland drop PTT_BACKEND=x11 "
+                    "so the evdev/ydotool backend is used instead")
         if getattr(keyboard.Key, self.key_name, None) is None:
             return f"unknown PTT_KEY '{self.key_name}' (see pynput.keyboard.Key)"
         return None
@@ -443,9 +469,24 @@ class EvdevListener:
             selector.register(dev, selectors.EVENT_READ)
         log(f"evdev listening on: {', '.join(d.path for d in devices)}")
         try:
-            while True:
+            while selector.get_map():
                 for ready, _mask in selector.select():
-                    for event in ready.fileobj.read():
+                    dev = ready.fileobj
+                    try:
+                        events = list(dev.read())
+                    except OSError as exc:
+                        # Keyboard went away (USB unplugged, Bluetooth asleep).
+                        # Drop just that device: with several keyboards attached
+                        # the others keep working, and tearing the daemon down
+                        # would mean reloading the whisper model afterwards.
+                        log(f"evdev device {dev.path} lost ({exc}) — dropping it")
+                        selector.unregister(dev)
+                        # A key held when the device vanished never sends its
+                        # release. stop_recording() is a no-op if nothing is
+                        # recording, so this is safe either way.
+                        on_release()
+                        continue
+                    for event in events:
                         if event.type != ecodes.EV_KEY or event.code != self.code:
                             continue
                         if event.value == 1:
@@ -453,10 +494,16 @@ class EvdevListener:
                         elif event.value == 0:
                             on_release()
                         # value 2 is auto-repeat while held — ignore it
+            # Every keyboard disappeared. Exiting lets systemd restart us once
+            # they are back, which also re-scans for newly plugged devices.
+            sys.exit("no keyboard left to listen on")
         finally:
             selector.close()
             for dev in devices:
-                dev.close()
+                try:
+                    dev.close()
+                except OSError:
+                    pass
 
 
 def make_backends(key_name):

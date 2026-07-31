@@ -1,5 +1,7 @@
 """Platform helpers and recording control flow of the dictation daemon."""
+import builtins
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -249,6 +251,164 @@ def test_evdev_keycode_resolves_documented_ptt_key_names():
     assert dictate.evdev_keycode("f9") == ecodes.KEY_F9
     assert dictate.evdev_keycode("KEY_RIGHTCTRL") == ecodes.KEY_RIGHTCTRL
     assert dictate.evdev_keycode("definitely_not_a_key") is None
+
+
+def test_failed_clipboard_write_prevents_the_paste(monkeypatch):
+    """A failed wl-copy must abort before Ctrl+V is synthesized.
+
+    Otherwise the paste inserts whatever was on the clipboard before — e.g. a
+    password — and the daemon reports a successful dictation.
+    """
+    pytest.importorskip("evdev")
+    injector = dictate.WaylandInjector()
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "wl-copy":
+            return subprocess.CompletedProcess(cmd, 1, b"", b"no wayland display")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="wl-copy failed"):
+        injector.insert("geheim")
+    assert "ydotool" not in calls  # never got as far as pasting
+
+
+def test_clipboard_restore_failure_is_only_logged(monkeypatch):
+    """The transcript is already inserted — a failed restore must not raise."""
+    pytest.importorskip("evdev")
+    injector = dictate.WaylandInjector()
+    writes = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "wl-paste":
+            return subprocess.CompletedProcess(cmd, 0, b"old clipboard", b"")
+        if cmd[0] == "wl-copy":
+            writes.append(kwargs.get("input"))
+            # succeed for the transcript, fail for the restore afterwards
+            code = 0 if len(writes) == 1 else 1
+            return subprocess.CompletedProcess(cmd, code, b"", b"gone")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("hallo")  # must not raise
+    assert writes == [b"hallo", b"old clipboard"]
+
+
+def test_keep_clipboard_skips_read_and_restore(monkeypatch):
+    pytest.importorskip("evdev")
+    monkeypatch.setenv("PTT_KEEP_CLIPBOARD", "1")
+    injector = dictate.WaylandInjector()
+    calls = []
+    monkeypatch.setattr(dictate.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd[0]) or
+                        subprocess.CompletedProcess(cmd, 0, b"", b""))
+    injector.insert("hallo")
+    assert calls == ["wl-copy", "ydotool"]  # no wl-paste, no second wl-copy
+
+
+def test_clipboard_settle_is_configurable(monkeypatch):
+    monkeypatch.setenv("PTT_CLIPBOARD_SETTLE", "1.5")
+    assert dictate._env_float("PTT_CLIPBOARD_SETTLE", 0.4) == 1.5
+
+
+def test_pynput_check_reports_missing_display_instead_of_raising(monkeypatch):
+    """Forcing the pynput backend on Wayland must explain itself, not traceback."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pynput":
+            raise ImportError("this platform is not supported: no DISPLAY")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    problem = dictate.PynputListener("ctrl_r").check()
+    assert problem and "PTT_BACKEND" in problem
+
+
+class FakeSelectorKey:
+    """Stands in for selectors.SelectorKey — only .fileobj is used."""
+
+    def __init__(self, fileobj):
+        self.fileobj = fileobj
+
+
+class FakeSelector:
+    """Minimal selectors.BaseSelector stand-in; every device is always ready."""
+
+    def __init__(self):
+        self.registered = {}
+        self.closed = False
+
+    def register(self, fileobj, _events):
+        self.registered[fileobj] = FakeSelectorKey(fileobj)
+
+    def unregister(self, fileobj):
+        del self.registered[fileobj]
+
+    def get_map(self):
+        return self.registered
+
+    def select(self):
+        return [(key, None) for key in list(self.registered.values())]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeInputDevice:
+    def __init__(self, path, reads):
+        self.path = path
+        self._reads = list(reads)  # each item: list of events, or an OSError
+        self.closed = False
+
+    def read(self):
+        if not self._reads:
+            raise OSError("no more data")
+        nxt = self._reads.pop(0)
+        if isinstance(nxt, OSError):
+            raise nxt
+        return nxt
+
+    def close(self):
+        self.closed = True
+
+
+def _key_event(code, value):
+    from evdev import ecodes
+    return type("Ev", (), {"type": ecodes.EV_KEY, "code": code, "value": value})()
+
+
+def test_evdev_lost_device_is_dropped_not_fatal(monkeypatch):
+    """Unplugging one keyboard must not take the daemon (and the model) down."""
+    pytest.importorskip("evdev")
+    import selectors
+
+    from evdev import ecodes
+    code = ecodes.KEY_RIGHTCTRL
+    gone = FakeInputDevice("/dev/input/event1",
+                           [[_key_event(code, 1), _key_event(code, 0)],
+                            OSError("device removed")])
+    survivor = FakeInputDevice("/dev/input/event2", [[_key_event(code, 1)]])
+
+    listener = dictate.EvdevListener("ctrl_r")
+    listener.code = code
+    monkeypatch.setattr(dictate.EvdevListener, "_keyboards",
+                        staticmethod(lambda: [gone, survivor]))
+    monkeypatch.setattr(selectors, "DefaultSelector", FakeSelector)
+
+    presses, releases = [], []
+    with pytest.raises(SystemExit):  # only once every keyboard is gone
+        listener.listen(lambda: presses.append(1), lambda: releases.append(1))
+
+    # The healthy device's press was still delivered after the other vanished.
+    assert len(presses) == 2
+    # One real release, plus one synthetic release per lost device (both fakes
+    # run dry here) so an interrupted hold never leaves a recording running.
+    assert len(releases) == 3
+    assert gone.closed and survivor.closed
 
 
 def test_wayland_socket_prefers_explicit_env(monkeypatch):

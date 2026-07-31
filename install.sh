@@ -94,6 +94,16 @@ if [ "$SESSION" = "wayland" ]; then
   command -v ydotool  >/dev/null || install_pkg ydotool
   command -v wl-copy  >/dev/null || install_pkg wl-clipboard
 
+  # The unit needs an absolute path, and ydotoold is not always in /usr/bin
+  # (a self-built one lands in /usr/local/bin). Resolve it instead of guessing,
+  # so a wrong path surfaces here rather than as a unit that fails to start.
+  YDOTOOLD="$(command -v ydotoold || true)"
+  if [ -z "$YDOTOOLD" ]; then
+    echo "ERROR: ydotoold not found in PATH after installing ydotool." >&2
+    echo "       Some distributions ship the daemon in a separate package." >&2
+    exit 1
+  fi
+
   # /dev/uinput is root-only by default; hand it to the 'input' group so
   # ydotoold can run as a user service instead of as root.
   rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
@@ -127,15 +137,18 @@ if [ "$SESSION" = "wayland" ]; then
 
   # Reading the PTT key from /dev/input needs the 'input' group. This also
   # grants the ability to observe all other keystrokes — see README.
-  if ! id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
-    echo "    adding $USER to the 'input' group"
-    $SUDO usermod -aG input "$USER"
+  # id -un rather than $USER: the latter is unset in some non-login shells,
+  # which would silently target the empty user name.
+  me="$(id -un)"
+  if ! id -nG "$me" | tr ' ' '\n' | grep -qx input; then
+    echo "    adding $me to the 'input' group"
+    $SUDO usermod -aG input "$me"
     NEEDS_LOGOUT=1
   fi
 
   mkdir -p "$UNIT_DIR"
-  sed "s|@DIR@|$DIR|g" "$DIR/systemd/ydotoold.service.in" \
-    > "$UNIT_DIR/ydotoold.service"
+  sed -e "s|@DIR@|$DIR|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
+    "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
 fi
 
 if [ "$OS" = "Darwin" ]; then

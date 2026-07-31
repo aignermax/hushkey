@@ -89,6 +89,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
+| `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 
 How to set them:
 
@@ -220,9 +221,14 @@ too just runs a second daemon.
   (as Administrator) unless the daemon itself runs elevated.
 - macOS: no CUDA — CPU transcription only; the daemon needs the privacy
   permissions listed above.
-- The PTT key is grabbed globally while the daemon runs — pick one you don't
-  otherwise use. (On macOS, `ctrl_r` may not exist on laptop keyboards; try
-  `f9` or `cmd_r`.)
+- **The PTT key is observed, not swallowed.** The daemon watches it globally but
+  does not consume the event, so the focused application still receives it —
+  taking the key exclusively would mean grabbing the whole keyboard. With the
+  default `ctrl_r` that is unnoticeable (a lone modifier does nothing), but a
+  key that *acts* on its own will do both jobs: `f9` still triggers whatever
+  `f9` does in the focused app, and `caps_lock` still toggles capitals. Prefer a
+  modifier, or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may
+  not exist on laptop keyboards; try `f9` or `cmd_r`.)
 - Transcription quality of names/jargon can be improved by switching to a
   larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`.
 - First run performs an unauthenticated Hugging Face model download (rate

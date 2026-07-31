@@ -35,7 +35,7 @@ for arg in "$@"; do
       if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then SUDO="sudo"; fi
       $SUDO rm -f /etc/udev/rules.d/99-whisper-ptt-uinput.rules
       $SUDO udevadm control --reload-rules
-      $SUDO gpasswd -d "$USER" input 2>/dev/null || true
+      $SUDO gpasswd -d "$(id -un)" input 2>/dev/null || true
       echo "udev rule and 'input' group membership removed (log out to apply)"
       ;;
   esac

@@ -5,7 +5,7 @@ Documentation=https://github.com/ReimuNotMoe/ydotool
 [Service]
 # Runs as the user, not root: the udev rule in udev/99-whisper-ptt-uinput.rules
 # gives the 'input' group rw on /dev/uinput, and the user is in that group.
-ExecStart=/usr/bin/ydotoold --socket-path=%t/.ydotool_socket --socket-perm=0600
+ExecStart=@YDOTOOLD@ --socket-path=%t/.ydotool_socket --socket-perm=0600
 Restart=on-failure
 RestartSec=3
 
