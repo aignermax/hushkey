@@ -69,6 +69,13 @@ def _env_float(name, default):
 TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 
+try:
+    from pynput.keyboard import Key
+    # control chars type as their keys, same as pynput's Controller.type()
+    _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
+except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
+    _CONTROL_KEYS = {}
+
 
 def log(msg):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -236,13 +243,11 @@ class DictationDaemon:
     def _type_text(self, text):
         # Type char-by-char with a small delay: heavy apps (Electron editors,
         # browsers) drop or reorder keystrokes fired at full speed.
-        from pynput.keyboard import Controller, Key
         if self.controller is None:
+            from pynput.keyboard import Controller
             self.controller = Controller()
-        # control chars type as their keys, same as pynput's Controller.type()
-        control = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
         for ch in text:
-            key = control.get(ch, ch)
+            key = _CONTROL_KEYS.get(ch, ch)
             self.controller.press(key)
             self.controller.release(key)
             if TYPE_DELAY:
