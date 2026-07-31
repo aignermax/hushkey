@@ -74,6 +74,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … any `pynput.keyboard.Key`) |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect |
+| `PTT_TYPE_DELAY` | `0.01` | Seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
 
 How to set them:
 

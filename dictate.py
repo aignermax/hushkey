@@ -17,6 +17,9 @@ Config via environment:
   PTT_KEY          pynput key name (default: ctrl_r; e.g. f9, caps_lock)
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
+  PTT_TYPE_DELAY   seconds between typed characters (default: 0.01); heavy
+                   editors drop/reorder fast synthetic keystrokes — raise it
+                   (e.g. 0.03) if dictation arrives garbled
 
 Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
 Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -52,7 +56,25 @@ def _state_dir():
 STATE_DIR = _state_dir()
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
+
+
+def _env_float(name, default):
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
+TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
+
+try:
+    from pynput.keyboard import Key
+    # control chars type as their keys, same as pynput's Controller.type()
+    _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
+except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
+    _CONTROL_KEYS = {}
 
 
 def log(msg):
@@ -208,10 +230,7 @@ class DictationDaemon:
                     notify("dictation", "nothing recognized")
                     return
                 time.sleep(0.15)  # let the modifier release settle
-                if self.controller is None:
-                    from pynput.keyboard import Controller
-                    self.controller = Controller()
-                self.controller.type(text + " ")  # space separates dictations
+                self._type_text(text + " ")  # space separates dictations
             except Exception as exc:
                 log(f"ERROR: {exc}")
                 notify("dictation error", str(exc)[:80])
@@ -220,6 +239,19 @@ class DictationDaemon:
                     os.remove(wav)
                 except OSError:
                     pass
+
+    def _type_text(self, text):
+        # Type char-by-char with a small delay: heavy apps (Electron editors,
+        # browsers) drop or reorder keystrokes fired at full speed.
+        if self.controller is None:
+            from pynput.keyboard import Controller
+            self.controller = Controller()
+        for ch in text:
+            key = _CONTROL_KEYS.get(ch, ch)
+            self.controller.press(key)
+            self.controller.release(key)
+            if TYPE_DELAY:
+                time.sleep(TYPE_DELAY)
 
     def run(self):
         from pynput import keyboard

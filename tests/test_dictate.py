@@ -114,6 +114,59 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
     assert seen["wav"] == wav
 
 
+def test_typing_paces_each_character(monkeypatch, tmp_path):
+    d, _, _ = make_daemon(monkeypatch, tmp_path)
+    events, sleeps = [], []
+
+    class FakeController:
+        def press(self, ch):
+            events.append(("down", ch))
+
+        def release(self, ch):
+            events.append(("up", ch))
+
+    d.controller = FakeController()
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0.02)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
+    d._type_text("ab ")
+    assert events == [("down", "a"), ("up", "a"),
+                      ("down", "b"), ("up", "b"),
+                      ("down", " "), ("up", " ")]
+    assert sleeps == [0.02] * 3
+
+
+def test_typing_maps_control_chars_to_keys(monkeypatch, tmp_path):
+    d, _, _ = make_daemon(monkeypatch, tmp_path)
+    events = []
+
+    class FakeController:
+        def press(self, ch):
+            events.append(("down", ch))
+
+        def release(self, ch):
+            events.append(("up", ch))
+
+    d.controller = FakeController()
+    monkeypatch.setattr(dictate, "_CONTROL_KEYS",
+                        {"\n": "<enter>", "\t": "<tab>"})
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    d._type_text("a\nb\t")
+    assert events == [("down", "a"), ("up", "a"),
+                      ("down", "<enter>"), ("up", "<enter>"),
+                      ("down", "b"), ("up", "b"),
+                      ("down", "<tab>"), ("up", "<tab>")]
+
+
+def test_env_float_parsing(monkeypatch):
+    monkeypatch.setenv("PTT_TYPE_DELAY", "0.02")
+    assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.02
+    for bad in ("bogus", "", "-1", "nan", "inf"):
+        monkeypatch.setenv("PTT_TYPE_DELAY", bad)
+        assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
+    monkeypatch.delenv("PTT_TYPE_DELAY")
+    assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
+
+
 def test_missing_backend_does_not_crash(monkeypatch):
     monkeypatch.setattr(dictate, "pick_recorder", lambda: None)
     notes = []
