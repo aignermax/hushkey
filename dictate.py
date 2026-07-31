@@ -17,6 +17,9 @@ Config via environment:
   PTT_KEY          pynput key name (default: ctrl_r; e.g. f9, caps_lock)
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
+  PTT_TYPE_DELAY   seconds between typed characters (default: 0.01); heavy
+                   editors drop/reorder fast synthetic keystrokes — raise it
+                   (e.g. 0.03) if dictation arrives garbled
 
 Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
 Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
@@ -52,6 +55,10 @@ def _state_dir():
 STATE_DIR = _state_dir()
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
+try:
+    TYPE_DELAY = float(os.environ.get("PTT_TYPE_DELAY", "0.01"))
+except ValueError:
+    TYPE_DELAY = 0.01
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 
 
@@ -208,10 +215,7 @@ class DictationDaemon:
                     notify("dictation", "nothing recognized")
                     return
                 time.sleep(0.15)  # let the modifier release settle
-                if self.controller is None:
-                    from pynput.keyboard import Controller
-                    self.controller = Controller()
-                self.controller.type(text + " ")  # space separates dictations
+                self._type_text(text + " ")  # space separates dictations
             except Exception as exc:
                 log(f"ERROR: {exc}")
                 notify("dictation error", str(exc)[:80])
@@ -220,6 +224,18 @@ class DictationDaemon:
                     os.remove(wav)
                 except OSError:
                     pass
+
+    def _type_text(self, text):
+        # Type char-by-char with a small delay: heavy apps (Electron editors,
+        # browsers) drop or reorder keystrokes fired at full speed.
+        if self.controller is None:
+            from pynput.keyboard import Controller
+            self.controller = Controller()
+        for ch in text:
+            self.controller.press(ch)
+            self.controller.release(ch)
+            if TYPE_DELAY:
+                time.sleep(TYPE_DELAY)
 
     def run(self):
         from pynput import keyboard
