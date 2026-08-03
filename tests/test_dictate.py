@@ -1,5 +1,7 @@
 """Platform helpers and recording control flow of the dictation daemon."""
+import builtins
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -14,6 +16,18 @@ def isolated_log(monkeypatch, tmp_path):
     """Keep tests out of the real operational log."""
     monkeypatch.setattr(dictate, "STATE_DIR", str(tmp_path))
     monkeypatch.setattr(dictate, "LOG_PATH", str(tmp_path / "dictate.log"))
+
+
+@pytest.fixture(autouse=True)
+def pinned_backend(monkeypatch):
+    """Pin the backend so results don't depend on the developer's session.
+
+    Without this, DictationDaemon() picks evdev+ydotool when the suite happens
+    to run inside a Wayland session, and the pynput assertions below would be
+    testing a backend that isn't in use. The backend choice itself is covered
+    by the dedicated tests further down.
+    """
+    monkeypatch.setenv("PTT_BACKEND", "pynput")
 
 
 def test_state_dir_linux(monkeypatch):
@@ -106,7 +120,7 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
         seen["wav"] = w
         done.set()
 
-    monkeypatch.setattr(d, "_transcribe_and_type", fake_transcribe)
+    monkeypatch.setattr(d, "_transcribe_and_insert", fake_transcribe)
     d.start_recording()
     d.recording = time.time() - 1.0  # pretend the key was held for 1 s
     d.stop_recording()
@@ -114,47 +128,63 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
     assert seen["wav"] == wav
 
 
-def test_typing_paces_each_character(monkeypatch, tmp_path):
-    d, _, _ = make_daemon(monkeypatch, tmp_path)
-    events, sleeps = [], []
+class FakeController:
+    def __init__(self):
+        self.events = []
 
-    class FakeController:
-        def press(self, ch):
-            events.append(("down", ch))
+    def press(self, ch):
+        self.events.append(("down", ch))
 
-        def release(self, ch):
-            events.append(("up", ch))
+    def release(self, ch):
+        self.events.append(("up", ch))
 
-    d.controller = FakeController()
+
+def test_typing_paces_each_character(monkeypatch):
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
+    sleeps = []
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0.02)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
-    d._type_text("ab ")
-    assert events == [("down", "a"), ("up", "a"),
-                      ("down", "b"), ("up", "b"),
-                      ("down", " "), ("up", " ")]
+    injector.insert("ab ")
+    assert injector.controller.events == [("down", "a"), ("up", "a"),
+                                          ("down", "b"), ("up", "b"),
+                                          ("down", " "), ("up", " ")]
     assert sleeps == [0.02] * 3
 
 
-def test_typing_maps_control_chars_to_keys(monkeypatch, tmp_path):
-    d, _, _ = make_daemon(monkeypatch, tmp_path)
-    events = []
-
-    class FakeController:
-        def press(self, ch):
-            events.append(("down", ch))
-
-        def release(self, ch):
-            events.append(("up", ch))
-
-    d.controller = FakeController()
+def test_typing_maps_control_chars_to_keys(monkeypatch):
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
     monkeypatch.setattr(dictate, "_CONTROL_KEYS",
                         {"\n": "<enter>", "\t": "<tab>"})
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
-    d._type_text("a\nb\t")
-    assert events == [("down", "a"), ("up", "a"),
-                      ("down", "<enter>"), ("up", "<enter>"),
-                      ("down", "b"), ("up", "b"),
-                      ("down", "<tab>"), ("up", "<tab>")]
+    injector.insert("a\nb\t")
+    assert injector.controller.events == [("down", "a"), ("up", "a"),
+                                          ("down", "<enter>"), ("up", "<enter>"),
+                                          ("down", "b"), ("up", "b"),
+                                          ("down", "<tab>"), ("up", "<tab>")]
+
+
+def test_daemon_inserts_via_the_selected_injector(monkeypatch, tmp_path):
+    """The daemon must delegate insertion, not type directly.
+
+    Guards the seam the Wayland backend hangs off: on Wayland the transcript
+    goes through the clipboard, so the daemon may not reach for pynput itself.
+    """
+    d, _, wav = make_daemon(monkeypatch, tmp_path)
+    inserted = []
+
+    class FakeModel:
+        def transcribe(self, *a, **k):
+            class Seg:
+                text = "hallo welt"
+            return [Seg()], None
+
+    d.model = FakeModel()
+    d.injector = type("I", (), {"insert": lambda _self, t: inserted.append(t)})()
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    d._transcribe_and_insert(wav, 1.0)
+    assert inserted == ["hallo welt "]  # trailing space separates dictations
 
 
 def test_env_float_parsing(monkeypatch):
@@ -165,6 +195,233 @@ def test_env_float_parsing(monkeypatch):
         assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
     monkeypatch.delenv("PTT_TYPE_DELAY")
     assert dictate._env_float("PTT_TYPE_DELAY", 0.01) == 0.01
+
+
+def test_backend_defaults_to_session_type(monkeypatch):
+    monkeypatch.delenv("PTT_BACKEND")  # set by the pinned_backend fixture
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    assert dictate.backend_name() == "wayland"
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    assert dictate.backend_name() == "pynput"
+    monkeypatch.delenv("XDG_SESSION_TYPE")  # Windows/macOS have no such variable
+    assert dictate.backend_name() == "pynput"
+
+
+def test_ptt_backend_overrides_session_and_accepts_x11_alias(monkeypatch):
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    monkeypatch.setenv("PTT_BACKEND", "x11")  # documented by earlier versions
+    assert dictate.backend_name() == "pynput"
+    monkeypatch.setenv("PTT_BACKEND", "pynput")
+    assert dictate.backend_name() == "pynput"
+    monkeypatch.delenv("XDG_SESSION_TYPE")
+    monkeypatch.setenv("PTT_BACKEND", "wayland")
+    assert dictate.backend_name() == "wayland"
+
+
+def test_make_backends_pairs_listener_and_injector(monkeypatch):
+    listener, injector = dictate.make_backends("ctrl_r")
+    assert isinstance(listener, dictate.PynputListener)
+    assert isinstance(injector, dictate.PynputInjector)
+    monkeypatch.setenv("PTT_BACKEND", "wayland")
+    listener, injector = dictate.make_backends("ctrl_r")
+    assert isinstance(listener, dictate.EvdevListener)
+    assert isinstance(injector, dictate.WaylandInjector)
+
+
+def test_paste_chord_presses_then_releases_in_reverse():
+    pytest.importorskip("evdev")  # Linux-only dependency
+    from evdev import ecodes
+    args = dictate.WaylandInjector._build_chord("ctrl+shift+v")
+    ctrl, shift, v = ecodes.KEY_LEFTCTRL, ecodes.KEY_LEFTSHIFT, ecodes.KEY_V
+    assert args == [f"{ctrl}:1", f"{shift}:1", f"{v}:1",
+                    f"{v}:0", f"{shift}:0", f"{ctrl}:0"]
+
+
+def test_paste_chord_rejects_garbage():
+    pytest.importorskip("evdev")
+    for bad in ("ctrl+nosuchkey", "", "+"):
+        with pytest.raises(ValueError):
+            dictate.WaylandInjector._build_chord(bad)
+
+
+def test_evdev_keycode_resolves_documented_ptt_key_names():
+    pytest.importorskip("evdev")
+    from evdev import ecodes
+    assert dictate.evdev_keycode("ctrl_r") == ecodes.KEY_RIGHTCTRL
+    assert dictate.evdev_keycode("f9") == ecodes.KEY_F9
+    assert dictate.evdev_keycode("KEY_RIGHTCTRL") == ecodes.KEY_RIGHTCTRL
+    assert dictate.evdev_keycode("definitely_not_a_key") is None
+
+
+def test_failed_clipboard_write_prevents_the_paste(monkeypatch):
+    """A failed wl-copy must abort before Ctrl+V is synthesized.
+
+    Otherwise the paste inserts whatever was on the clipboard before — e.g. a
+    password — and the daemon reports a successful dictation.
+    """
+    pytest.importorskip("evdev")
+    injector = dictate.WaylandInjector()
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "wl-copy":
+            return subprocess.CompletedProcess(cmd, 1, b"", b"no wayland display")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="wl-copy failed"):
+        injector.insert("geheim")
+    assert "ydotool" not in calls  # never got as far as pasting
+
+
+def test_clipboard_restore_failure_is_only_logged(monkeypatch):
+    """The transcript is already inserted — a failed restore must not raise."""
+    pytest.importorskip("evdev")
+    injector = dictate.WaylandInjector()
+    writes = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "wl-paste":
+            return subprocess.CompletedProcess(cmd, 0, b"old clipboard", b"")
+        if cmd[0] == "wl-copy":
+            writes.append(kwargs.get("input"))
+            # succeed for the transcript, fail for the restore afterwards
+            code = 0 if len(writes) == 1 else 1
+            return subprocess.CompletedProcess(cmd, code, b"", b"gone")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("hallo")  # must not raise
+    assert writes == [b"hallo", b"old clipboard"]
+
+
+def test_keep_clipboard_skips_read_and_restore(monkeypatch):
+    pytest.importorskip("evdev")
+    monkeypatch.setenv("PTT_KEEP_CLIPBOARD", "1")
+    injector = dictate.WaylandInjector()
+    calls = []
+    monkeypatch.setattr(dictate.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd[0]) or
+                        subprocess.CompletedProcess(cmd, 0, b"", b""))
+    injector.insert("hallo")
+    assert calls == ["wl-copy", "ydotool"]  # no wl-paste, no second wl-copy
+
+
+def test_clipboard_settle_is_configurable(monkeypatch):
+    monkeypatch.setenv("PTT_CLIPBOARD_SETTLE", "1.5")
+    assert dictate._env_float("PTT_CLIPBOARD_SETTLE", 0.4) == 1.5
+
+
+def test_pynput_check_reports_missing_display_instead_of_raising(monkeypatch):
+    """Forcing the pynput backend on Wayland must explain itself, not traceback."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pynput":
+            raise ImportError("this platform is not supported: no DISPLAY")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    problem = dictate.PynputListener("ctrl_r").check()
+    assert problem and "PTT_BACKEND" in problem
+
+
+class FakeSelectorKey:
+    """Stands in for selectors.SelectorKey — only .fileobj is used."""
+
+    def __init__(self, fileobj):
+        self.fileobj = fileobj
+
+
+class FakeSelector:
+    """Minimal selectors.BaseSelector stand-in; every device is always ready."""
+
+    def __init__(self):
+        self.registered = {}
+        self.closed = False
+
+    def register(self, fileobj, _events):
+        self.registered[fileobj] = FakeSelectorKey(fileobj)
+
+    def unregister(self, fileobj):
+        del self.registered[fileobj]
+
+    def get_map(self):
+        return self.registered
+
+    def select(self):
+        return [(key, None) for key in list(self.registered.values())]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeInputDevice:
+    def __init__(self, path, reads):
+        self.path = path
+        self._reads = list(reads)  # each item: list of events, or an OSError
+        self.closed = False
+
+    def read(self):
+        if not self._reads:
+            raise OSError("no more data")
+        nxt = self._reads.pop(0)
+        if isinstance(nxt, OSError):
+            raise nxt
+        return nxt
+
+    def close(self):
+        self.closed = True
+
+
+def _key_event(code, value):
+    from evdev import ecodes
+    return type("Ev", (), {"type": ecodes.EV_KEY, "code": code, "value": value})()
+
+
+def test_evdev_lost_device_is_dropped_not_fatal(monkeypatch):
+    """Unplugging one keyboard must not take the daemon (and the model) down."""
+    pytest.importorskip("evdev")
+    import selectors
+
+    from evdev import ecodes
+    code = ecodes.KEY_RIGHTCTRL
+    gone = FakeInputDevice("/dev/input/event1",
+                           [[_key_event(code, 1), _key_event(code, 0)],
+                            OSError("device removed")])
+    survivor = FakeInputDevice("/dev/input/event2", [[_key_event(code, 1)]])
+
+    listener = dictate.EvdevListener("ctrl_r")
+    listener.code = code
+    monkeypatch.setattr(dictate.EvdevListener, "_keyboards",
+                        staticmethod(lambda: [gone, survivor]))
+    monkeypatch.setattr(selectors, "DefaultSelector", FakeSelector)
+
+    presses, releases = [], []
+    with pytest.raises(SystemExit):  # only once every keyboard is gone
+        listener.listen(lambda: presses.append(1), lambda: releases.append(1))
+
+    # The healthy device's press was still delivered after the other vanished.
+    assert len(presses) == 2
+    # One real release, plus one synthetic release per lost device (both fakes
+    # run dry here) so an interrupted hold never leaves a recording running.
+    assert len(releases) == 3
+    assert gone.closed and survivor.closed
+
+
+def test_wayland_socket_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("YDOTOOL_SOCKET", "/run/custom.sock")
+    assert dictate.WaylandInjector._socket_path() == "/run/custom.sock"
+    monkeypatch.delenv("YDOTOOL_SOCKET")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    # os.path.join, so the separator is the host's — this asserts the lookup
+    # order, not the spelling. The path itself is only ever used on Linux.
+    assert dictate.WaylandInjector._socket_path() == os.path.join(
+        "/run/user/1000", ".ydotool_socket")
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert dictate.WaylandInjector._socket_path() is None
 
 
 def test_missing_backend_does_not_crash(monkeypatch):
