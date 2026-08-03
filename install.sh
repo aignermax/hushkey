@@ -11,6 +11,7 @@ OS="$(uname -s)"
 # Only meaningful on Linux; stays empty elsewhere so the Wayland paths are skipped.
 SESSION=""
 NEEDS_LOGOUT=0
+YDOTOOLD_UNIT=""  # set in the Wayland branch; "" elsewhere keeps set -u happy
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
@@ -94,16 +95,6 @@ if [ "$SESSION" = "wayland" ]; then
   command -v ydotool  >/dev/null || install_pkg ydotool
   command -v wl-copy  >/dev/null || install_pkg wl-clipboard
 
-  # The unit needs an absolute path, and ydotoold is not always in /usr/bin
-  # (a self-built one lands in /usr/local/bin). Resolve it instead of guessing,
-  # so a wrong path surfaces here rather than as a unit that fails to start.
-  YDOTOOLD="$(command -v ydotoold || true)"
-  if [ -z "$YDOTOOLD" ]; then
-    echo "ERROR: ydotoold not found in PATH after installing ydotool." >&2
-    echo "       Some distributions ship the daemon in a separate package." >&2
-    exit 1
-  fi
-
   # /dev/uinput is root-only by default; hand it to the 'input' group so
   # ydotoold can run as a user service instead of as root.
   rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
@@ -146,9 +137,41 @@ if [ "$SESSION" = "wayland" ]; then
     NEEDS_LOGOUT=1
   fi
 
+  # Prefer the distribution's own ydotool.service when it ships one.
+  #
+  # ydotoold's default socket path is already $XDG_RUNTIME_DIR/.ydotool_socket —
+  # exactly what our unit would pin — so the packaged unit and ours do not
+  # coexist: whichever loses the race dies with "Another ydotoold is running
+  # with the same socket" and, with Restart=on-failure, retries forever. Debian
+  # enables its unit by preset, so it normally wins and ours crash-loops in the
+  # background while dictation appears to work.
   mkdir -p "$UNIT_DIR"
-  sed -e "s|@DIR@|$DIR|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
-    "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
+  if systemctl --user list-unit-files ydotool.service --no-legend 2>/dev/null \
+      | grep -q '^ydotool\.service'; then
+    YDOTOOLD_UNIT=ydotool.service
+    echo "    using the distribution's ydotool.service (same socket path)"
+    if [ -f "$UNIT_DIR/ydotoold.service" ]; then
+      # An earlier run of this installer left ours behind; it is redundant and
+      # would keep crash-looping against the packaged one.
+      systemctl --user disable --now ydotoold.service 2>/dev/null || true
+      rm -f "$UNIT_DIR/ydotoold.service"
+      echo "    removed our redundant ydotoold.service"
+    fi
+  else
+    YDOTOOLD_UNIT=ydotoold.service
+    # The unit needs an absolute path, and ydotoold is not always in /usr/bin
+    # (a self-built one lands in /usr/local/bin). Resolve it rather than guess,
+    # so a wrong path surfaces here instead of as a unit that fails to start.
+    YDOTOOLD="$(command -v ydotoold || true)"
+    if [ -z "$YDOTOOLD" ]; then
+      echo "ERROR: ydotoold not found in PATH after installing ydotool." >&2
+      echo "       Some distributions ship the daemon in a separate package." >&2
+      exit 1
+    fi
+    echo "    installing our own ydotoold.service ($YDOTOOLD)"
+    sed -e "s|@DIR@|$DIR|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
+      "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
+  fi
 fi
 
 if [ "$OS" = "Darwin" ]; then
@@ -173,9 +196,11 @@ else
   systemctl --user daemon-reload
 
   if [ "$SESSION" = "wayland" ]; then
-    systemctl --user enable ydotoold.service
+    systemctl --user enable "$YDOTOOLD_UNIT"
     if [ "$NEEDS_LOGOUT" -eq 0 ]; then
-      systemctl --user restart ydotoold.service
+      # start rather than restart: the packaged unit may already be serving the
+      # socket, and bouncing it would drop it for anything else using ydotool.
+      systemctl --user start "$YDOTOOLD_UNIT"
     fi
   fi
 

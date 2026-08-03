@@ -200,11 +200,18 @@ layout-stable paste chord is synthesized.
 > inherent to doing this on Wayland at all, not specific to this tool — but only
 > set it up on a machine you trust. `./uninstall.sh --purge-system` reverts both.
 
-The Debian/Ubuntu `ydotool` package ships its own `ydotool.service` user unit,
-which starts `ydotoold` on the *default* socket path. We install a separate
-`ydotoold.service` that pins the socket to `$XDG_RUNTIME_DIR/.ydotool_socket`,
-so both sides agree on one path. Leave the packaged unit disabled — enabling it
-too just runs a second daemon.
+**One ydotoold, not two.** `ydotoold`'s default socket path already *is*
+`$XDG_RUNTIME_DIR/.ydotool_socket`, so a second unit pinning that path does not
+coexist with the first — the loser exits with `Another ydotoold is running with
+the same socket` and, under `Restart=on-failure`, retries forever. Debian/Ubuntu
+ship `ydotool.service` and enable it by preset, so it normally wins while the
+duplicate crash-loops in the background; dictation keeps working, which is what
+makes this easy to miss.
+
+The installer therefore uses the packaged `ydotool.service` when the
+distribution provides one, and only installs its own `ydotoold.service`
+(socket path and permissions pinned explicitly) when there is none. If a
+previous run left a redundant unit behind, re-running `./install.sh` removes it.
 
 ## Limitations
 
