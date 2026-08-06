@@ -34,6 +34,12 @@ SHIMMED = [
     "nvidia-smi", "ydotool", "ydotoold", "wl-copy", "wl-paste", "pw-record",
 ]
 
+# uname is shimmed too, so the Linux paths are exercised on every runner
+# including macOS — otherwise CI would only ever check the launchd branch there.
+UNAME_SHIM = """#!/usr/bin/env bash
+echo "${FAKE_UNAME:-Linux}"
+"""
+
 SHIM = """#!/usr/bin/env bash
 printf '%s' "$(basename "$0")" >> "$SHIM_LOG"
 for a in "$@"; do printf ' %s' "$a" >> "$SHIM_LOG"; done
@@ -77,6 +83,7 @@ def sandbox(tmp_path):
 
     for name in SHIMMED:
         _write_exec(bindir / name, SYSTEMCTL_SHIM if name == "systemctl" else SHIM)
+    _write_exec(bindir / "uname", UNAME_SHIM)
 
     # A pre-made venv: install.sh skips creation (and thus pip) when the
     # interpreter is already executable, which keeps this test fast and offline.
@@ -100,10 +107,11 @@ def sandbox(tmp_path):
             "units": home / ".config/systemd/user"}
 
 
-def run_installer(sandbox, session_type, packaged_ydotool="0"):
+def run_installer(sandbox, session_type, packaged_ydotool="0", uname="Linux"):
     env = dict(sandbox["env"])
     env["XDG_SESSION_TYPE"] = session_type
     env["FAKE_PACKAGED_YDOTOOL"] = packaged_ydotool
+    env["FAKE_UNAME"] = uname
     proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
                           env=env, capture_output=True, text=True, timeout=180)
     return proc, sandbox["log"].read_text()
@@ -191,12 +199,19 @@ def test_main_unit_is_always_written_and_substituted(sandbox):
 
 def test_unsupported_os_is_rejected(sandbox):
     """The OS gate: anything that is not Linux or Darwin must not proceed."""
-    env = dict(sandbox["env"])
-    env["XDG_SESSION_TYPE"] = "wayland"
-    env["FAKE_PACKAGED_YDOTOOL"] = "0"
-    uname = sandbox["repo"].parent / "shims/uname"
-    _write_exec(uname, "#!/usr/bin/env bash\necho FreeBSD\n")
-    proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
-                          env=env, capture_output=True, text=True, timeout=60)
+    proc, _ = run_installer(sandbox, "wayland", uname="FreeBSD")
     assert proc.returncode != 0
     assert "unsupported OS" in proc.stdout + proc.stderr
+
+
+def test_macos_installs_a_launchd_agent_and_no_wayland_bits(sandbox):
+    """Darwin takes the launchd branch and must not touch any Linux setup."""
+    proc, log = run_installer(sandbox, "", uname="Darwin")
+    assert proc.returncode == 0, proc.stderr
+    plist = sandbox["home"] / "Library/LaunchAgents/com.whisper-ptt.plist"
+    assert plist.exists()
+    content = plist.read_text()
+    assert "@DIR@" not in content and "@HOME@" not in content
+    assert "launchctl bootstrap" in log
+    assert not (sandbox["units"] / "ydotoold.service").exists()
+    assert "usermod" not in log and "udevadm" not in log

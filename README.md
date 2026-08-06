@@ -90,6 +90,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
+| `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
 
@@ -186,6 +187,17 @@ membership in the `input` group.
 **Inserting the text.** Clients cannot synthesize input either. `ydotool`
 creates a virtual keyboard through `/dev/uinput`, which is a kernel device — the
 compositor sees an ordinary keyboard and accepts the event.
+
+**Why `wl-copy` is started and then let go.** Under Wayland the client offering
+a selection *is* its owner for as long as the content stays on the clipboard, so
+`wl-copy` cannot exit — it has to keep running. Waiting for it therefore blocks
+until some other client takes over, which may be never. Worse, waiting *with a
+timeout* kills it on the way out, and a killed owner leaves the compositor
+referring to a dead client: from then on every clipboard operation in the
+session hangs, system-wide, until you log out. So the daemon starts `wl-copy`,
+writes the transcript, checks it is still alive (an instant exit means the text
+never made it) and then leaves it alone. This is also why `PTT_CMD_TIMEOUT` does
+not apply to it.
 
 **Why the clipboard, and not just typing it out.** `ydotool type` maps
 characters to Linux keycodes assuming a US layout. On a German (`de`) keymap

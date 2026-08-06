@@ -42,6 +42,8 @@ Config via environment:
   PTT_CLIPBOARD_SETTLE  Wayland: seconds to wait before restoring the previous
                    clipboard (default: 0.4); raise it if a slow app ends up
                    pasting the restored value instead of the transcript
+  PTT_CMD_TIMEOUT  seconds a helper (wl-paste, ydotool) may take before it is
+                   given up on (default: 30; 0 = wait indefinitely)
 
 Run:  .venv/bin/python dictate.py        (usually via service/scheduled task)
 Stop: Ctrl-C, or stop the service (systemctl / Task Scheduler / launchctl)
@@ -92,6 +94,13 @@ MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 # Let the focused app fetch the selection before the clipboard is handed back.
 # Configurable because the right value depends on how fast that app reacts.
 CLIPBOARD_SETTLE = _env_float("PTT_CLIPBOARD_SETTLE", 0.4)
+# How long to let wl-copy prove it survived long enough to own the clipboard.
+CLIPBOARD_HANDOFF = _env_float("PTT_CLIPBOARD_HANDOFF", 0.2)
+# Upper bound for helpers we genuinely have to wait for (wl-paste, ydotool).
+# Not wl-copy — see _clipboard_write. Unbounded waits would wedge the daemon for
+# the rest of the session, but the old 5 s was tight enough to drop real
+# dictations, so this is deliberately generous. 0 removes the limit entirely.
+CMD_TIMEOUT = _env_float("PTT_CMD_TIMEOUT", 30) or None
 
 try:
     from pynput.keyboard import Key
@@ -263,6 +272,7 @@ class WaylandInjector:
         self.chord = os.environ.get("PTT_PASTE_KEY", "ctrl+v")
         self.keep_clipboard = os.environ.get("PTT_KEEP_CLIPBOARD") == "1"
         self._chord_args = None
+        self._copy_proc = None  # the wl-copy currently owning the clipboard
 
     @staticmethod
     def _socket_path():
@@ -333,27 +343,64 @@ class WaylandInjector:
         try:
             out = subprocess.run(
                 ["wl-paste", "--no-newline", "--type", "text/plain"],
-                capture_output=True, timeout=5)
+                capture_output=True, timeout=CMD_TIMEOUT)
             return out.stdout if out.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
+            # Includes the timeout case. wl-paste is not a selection owner, so
+            # run() killing it here harms nothing.
             return None
 
     def _clipboard_write(self, data: bytes):
-        """Put bytes on the clipboard, raising if wl-copy did not take them.
+        """Hand the bytes to wl-copy and leave it running.
 
-        The failure must propagate: insert() synthesizes a paste right after,
-        so a silently-failed write would paste whatever was on the clipboard
-        before — the user sees text appear and has no reason to distrust it,
-        while the log records a successful dictation. Leaking the previous
-        clipboard (a password, say) into the focused window that way is far
-        worse than a visible error.
+        wl-copy is not allowed to exit: under Wayland the client offering a
+        selection *is* its owner for as long as the content stays on the
+        clipboard. So waiting for it to finish (subprocess.run) blocks until
+        some other client takes ownership — which may be never — and a
+        run(timeout=...) makes it worse, because run() kills the process on the
+        way out. Killing the owner leaves the compositor pointing at a dead
+        client, and from then on every clipboard operation in the session hangs,
+        not just ours. Start it, feed it, let go.
+
+        --foreground keeps *this* process the owner instead of a fork of it, so
+        poll() below actually tells us whether the handoff worked.
+
+        Failure still has to propagate: insert() synthesizes a paste right
+        after, so a silently-failed write would paste whatever was on the
+        clipboard before — a copied password, say — while the log records a
+        successful dictation.
         """
-        out = subprocess.run(["wl-copy", "--type", "text/plain"], input=data,
-                             timeout=5, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.PIPE)
-        if out.returncode != 0:
-            detail = out.stderr.decode("utf-8", "replace").strip()
-            raise RuntimeError(f"wl-copy failed: {detail or out.returncode}")
+        self._release_previous_owner()
+        try:
+            proc = subprocess.Popen(
+                ["wl-copy", "--foreground", "--type", "text/plain"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            raise RuntimeError(f"cannot start wl-copy: {exc}") from exc
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except OSError as exc:
+            raise RuntimeError(f"wl-copy would not take the text: {exc}") from exc
+        # An immediate exit means it never became the owner (no compositor, bad
+        # arguments), and pasting now would insert the previous contents.
+        time.sleep(CLIPBOARD_HANDOFF)
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"wl-copy exited straight away (status {proc.returncode}) — "
+                "the transcript is not on the clipboard")
+        self._copy_proc = proc
+
+    def _release_previous_owner(self):
+        """Stop tracking the last wl-copy, without killing it.
+
+        The new wl-copy takes ownership and the old one then exits by itself.
+        Terminating it here is exactly the mistake described above.
+        """
+        proc, self._copy_proc = self._copy_proc, None
+        if proc is not None:
+            proc.poll()  # reap if it already exited; never signal it
 
     def insert(self, text):
         if self._chord_args is None:
@@ -364,8 +411,9 @@ class WaylandInjector:
             env["YDOTOOL_SOCKET"] = socket  # keep client and daemon in sync
         previous = None if self.keep_clipboard else self._clipboard_read()
         self._clipboard_write(text.encode("utf-8"))
-        subprocess.run(["ydotool", "key"] + self._chord_args, timeout=10,
-                       env=env, stdout=subprocess.DEVNULL,
+        subprocess.run(["ydotool", "key"] + self._chord_args,
+                       timeout=CMD_TIMEOUT, env=env,
+                       stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=True)
         if previous is not None:
             # Best effort: the paste is asynchronous, so give the focused app

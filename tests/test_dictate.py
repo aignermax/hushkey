@@ -253,60 +253,138 @@ def test_evdev_keycode_resolves_documented_ptt_key_names():
     assert dictate.evdev_keycode("definitely_not_a_key") is None
 
 
-def test_failed_clipboard_write_prevents_the_paste(monkeypatch):
-    """A failed wl-copy must abort before Ctrl+V is synthesized.
+class FakeCopyProc:
+    """A wl-copy stand-in. alive=False models one that exited immediately."""
 
-    Otherwise the paste inserts whatever was on the clipboard before — e.g. a
-    password — and the daemon reports a successful dictation.
-    """
+    def __init__(self, alive=True, returncode=1):
+        self._alive = alive
+        self.returncode = None if alive else returncode
+        self.written = b""
+        self.signalled = []
+        self.stdin = self
+
+    # -- stdin file object --
+    def write(self, data):
+        self.written += data
+
+    def close(self):
+        pass
+
+    # -- process --
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.signalled.append("kill")
+
+    def terminate(self):
+        self.signalled.append("terminate")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+@pytest.fixture
+def wayland(monkeypatch):
+    """A WaylandInjector whose helpers are all faked, with a call log."""
     pytest.importorskip("evdev")
-    injector = dictate.WaylandInjector()
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd[0])
-        if cmd[0] == "wl-copy":
-            return subprocess.CompletedProcess(cmd, 1, b"", b"no wayland display")
-        return subprocess.CompletedProcess(cmd, 0, b"", b"")
-
-    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="wl-copy failed"):
-        injector.insert("geheim")
-    assert "ydotool" not in calls  # never got as far as pasting
-
-
-def test_clipboard_restore_failure_is_only_logged(monkeypatch):
-    """The transcript is already inserted — a failed restore must not raise."""
-    pytest.importorskip("evdev")
-    injector = dictate.WaylandInjector()
-    writes = []
-
-    def fake_run(cmd, **kwargs):
-        if cmd[0] == "wl-paste":
-            return subprocess.CompletedProcess(cmd, 0, b"old clipboard", b"")
-        if cmd[0] == "wl-copy":
-            writes.append(kwargs.get("input"))
-            # succeed for the transcript, fail for the restore afterwards
-            code = 0 if len(writes) == 1 else 1
-            return subprocess.CompletedProcess(cmd, code, b"", b"gone")
-        return subprocess.CompletedProcess(cmd, 0, b"", b"")
-
-    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
-    injector.insert("hallo")  # must not raise
-    assert writes == [b"hallo", b"old clipboard"]
+    state = {"calls": [], "procs": [], "paste": b"old clipboard",
+             "copy_alive": True}
+
+    def fake_popen(cmd, **kwargs):
+        state["calls"].append(cmd[0])
+        proc = FakeCopyProc(alive=state["copy_alive"])
+        state["procs"].append(proc)
+        return proc
+
+    def fake_run(cmd, **kwargs):
+        state["calls"].append(cmd[0])
+        if cmd[0] == "wl-paste":
+            return subprocess.CompletedProcess(cmd, 0, state["paste"], b"")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(dictate.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    state["injector"] = dictate.WaylandInjector()
+    return state
 
 
-def test_keep_clipboard_skips_read_and_restore(monkeypatch):
-    pytest.importorskip("evdev")
+def test_wl_copy_is_never_waited_for_or_killed(wayland):
+    """The regression that broke a whole session's clipboard.
+
+    wl-copy owns the selection for as long as the text is on the clipboard, so
+    it must not be run through subprocess.run: that waits for an exit which may
+    never come, and on timeout run() KILLS it. A killed owner leaves the
+    compositor referring to a dead client and every later clipboard operation
+    in the session hangs — system-wide, not just for this daemon.
+    """
+    wayland["injector"].insert("langes diktat")
+    # Two writes: the transcript, then the restored previous clipboard.
+    transcript, restore = wayland["procs"]
+    assert transcript.written == b"langes diktat"
+    assert restore.written == b"old clipboard"
+    for proc in (transcript, restore):
+        assert proc.signalled == [], \
+            "wl-copy was signalled — that is what breaks the whole session"
+    # The last writer is the live owner and stays tracked, not reaped away.
+    assert wayland["injector"]._copy_proc is restore
+
+
+def test_no_five_second_timeout_anywhere(wayland):
+    """The reported symptom: a 29 s dictation died on a 5 s limit."""
+    timeouts = []
+    real_run = dictate.subprocess.run
+
+    def recording_run(cmd, **kwargs):
+        timeouts.append((cmd[0], kwargs.get("timeout")))
+        return real_run(cmd, **kwargs)
+
+    import unittest.mock
+    with unittest.mock.patch.object(dictate.subprocess, "run", recording_run):
+        wayland["injector"].insert("hallo")
+    assert timeouts, "expected some helper to be waited on"
+    for name, timeout in timeouts:
+        assert timeout != 5, f"{name} still uses the old 5 s timeout"
+        assert timeout is None or timeout >= 30, f"{name} timeout too tight: {timeout}"
+
+
+def test_unset_cmd_timeout_means_no_limit(monkeypatch):
+    monkeypatch.setenv("PTT_CMD_TIMEOUT", "0")
+    assert (dictate._env_float("PTT_CMD_TIMEOUT", 30) or None) is None
+    monkeypatch.setenv("PTT_CMD_TIMEOUT", "45")
+    assert (dictate._env_float("PTT_CMD_TIMEOUT", 30) or None) == 45
+
+
+def test_clipboard_write_that_dies_prevents_the_paste(wayland):
+    """No owner means the paste would insert the previous contents."""
+    wayland["copy_alive"] = False
+    with pytest.raises(RuntimeError, match="exited straight away"):
+        wayland["injector"].insert("geheim")
+    assert "ydotool" not in wayland["calls"]  # never got as far as pasting
+
+
+def test_clipboard_restore_failure_is_only_logged(wayland, monkeypatch):
+    """The transcript is already inserted — a failed restore must not raise."""
+    calls = {"n": 0}
+    real_popen = dictate.subprocess.Popen
+
+    def flaky_popen(cmd, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the restore write
+            raise OSError("compositor gone")
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(dictate.subprocess, "Popen", flaky_popen)
+    wayland["injector"].insert("hallo")  # must not raise
+    assert wayland["procs"][0].written == b"hallo"
+
+
+def test_keep_clipboard_skips_read_and_restore(monkeypatch, wayland):
     monkeypatch.setenv("PTT_KEEP_CLIPBOARD", "1")
     injector = dictate.WaylandInjector()
-    calls = []
-    monkeypatch.setattr(dictate.subprocess, "run",
-                        lambda cmd, **k: calls.append(cmd[0]) or
-                        subprocess.CompletedProcess(cmd, 0, b"", b""))
     injector.insert("hallo")
-    assert calls == ["wl-copy", "ydotool"]  # no wl-paste, no second wl-copy
+    assert wayland["calls"] == ["wl-copy", "ydotool"]  # no wl-paste, no restore
 
 
 def test_clipboard_settle_is_configurable(monkeypatch):
