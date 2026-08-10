@@ -1,10 +1,12 @@
 [Unit]
 Description=whisper-ptt: local push-to-talk dictation
 After=graphical-session.target
-# Wayland inserts text through ydotoold. On X11 that unit is never installed,
-# and Wants= on a missing unit is not an error, so one template covers both.
-Wants=ydotoold.service
-After=ydotoold.service
+# Wayland inserts text through ydotoold, which is either the distribution's
+# ydotool.service or the ydotoold.service we install when there is none. Naming
+# both is safe: Wants= on a missing unit is not an error, so one template covers
+# either arrangement and X11, where neither exists.
+Wants=ydotool.service ydotoold.service
+After=ydotool.service ydotoold.service
 
 [Service]
 ExecStart=@DIR@/.venv/bin/python @DIR@/dictate.py

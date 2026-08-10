@@ -96,6 +96,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
+| `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
 
@@ -193,6 +194,17 @@ membership in the `input` group.
 creates a virtual keyboard through `/dev/uinput`, which is a kernel device — the
 compositor sees an ordinary keyboard and accepts the event.
 
+**Why `wl-copy` is started and then let go.** Under Wayland the client offering
+a selection *is* its owner for as long as the content stays on the clipboard, so
+`wl-copy` cannot exit — it has to keep running. Waiting for it therefore blocks
+until some other client takes over, which may be never. Worse, waiting *with a
+timeout* kills it on the way out, and a killed owner leaves the compositor
+referring to a dead client: from then on every clipboard operation in the
+session hangs, system-wide, until you log out. So the daemon starts `wl-copy`,
+writes the transcript, checks it is still alive (an instant exit means the text
+never made it) and then leaves it alone. This is also why `PTT_CMD_TIMEOUT` does
+not apply to it.
+
 **Why the clipboard, and not just typing it out.** `ydotool type` maps
 characters to Linux keycodes assuming a US layout. On a German (`de`) keymap
 that turns `z` into `y`, and `ä ö ü ß` are not in its table at all — precisely
@@ -206,11 +218,18 @@ layout-stable paste chord is synthesized.
 > inherent to doing this on Wayland at all, not specific to this tool — but only
 > set it up on a machine you trust. `./uninstall.sh --purge-system` reverts both.
 
-The Debian/Ubuntu `ydotool` package ships its own `ydotool.service` user unit,
-which starts `ydotoold` on the *default* socket path. We install a separate
-`ydotoold.service` that pins the socket to `$XDG_RUNTIME_DIR/.ydotool_socket`,
-so both sides agree on one path. Leave the packaged unit disabled — enabling it
-too just runs a second daemon.
+**One ydotoold, not two.** `ydotoold`'s default socket path already *is*
+`$XDG_RUNTIME_DIR/.ydotool_socket`, so a second unit pinning that path does not
+coexist with the first — the loser exits with `Another ydotoold is running with
+the same socket` and, under `Restart=on-failure`, retries forever. Debian/Ubuntu
+ship `ydotool.service` and enable it by preset, so it normally wins while the
+duplicate crash-loops in the background; dictation keeps working, which is what
+makes this easy to miss.
+
+The installer therefore uses the packaged `ydotool.service` when the
+distribution provides one, and only installs its own `ydotoold.service`
+(socket path and permissions pinned explicitly) when there is none. If a
+previous run left a redundant unit behind, re-running `./install.sh` removes it.
 
 ## Limitations
 
