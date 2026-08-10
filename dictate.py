@@ -35,6 +35,10 @@ Config via environment:
                    (default: 0.01); heavy editors drop/reorder fast synthetic
                    keystrokes — raise it (e.g. 0.03) if dictation arrives
                    garbled
+  PTT_TYPE_DELAY_TERMINAL  Windows + Linux/X11: delay used instead when the
+                   focused window is a terminal (default: 0 = full speed;
+                   consoles keep up, only heavy editors need the pacing;
+                   Wayland pastes instead of typing, so nothing to pace)
   PTT_PASTE_KEY    Wayland paste chord (default: ctrl+v; terminals usually
                    need ctrl+shift+v)
   PTT_KEEP_CLIPBOARD  1 = leave the transcript in the clipboard instead of
@@ -88,6 +92,7 @@ def _env_float(name, default):
 
 
 TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
+TERMINAL_TYPE_DELAY = _env_float("PTT_TYPE_DELAY_TERMINAL", 0.0)
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 # Let the focused app fetch the selection before the clipboard is handed back.
 # Configurable because the right value depends on how fast that app reacts.
@@ -224,6 +229,94 @@ def evdev_keycode(name):
 # Text insertion backends
 # --------------------------------------------------------------------------
 
+# Window classes / process names that mean "the focused window is a terminal".
+# Consoles keep up with full-speed synthetic keystrokes, so typing there can
+# skip the pacing delay that heavy editors need.
+_TERMINAL_WINDOW_CLASSES = {
+    "ConsoleWindowClass",             # conhost: cmd, PowerShell, ...
+    "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal
+}
+_TERMINAL_PROCESSES = {
+    "windowsterminal.exe", "wezterm-gui.exe", "alacritty.exe", "mintty.exe",
+    "conemu.exe", "conemu64.exe", "tabby.exe", "hyper.exe",
+}
+# X11 WM_CLASS values (res_name or res_class, compared lowercased).
+_TERMINAL_WM_CLASSES = {
+    "alacritty", "contour", "cool-retro-term", "deepin-terminal", "foot",
+    "ghostty", "gnome-terminal", "gnome-terminal-server", "guake", "hyper",
+    "kitty", "konsole", "lxterminal", "mate-terminal", "pantheon-terminal",
+    "qterminal", "st", "tabby", "terminator", "terminology", "tilix",
+    "tilda", "urxvt", "uxterm", "wezterm", "xterm", "yakuake",
+}
+
+
+def foreground_window_is_terminal():
+    """True if the focused window is a terminal.
+
+    Windows: class/process name of the foreground window. Linux/X11: WM_CLASS
+    of the input-focus window. Wayland hides which window has focus — and gets
+    its text via clipboard paste anyway — so it stays False there.
+    """
+    if sys.platform == "win32":
+        return _windows_foreground_is_terminal()
+    if (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
+            and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
+        return _x11_focus_is_terminal()
+    return False
+
+
+def _windows_foreground_is_terminal():
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        class_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, class_buf, len(class_buf))
+        if class_buf.value in _TERMINAL_WINDOW_CLASSES:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            path_buf = ctypes.create_unicode_buffer(512)
+            size = wintypes.DWORD(len(path_buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, path_buf, ctypes.byref(size)):
+                return os.path.basename(path_buf.value).lower() in _TERMINAL_PROCESSES
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+    return False
+
+
+def _x11_focus_is_terminal():
+    """WM_CLASS heuristic via python-xlib (already pulled in by pynput)."""
+    try:
+        from Xlib import display as xdisplay
+    except ImportError:
+        return False
+    d = None
+    try:
+        d = xdisplay.Display()
+        focus = d.get_input_focus().focus
+        if not hasattr(focus, "get_wm_class"):
+            return False
+        wm_class = focus.get_wm_class() or ()
+        return any(c.lower() in _TERMINAL_WM_CLASSES for c in wm_class if c)
+    except Exception:
+        return False
+    finally:
+        if d is not None:
+            d.close()
+
+
 class PynputInjector:
     """Type the text out via pynput (XTEST on X11, native APIs elsewhere).
 
@@ -242,12 +335,15 @@ class PynputInjector:
         if self.controller is None:
             from pynput.keyboard import Controller
             self.controller = Controller()
+        delay = TYPE_DELAY
+        if delay and TERMINAL_TYPE_DELAY < delay and foreground_window_is_terminal():
+            delay = TERMINAL_TYPE_DELAY
         for ch in text:
             key = _CONTROL_KEYS.get(ch, ch)
             self.controller.press(key)
             self.controller.release(key)
-            if TYPE_DELAY:
-                time.sleep(TYPE_DELAY)
+            if delay:
+                time.sleep(delay)
 
 
 class WaylandInjector:
