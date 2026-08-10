@@ -7,7 +7,30 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# One-liner install straight from the web (no script path when piped via iex):
+#   irm https://raw.githubusercontent.com/aignermax/hushkey/master/install.ps1 | iex
+$Repo = "https://github.com/aignermax/hushkey"
+$Dir = $PSScriptRoot
+if (-not $Dir -or -not (Test-Path (Join-Path $Dir "dictate.py"))) {
+    $Dir = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\whisper-ptt"
+    Write-Host "==> fetching whisper-ptt into $Dir"
+    $hasGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
+    if ((Test-Path (Join-Path $Dir ".git")) -and $hasGit) {
+        git -C $Dir pull --ff-only
+    } elseif ($hasGit -and -not (Test-Path $Dir)) {
+        git clone "$Repo.git" $Dir
+    } else {
+        # No git (or a zip install already present): plain download works too.
+        $zip = Join-Path $env:TEMP "whisper-ptt-master.zip"
+        $tmp = Join-Path $env:TEMP ("whisper-ptt-" + [guid]::NewGuid().ToString("N"))
+        Invoke-WebRequest -UseBasicParsing "$Repo/archive/refs/heads/master.zip" -OutFile $zip
+        Expand-Archive $zip -DestinationPath $tmp
+        New-Item -ItemType Directory -Force $Dir | Out-Null
+        Copy-Item (Join-Path $tmp "whisper-ptt-master\*") $Dir -Recurse -Force
+        Remove-Item $tmp, $zip -Recurse -Force
+    }
+}
 $Venv = Join-Path $Dir ".venv"
 $TaskName = "whisper-ptt"
 

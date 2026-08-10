@@ -4,7 +4,25 @@
 # Idempotent — safe to re-run (e.g. after git pull). On Windows use install.ps1.
 set -euo pipefail
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# One-liner install straight from the web:
+#   curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
+# Piped this way there is no script directory, so fetch the sources first.
+REPO="https://github.com/aignermax/hushkey"
+if [ -f "$(dirname "${BASH_SOURCE[0]:-/dev/null}")/dictate.py" ]; then
+  DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whisper-ptt"
+  echo "==> fetching whisper-ptt into $DIR"
+  if [ -d "$DIR/.git" ] && command -v git >/dev/null; then
+    git -C "$DIR" pull --ff-only
+  elif [ -e "$DIR" ] || ! command -v git >/dev/null; then
+    # No git (or a tarball install already present): plain download works too.
+    mkdir -p "$DIR"
+    curl -fsSL "$REPO/archive/refs/heads/master.tar.gz" | tar -xz --strip-components=1 -C "$DIR"
+  else
+    git clone "$REPO.git" "$DIR"
+  fi
+fi
 VENV="$DIR/.venv"
 UNIT_DIR="$HOME/.config/systemd/user"
 OS="$(uname -s)"
