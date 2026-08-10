@@ -144,12 +144,92 @@ def test_typing_paces_each_character(monkeypatch):
     injector.controller = FakeController()
     sleeps = []
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0.02)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
     injector.insert("ab ")
     assert injector.controller.events == [("down", "a"), ("up", "a"),
                                           ("down", "b"), ("up", "b"),
                                           ("down", " "), ("up", " ")]
     assert sleeps == [0.02] * 3
+
+
+def test_typing_uses_terminal_delay_in_terminals(monkeypatch):
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
+    sleeps = []
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0.02)
+    monkeypatch.setattr(dictate, "TERMINAL_TYPE_DELAY", 0)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: True)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
+    injector.insert("ab")
+    assert injector.controller.events == [("down", "a"), ("up", "a"),
+                                          ("down", "b"), ("up", "b")]
+    assert sleeps == []  # delay 0: full speed, no pacing at all
+
+
+def test_typing_never_speeds_up_beyond_type_delay(monkeypatch):
+    """A terminal delay *above* the normal one must not slow typing down."""
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
+    sleeps = []
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0.01)
+    monkeypatch.setattr(dictate, "TERMINAL_TYPE_DELAY", 0.05)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: True)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: sleeps.append(s))
+    injector.insert("ab")
+    assert sleeps == [0.01] * 2
+
+
+def _fake_xlib(monkeypatch, wm_class):
+    """Install a fake Xlib.display module reporting the given WM_CLASS."""
+    import types
+    window = types.SimpleNamespace(get_wm_class=lambda: wm_class)
+    disp = types.SimpleNamespace(
+        get_input_focus=lambda: types.SimpleNamespace(focus=window),
+        close=lambda: None)
+    xlib = types.ModuleType("Xlib")
+    xlib.display = types.SimpleNamespace(Display=lambda: disp)
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+
+
+def test_terminal_detection_off_without_display(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_off_on_wayland(monkeypatch):
+    """Wayland hides the focused window — never claim it is a terminal."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")  # XWayland sets it; must not matter
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    _fake_xlib(monkeypatch, ("gnome-terminal-server", "Gnome-terminal"))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_x11_terminal(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    _fake_xlib(monkeypatch, ("gnome-terminal-server", "Gnome-terminal"))
+    assert dictate.foreground_window_is_terminal() is True
+
+
+def test_terminal_detection_x11_non_terminal(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    _fake_xlib(monkeypatch, ("code", "Code"))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_x11_without_xlib(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    monkeypatch.setitem(sys.modules, "Xlib", None)  # import raises ImportError
+    assert dictate.foreground_window_is_terminal() is False
 
 
 def test_typing_maps_control_chars_to_keys(monkeypatch):

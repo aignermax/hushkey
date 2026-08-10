@@ -1,4 +1,6 @@
-# whisper-ptt
+# hushkey
+
+*(formerly whisper-ptt)*
 
 Local, offline push-to-talk dictation for **Linux (X11 and Wayland), Windows and
 macOS** — hold a key, speak, release, and the transcript lands in whatever
@@ -44,18 +46,21 @@ ask for your password once:
 **Linux / macOS:**
 
 ```bash
-git clone https://github.com/aignermax/whisper-ptt.git
-cd whisper-ptt
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-git clone git@github.com:aignermax/whisper-ptt.git
-cd whisper-ptt
-powershell -ExecutionPolicy Bypass -File install.ps1
+irm https://raw.githubusercontent.com/aignermax/hushkey/master/install.ps1 | iex
 ```
+
+Both one-liners fetch the sources (into `~/.local/share/whisper-ptt` on
+Linux/macOS, `%LOCALAPPDATA%\Programs\whisper-ptt` on Windows), install all
+dependencies and set up autostart. Re-running the same line updates to the
+latest version. If you prefer your own checkout location, the classic way
+keeps working: `git clone https://github.com/aignermax/hushkey.git`,
+then `./install.sh` (Windows: `powershell -ExecutionPolicy Bypass -File install.ps1`).
 
 (`install.ps1 -NoAutostart` skips the autostart entry if you prefer to run
 `.venv\Scripts\python.exe dictate.py` manually.)
@@ -87,6 +92,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
+| `PTT_TYPE_DELAY_TERMINAL` | `0` | Windows + Linux/X11: delay used instead of `PTT_TYPE_DELAY` when the focused window is a terminal — consoles keep up with full-speed keystrokes, so dictation lands instantly there (Wayland pastes instead of typing, so no pacing applies) |
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
