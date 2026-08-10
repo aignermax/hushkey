@@ -12,37 +12,6 @@ when an NVIDIA GPU is present (Linux/Windows), CPU otherwise.
 
 Nothing leaves your machine after the one-time model download.
 
-## What you get
-
-- **`dictate.py`** — the push-to-talk daemon (autostarts via systemd on Linux,
-  Task Scheduler on Windows, launchd on macOS)
-- **`transcribe.py`** — batch-transcribe a folder of audio files into Markdown
-  notes (voice memos → text), with skip-unchanged state tracking
-- **`recorder.py`** — recording backends: `pw-record` (PipeWire) on Linux,
-  `sounddevice`/PortAudio on Windows/macOS
-- **`install.sh` / `uninstall.sh`** — one-command setup/removal (Linux, macOS)
-- **`install.ps1` / `uninstall.ps1`** — one-command setup/removal (Windows)
-
-## Requirements
-
-| | Linux | Windows | macOS |
-|---|---|---|---|
-| OS | X11 **or** Wayland (`echo $XDG_SESSION_TYPE`); the installer picks the matching backend | Windows 10+ | recent macOS |
-| Audio | PipeWire `pw-record` (standard on Ubuntu ≥ 22.10/Fedora); fallback: `libportaudio2` | any microphone | any microphone |
-| Python | ≥ 3.10 with `python3-venv` | ≥ 3.10 ([python.org](https://www.python.org/downloads/), "Add to PATH") | ≥ 3.10 |
-| Optional | NVIDIA GPU for CUDA | NVIDIA GPU for CUDA | — |
-
-On macOS you must grant the terminal **Microphone**, **Accessibility** and
-**Input Monitoring** permissions when prompted (System Settings → Privacy &
-Security) — the global hotkey and synthetic typing depend on them.
-
-**On Linux/Wayland additionally** — the installer handles all of this and will
-ask for your password once:
-
-- `ydotool` and `wl-clipboard` packages
-- a udev rule giving the `input` group access to `/dev/uinput`
-- your user added to the `input` group (**requires one logout**)
-
 ## Install
 
 **Linux / macOS:**
@@ -74,6 +43,37 @@ itself afterwards.
 
 The first dictation downloads the whisper model (~0.5–1.5 GB) into
 `~/.cache/huggingface`; after that everything is offline.
+
+## What you get
+
+- **`dictate.py`** — the push-to-talk daemon (autostarts via systemd on Linux,
+  Task Scheduler on Windows, launchd on macOS)
+- **`transcribe.py`** — batch-transcribe a folder of audio files into Markdown
+  notes (voice memos → text), with skip-unchanged state tracking
+- **`recorder.py`** — recording backends: `pw-record` (PipeWire) on Linux,
+  `sounddevice`/PortAudio on Windows/macOS
+- **`install.sh` / `uninstall.sh`** — one-command setup/removal (Linux, macOS)
+- **`install.ps1` / `uninstall.ps1`** — one-command setup/removal (Windows)
+
+## Requirements
+
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| OS | X11 **or** Wayland (`echo $XDG_SESSION_TYPE`); the installer picks the matching backend | Windows 10+ | recent macOS |
+| Audio | PipeWire `pw-record` (standard on Ubuntu ≥ 22.10/Fedora); fallback: `libportaudio2` | any microphone | any microphone |
+| Python | ≥ 3.10 with `python3-venv` | ≥ 3.10 ([python.org](https://www.python.org/downloads/), "Add to PATH") | ≥ 3.10 |
+| Optional | NVIDIA GPU for CUDA | NVIDIA GPU for CUDA | — |
+
+On macOS you must grant the terminal **Microphone**, **Accessibility** and
+**Input Monitoring** permissions when prompted (System Settings → Privacy &
+Security) — the global hotkey and synthetic typing depend on them.
+
+**On Linux/Wayland additionally** — the installer handles all of this and will
+ask for your password once:
+
+- `ydotool` and `wl-clipboard` packages
+- a udev rule giving the `input` group access to `/dev/uinput`
+- your user added to the `input` group (**requires one logout**)
 
 ## Use
 
