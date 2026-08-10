@@ -1,6 +1,8 @@
-# hushkey
-
-*(formerly whisper-ptt)*
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="hushkey logo — a winking husky holding a key">
+</p>
+<h1 align="center">hushkey</h1>
+<p align="center"><em>formerly whisper-ptt</em></p>
 
 Local, offline push-to-talk dictation for **Linux (X11 and Wayland), Windows and
 macOS** — hold a key, speak, release, and the transcript lands in whatever
