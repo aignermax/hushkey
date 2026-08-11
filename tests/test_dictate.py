@@ -14,9 +14,10 @@ import dictate
 
 @pytest.fixture(autouse=True)
 def isolated_log(monkeypatch, tmp_path):
-    """Keep tests out of the real operational log."""
+    """Keep tests out of the real operational log and state file."""
     monkeypatch.setattr(dictate, "STATE_DIR", str(tmp_path))
     monkeypatch.setattr(dictate, "LOG_PATH", str(tmp_path / "dictate.log"))
+    monkeypatch.setattr(dictate, "STATE_PATH", str(tmp_path / "state.json"))
 
 
 @pytest.fixture(autouse=True)

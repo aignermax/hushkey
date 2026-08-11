@@ -90,3 +90,23 @@ def test_ui_lang_detects_german(monkeypatch):
     monkeypatch.setenv("LANG", "de_DE.UTF-8")
     monkeypatch.delenv("LC_ALL", raising=False)
     assert tray._ui_lang() == "de"
+
+
+def test_pending_update_runs_installer(tmp_path, monkeypatch):
+    marker = tmp_path / "update-pending"
+    marker.write_text("")
+    monkeypatch.setattr(tray, "UPDATE_PENDING", str(marker))
+    monkeypatch.setattr(tray, "UPDATE_LOG", str(tmp_path / "update.log"))
+    calls = []
+    monkeypatch.setattr(tray.subprocess, "run", lambda *a, **k: calls.append(a))
+    tray.run_pending_update_if_any()
+    assert calls and "install" in str(calls[0][0][-1])
+    assert not marker.exists()  # consumed: never runs twice
+
+
+def test_no_pending_update_is_a_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(tray, "UPDATE_PENDING", str(tmp_path / "nope"))
+    calls = []
+    monkeypatch.setattr(tray.subprocess, "run", lambda *a, **k: calls.append(a))
+    tray.run_pending_update_if_any()
+    assert calls == []

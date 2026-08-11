@@ -12,8 +12,11 @@ missing, no notification area — e.g. bare GNOME/Wayland), the daemon is still
 supervised, just without an icon.
 
 Update checks query the GitHub releases API once at startup and then daily
-(disable with PTT_UPDATE_CHECK=0). Updates are never installed silently —
-one menu click runs the installer and hands over to the new code.
+(disable with PTT_UPDATE_CHECK=0). Updates are never installed silently, and
+one menu click splits the work into two phases so a running tray never locks
+a file the installer replaces (a loaded pillow .pyd is locked on Windows):
+phase 1 only swaps the source files; phase 2 (the installer with its pip
+installs) runs at the next tray startup, before pystray/PIL are imported.
 """
 from __future__ import annotations
 
@@ -31,12 +34,6 @@ DAEMON = os.path.join(DIR, "dictate.py")
 LOGO = os.path.join(DIR, "assets", "logo.png")
 REPO = "aignermax/hushkey"
 RELEASES_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
-WEB_INSTALL = {
-    "win32": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-              f"irm https://raw.githubusercontent.com/{REPO}/master/install.ps1 | iex"],
-    "posix": ["bash", "-c",
-              f"curl -fsSL https://raw.githubusercontent.com/{REPO}/master/install.sh | bash"],
-}
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 ICON_SIZE = 64
 
@@ -46,13 +43,26 @@ import dictate  # noqa: E402  local module: single source for VERSION/STATE_DIR
 VERSION = dictate.VERSION
 STATE_PATH = dictate.STATE_PATH
 UPDATE_LOG = os.path.join(dictate.STATE_DIR, "update.log")
+UPDATE_PENDING = os.path.join(dictate.STATE_DIR, "update-pending")
 
-try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAVE_TRAY = True
-except ImportError:
-    HAVE_TRAY = False
+# Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
+# must be able to run before these modules lock any of their files.
+pystray = None
+Image = None
+ImageDraw = None
+
+
+def load_tray_backend():
+    """Import pystray/PIL; False when they are not installed (headless mode)."""
+    global pystray, Image, ImageDraw
+    try:
+        import pystray as _pystray
+        from PIL import Image as _Image
+        from PIL import ImageDraw as _ImageDraw
+        pystray, Image, ImageDraw = _pystray, _Image, _ImageDraw
+        return True
+    except ImportError:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -94,9 +104,10 @@ def pid_alive(pid):
             return True
         os.kill(pid, 0)
         return True
-    except OSError as exc:
-        # EPERM means the process exists but is not ours — still alive.
-        return getattr(exc, "errno", None) == 13
+    except PermissionError:
+        return True  # exists but is not ours (EPERM number varies by OS)
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -105,11 +116,13 @@ def pid_alive(pid):
 class DaemonSupervisor:
     """Keep dictate.py running; restart with backoff, give up after 5 fast deaths."""
 
-    def __init__(self):
+    def __init__(self, on_give_up=None):
         self.proc = None
         self.failures = 0
+        self.on_give_up = on_give_up
         self._stopping = threading.Event()
         self._lock = threading.Lock()
+        self._thread = None
 
     @property
     def alive(self):
@@ -124,6 +137,7 @@ class DaemonSupervisor:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def stop(self):
+        """Stop daemon and supervision for good (quit / update handover)."""
         self._stopping.set()
         self._stop_child()
 
@@ -138,9 +152,17 @@ class DaemonSupervisor:
             self.proc = None
 
     def restart(self):
+        """Restart the daemon and make sure supervision is actually running."""
         self._stop_child()
         self.failures = 0
-        self.start()
+        self.ensure_supervising()
+
+    def ensure_supervising(self):
+        """Start the supervise loop unless one is already running."""
+        if self._thread is None or not self._thread.is_alive():
+            self._stopping.clear()
+            self._thread = threading.Thread(target=self.supervise, daemon=True)
+            self._thread.start()
 
     def supervise(self):
         """Blocking loop: (re)start the daemon until told to stop."""
@@ -154,7 +176,9 @@ class DaemonSupervisor:
             # A run longer than a minute proves the daemon is healthy.
             self.failures = 0 if time.time() - started > 60 else self.failures + 1
             if self.failures > 5:
-                dictate.log("tray: daemon died 5 times in a row — giving up")
+                dictate.log("tray: daemon died 5 times in a row - giving up")
+                if self.on_give_up:
+                    self.on_give_up()
                 break
             time.sleep(min(2 ** self.failures, 30))
         self._stop_child()
@@ -170,44 +194,105 @@ def latest_release_tag():
         return json.load(resp)["tag_name"]
 
 
-def refresh_and_install():
-    """Fetch the newest code and re-run the installer (idempotent).
+def refresh_code():
+    """Phase 1 of an update: swap the source files, nothing else.
 
-    Git checkouts pull; one-liner installs (no .git) re-run the same web
-    bootstrap the user installed with, which refreshes the standard install
-    directory and re-runs the installer from there.
+    No pip installs here — this process has pystray/PIL loaded and would
+    lock their files on Windows. The installer runs in phase 2 instead.
     """
     with open(UPDATE_LOG, "ab") as out:
-        out.write(f"\n--- update {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        out.write(f"\n--- update phase 1 {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
         if os.path.isdir(os.path.join(DIR, ".git")):
             subprocess.run(["git", "-C", DIR, "pull", "--ff-only"],
                            check=True, timeout=180,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
                            stdout=out, stderr=subprocess.STDOUT)
-            if sys.platform == "win32":
-                cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                       "-File", os.path.join(DIR, "install.ps1")]
-            else:
-                cmd = ["bash", os.path.join(DIR, "install.sh")]
+        else:  # one-liner install without .git: fetch the archive
+            _fetch_archive_over_dir()
+
+
+def _strip_top_folder(name):
+    parts = name.split("/", 1)
+    return parts[1] if len(parts) == 2 and parts[1] else None
+
+
+def _fetch_archive_over_dir():
+    """Download the master archive and unpack it over DIR (strip top folder)."""
+    kind = "zip" if sys.platform == "win32" else "tar.gz"
+    url = f"https://github.com/{REPO}/archive/refs/heads/master.{kind}"
+    req = urllib.request.Request(url, headers={"User-Agent": f"hushkey/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        blob = resp.read()  # complete in memory before any file is touched
+    import io
+    if sys.platform == "win32":
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            for info in zf.infolist():
+                rel = _strip_top_folder(info.filename)
+                if not rel:
+                    continue
+                target = os.path.join(DIR, rel)
+                if info.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                else:
+                    with zf.open(info) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+    else:
+        import tarfile
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+            for member in tf.getmembers():
+                rel = _strip_top_folder(member.name)
+                if not rel:
+                    continue
+                target = os.path.join(DIR, rel)
+                if member.isdir():
+                    os.makedirs(target, exist_ok=True)
+                elif member.isfile():
+                    with tf.extractfile(member) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+
+
+def run_pending_update_if_any():
+    """Phase 2 of an update: the installer, run by the NEW tray at startup.
+
+    Runs before pystray/PIL are imported, so pip can replace their files.
+    A tray the installer itself tries to start just waits on our instance
+    lock and bows out.
+    """
+    if not os.path.exists(UPDATE_PENDING):
+        return
+    os.remove(UPDATE_PENDING)
+    with open(UPDATE_LOG, "ab") as out:
+        out.write(b"--- update phase 2 (installer) ---\n")
+        if sys.platform == "win32":
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", os.path.join(DIR, "install.ps1")]
         else:
-            cmd = WEB_INSTALL["win32" if sys.platform == "win32" else "posix"]
-        subprocess.run(cmd, cwd=DIR, check=True, timeout=900,
-                       stdout=out, stderr=subprocess.STDOUT)
+            cmd = ["bash", os.path.join(DIR, "install.sh")]
+        try:
+            subprocess.run(cmd, cwd=DIR, check=True, timeout=900,
+                           stdout=out, stderr=subprocess.STDOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            dictate.log(f"tray: update installer failed: {exc}")
 
 
 def restart_self():
     """Hand over to the freshly installed code.
 
-    The new instance waits for our single-instance lock, so the overlap is
-    safe. Exit code 1 on Linux makes systemd's Restart=on-failure bring up a
-    clean service-managed instance; the spawned one then loses the lock and
-    bows out. macOS launchd (KeepAlive) and Windows both tolerate exit 0 —
-    the spawned instance becomes the new tray.
+    The spawned replacement waits for this instance's lock, so the two never
+    run side by side. Under systemd the spawn dies with the service cgroup —
+    that is fine and expected: exiting with code 1 makes Restart=on-failure
+    bring up the new code as a clean service instance. On macOS launchd
+    (KeepAlive) relaunches too; the lock decides which spawn wins. On
+    Windows the spawned instance simply becomes the new tray.
     """
     kwargs = {"cwd": DIR, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL, "close_fds": True}
     if sys.platform == "win32":
         kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
                                    | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kwargs["start_new_session"] = True
     subprocess.Popen([sys.executable, os.path.abspath(__file__)], **kwargs)
     os._exit(1 if sys.platform.startswith("linux") else 0)
 
@@ -285,6 +370,8 @@ _STRINGS = {
         "up_to_date_title": "hushkey",
         "up_to_date": "up to date (v{version})",
         "check_failed_title": "hushkey update check failed",
+        "give_up_title": "hushkey daemon",
+        "give_up": "the daemon keeps crashing — check the logs",
     },
     "de": {
         "idle": "bereit",
@@ -307,6 +394,8 @@ _STRINGS = {
         "up_to_date_title": "hushkey",
         "up_to_date": "aktuell (v{version})",
         "check_failed_title": "hushkey Update-Prüfung fehlgeschlagen",
+        "give_up_title": "hushkey Daemon",
+        "give_up": "der Daemon stürzt laufend ab — Logs prüfen",
     },
 }
 S = _STRINGS.get(_ui_lang(), _STRINGS["en"])
@@ -330,7 +419,7 @@ class Tray:
         self.state = "starting"
         self.pending_update = None
         self.stopping = threading.Event()
-        self.daemon = DaemonSupervisor()
+        self.daemon = DaemonSupervisor(on_give_up=self._on_give_up)
         self.icon = pystray.Icon("hushkey", self.images["starting"],
                                  "hushkey", self._menu())
 
@@ -361,12 +450,19 @@ class Tray:
         self._notify(S["update_installing_title"], S["update_installing"])
         try:
             self.daemon.stop()
-            refresh_and_install()
+            refresh_code()
+            open(UPDATE_PENDING, "w").close()  # phase 2 marker for the next boot
         except (OSError, subprocess.SubprocessError) as exc:
             dictate.log(f"tray: update failed: {exc}")
-            self._notify(S["update_failed_title"], S["update_failed"].format(log=UPDATE_LOG))
-            self.daemon.restart()
+            self._notify(S["update_failed_title"],
+                         S["update_failed"].format(log=UPDATE_LOG))
+            self.daemon.restart()  # restores supervision, not just the process
             return
+        try:
+            self.icon.stop()  # NIM_DELETE now, else a ghost icon lingers
+        except Exception:
+            pass
+        time.sleep(0.3)
         restart_self()
 
     def _on_check_now(self, _icon, _item):
@@ -387,6 +483,9 @@ class Tray:
         self.daemon.stop()
         icon.stop()
 
+    def _on_give_up(self):
+        self._notify(S["give_up_title"], S["give_up"])
+
     # -- background loops --------------------------------------------------
 
     def _notify(self, title, message):
@@ -397,14 +496,20 @@ class Tray:
 
     def poll_state(self):
         while not self.stopping.is_set():
-            data = read_state()
-            state = data.get("state", "stopped")
-            if state != "stopped" and not pid_alive(data.get("pid")):
-                state = "stopped"
+            if not os.path.exists(STATE_PATH) and self.daemon.alive:
+                # First boot: the daemon is up but has not written state yet
+                # (the model download can take minutes) — not "stopped".
+                state = "starting"
+            else:
+                data = read_state()
+                state = data.get("state", "stopped")
+                if state != "stopped" and not pid_alive(data.get("pid")):
+                    state = "stopped"
             if state != self.state:
                 self.state = state
                 self.icon.icon = self.images.get(state, self.images["idle"])
                 self.icon.title = S["title"].format(state=S.get(state, state))
+                self.icon.update_menu()  # the status line rebuilds only on this
             time.sleep(0.3)
 
     def check_updates(self, manual=False):
@@ -431,11 +536,29 @@ class Tray:
             self.stopping.wait(UPDATE_CHECK_INTERVAL)
 
     def run(self):
-        self.daemon.start()
-        threading.Thread(target=self.daemon.supervise, daemon=True).start()
+        self.daemon.ensure_supervising()
         threading.Thread(target=self.poll_state, daemon=True).start()
         threading.Thread(target=self.update_loop, daemon=True).start()
-        self.icon.run()  # blocks until Quit; must be the main thread (macOS)
+        try:
+            self.icon.run()  # blocks until Quit; must be the main thread (macOS)
+        except Exception as exc:
+            # No usable notification area: keep supervising without an icon.
+            # The supervisor is already running — a second one would spawn a
+            # duplicate daemon, and two daemons type every dictation twice.
+            print(f"tray icon unavailable ({exc}) - supervising headless",
+                  file=sys.stderr)
+            while not self.stopping.is_set():
+                self.stopping.wait(3600)
+
+
+def supervise_headless():
+    """No tray possible at all: just keep the daemon alive."""
+    supervisor = DaemonSupervisor()
+    try:
+        supervisor.supervise()
+    except KeyboardInterrupt:
+        supervisor.stop()
+    return 0
 
 
 def main():
@@ -443,27 +566,21 @@ def main():
     if lock is None:
         print("another hushkey tray is already running", file=sys.stderr)
         return 1
-    if not HAVE_TRAY:
-        print("pystray/pillow missing — supervising daemon without tray icon",
+    run_pending_update_if_any()  # before any GUI import locks files (Windows)
+    if not load_tray_backend():
+        print("pystray/pillow missing - supervising daemon without tray icon",
               file=sys.stderr)
-        supervisor = DaemonSupervisor()
-        try:
-            supervisor.supervise()
-        except KeyboardInterrupt:
-            supervisor.stop()
-        return 0
+        return supervise_headless()
     try:
-        Tray().run()
+        tray = Tray()
     except Exception as exc:
-        # No usable notification area (bare GNOME/Wayland, headless session):
-        # dictation must survive even when the icon cannot be shown.
-        print(f"tray icon unavailable ({exc}) — supervising headless",
+        # Icon construction failed (no display, no notification area):
+        # no daemon is running yet at this point, so a headless fallback
+        # cannot duplicate anything.
+        print(f"tray icon unavailable ({exc}) - supervising headless",
               file=sys.stderr)
-        supervisor = DaemonSupervisor()
-        try:
-            supervisor.supervise()
-        except KeyboardInterrupt:
-            supervisor.stop()
+        return supervise_headless()
+    tray.run()
     return 0
 
 

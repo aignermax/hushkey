@@ -48,8 +48,8 @@ The first dictation downloads the whisper model (~0.5–1.5 GB) into
 
 - **`tray.py`** — the system-tray companion (autostart entry point): live status
   icon, supervises the daemon, update checks with one-click install
-- **`dictate.py`** — the push-to-talk daemon (autostarts via systemd on Linux,
-  Task Scheduler on Windows, launchd on macOS)
+- **`dictate.py`** — the push-to-talk daemon (supervised by the tray; can also
+  run standalone for debugging)
 - **`transcribe.py`** — batch-transcribe a folder of audio files into Markdown
   notes (voice memos → text), with skip-unchanged state tracking
 - **`recorder.py`** — recording backends: `pw-record` (PipeWire) on Linux,
