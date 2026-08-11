@@ -1,6 +1,8 @@
 faster-whisper>=1.2
 pynput>=1.7       # key grab + typing on X11, Windows, macOS
 sounddevice>=0.5  # recording backend on Windows/macOS; Linux uses pw-record if present
+pystray>=0.19     # tray icon (tray.py); pulls pyobjc on macOS, uses AppIndicator/Xlib on Linux
+pillow>=10        # tray icon badge overlays (recording/transcribing)
 # Wayland backend: key grab via /dev/input. Linux-only (C extension against the
 # kernel's input headers), so it must not be pulled in on Windows/macOS.
 evdev>=1.6; sys_platform == "linux"

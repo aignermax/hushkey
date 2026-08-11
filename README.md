@@ -46,6 +46,8 @@ The first dictation downloads the whisper model (~0.5–1.5 GB) into
 
 ## What you get
 
+- **`tray.py`** — the system-tray companion (autostart entry point): live status
+  icon, supervises the daemon, update checks with one-click install
 - **`dictate.py`** — the push-to-talk daemon (autostarts via systemd on Linux,
   Task Scheduler on Windows, launchd on macOS)
 - **`transcribe.py`** — batch-transcribe a folder of audio files into Markdown
@@ -98,6 +100,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
+| `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and daily, notify when a newer version is out (install is always one manual click); `0` disables the check |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
@@ -131,6 +134,13 @@ manual paste is the escape hatch — the transcript is simply waiting in the
 clipboard.
 
 ## Manage
+
+The **tray icon** (the husky) shows the live state — greyed out when the daemon
+is stopped, red badge while recording, amber while transcribing. Its menu lets
+you restart the daemon, open the log folder, check for updates and install a
+new release with one click. If the icon cannot be shown (e.g. GNOME without an
+AppIndicator extension), the daemon keeps running regardless — use the
+commands below then:
 
 ```bash
 # Linux

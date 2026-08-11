@@ -81,6 +81,29 @@ def _state_dir():
 
 
 STATE_DIR = _state_dir()
+
+VERSION = "0.2.0"
+
+# The tray icon (tray.py) reads this file; written on every state transition.
+STATE_PATH = os.path.join(STATE_DIR, "state.json")
+
+
+def write_state(state):
+    """Publish the daemon state ('idle'/'recording'/'transcribing') for tray.py.
+
+    Best effort and atomic (temp file + replace): the tray tolerates a missing
+    file, but a half-written one would be noise. Never let state reporting
+    break dictation itself.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"state": state, "pid": os.getpid(),
+                       "version": VERSION, "ts": time.time()}, fh)
+        os.replace(tmp, STATE_PATH)
+    except OSError:
+        pass
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
 
@@ -696,6 +719,7 @@ class DictationDaemon:
             notify("dictation error", str(exc)[:80])
             return
         self.recording = time.time()
+        write_state("recording")
         notify("● recording", f"(release {PTT_KEY} to transcribe)")
 
     def stop_recording(self):
@@ -708,17 +732,20 @@ class DictationDaemon:
         except Exception as exc:
             log(f"ERROR stopping recording: {exc}")
             notify("dictation error", str(exc)[:80])
+            write_state("idle")
             return
         if duration < MIN_SECONDS or not wav or os.path.getsize(wav) < 1000:
             log(f"ignored short/empty recording ({duration:.2f}s)")
             if wav and os.path.exists(wav):
                 os.remove(wav)
+            write_state("idle")
             return
         threading.Thread(target=self._transcribe_and_insert,
                          args=(wav, duration), daemon=True).start()
 
     def _transcribe_and_insert(self, wav, duration):
         with self.busy_lock:
+            write_state("transcribing")
             try:
                 notify("… transcribing", "")
                 lang = os.environ.get("WHISPER_LANG", "de") or None
@@ -739,6 +766,7 @@ class DictationDaemon:
                     os.remove(wav)
                 except OSError:
                     pass
+                write_state("idle")
 
     def run(self):
         which = backend_name()
@@ -751,6 +779,7 @@ class DictationDaemon:
         print(f"push-to-talk ready on '{PTT_KEY}' ({which}) — hold to record",
               file=sys.stderr)
         log(f"ready on {PTT_KEY} ({which} backend)")
+        write_state("idle")
         self.listener.listen(self.start_recording, self.stop_recording)
 
 

@@ -67,7 +67,7 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
 
 if (-not $NoAutostart) {
     $Pythonw = Join-Path $Venv "Scripts\pythonw.exe"  # no console window
-    $Daemon = Join-Path $Dir "dictate.py"
+    $Daemon = Join-Path $Dir "tray.py"  # tray supervises dictate.py as its child
     $Tr = "`"$Pythonw`" `"$Daemon`""
     # native stderr would abort the script under EAP=Stop, so relax it locally
     $ErrorActionPreference = "Continue"

@@ -1,5 +1,6 @@
 """Platform helpers and recording control flow of the dictation daemon."""
 import builtins
+import json
 import os
 import subprocess
 import sys
@@ -126,6 +127,62 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
     d.stop_recording()
     assert done.wait(2)
     assert seen["wav"] == wav
+
+
+def test_write_state_publishes_json(monkeypatch, tmp_path):
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
+    dictate.write_state("recording")
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert data["state"] == "recording"
+    assert data["pid"] == os.getpid()
+    assert data["version"] == dictate.VERSION
+    assert data["ts"] > 0
+
+
+def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
+    """recording -> transcribing -> idle, readable by the tray at each step."""
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+
+    class FakeModel:
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+            return [type("Seg", (), {"text": " hallo "})()], None
+
+    d.model = FakeModel()
+    insert_started = threading.Event()
+    finish_insert = threading.Event()
+    inserted = []
+
+    class FakeInjector:
+        def insert(self, text):
+            insert_started.set()
+            finish_insert.wait(5)
+            inserted.append(text)
+
+    d.injector = FakeInjector()
+
+    def state():
+        return json.loads(state_file.read_text(encoding="utf-8"))["state"]
+
+    def wait_for(expected):
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if state() == expected:
+                return True
+            time.sleep(0.05)
+        return False
+
+    d.start_recording()
+    assert state() == "recording"
+    d.recording = time.time() - 1.0  # pretend the key was held for 1 s
+    d.stop_recording()
+    assert wait_for("transcribing") and insert_started.wait(5)
+    finish_insert.set()
+    assert wait_for("idle")
+    assert inserted == ["hallo "]
 
 
 class FakeController:

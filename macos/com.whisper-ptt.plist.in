@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>@DIR@/.venv/bin/python</string>
-        <string>@DIR@/dictate.py</string>
+        <string>@DIR@/tray.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
