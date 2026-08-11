@@ -82,10 +82,32 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
+
+# The tray's persistent choices (currently just the whisper model).
+CONFIG_PATH = os.path.join(STATE_DIR, "config.json")
+
+# Set by load_model(); published in the state file so the tray can show it.
+CURRENT_MODEL = None
+
+
+def configured_model():
+    """Model choice: WHISPER_MODEL env wins (documented), then the tray's
+    config file, else None (the caller falls back to the device default)."""
+    env = os.environ.get("WHISPER_MODEL")
+    if env:
+        return env
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            name = json.load(fh).get("model")
+        if isinstance(name, str) and name:
+            return name
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def write_state(state):
@@ -100,7 +122,8 @@ def write_state(state):
         tmp = STATE_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"state": state, "pid": os.getpid(),
-                       "version": VERSION, "ts": time.time()}, fh)
+                       "version": VERSION, "model": CURRENT_MODEL,
+                       "ts": time.time()}, fh)
         os.replace(tmp, STATE_PATH)
     except OSError:
         pass
@@ -690,8 +713,9 @@ class DictationDaemon:
         self.listener, self.injector = make_backends(PTT_KEY)
 
     def load_model(self):
+        global CURRENT_MODEL
         device, compute, default_model = pick_device()
-        name = os.environ.get("WHISPER_MODEL") or default_model
+        name = configured_model() or default_model
         from faster_whisper import WhisperModel
         print(f"loading whisper '{name}' on {device} ({compute}) ...", file=sys.stderr)
         try:
@@ -702,6 +726,7 @@ class DictationDaemon:
                 self.model = WhisperModel(name, device="cpu", compute_type="int8")
             else:
                 raise
+        CURRENT_MODEL = name
         log(f"model loaded: {name}/{device}")
 
     def start_recording(self):

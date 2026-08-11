@@ -110,3 +110,19 @@ def test_no_pending_update_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(tray.subprocess, "run", lambda *a, **k: calls.append(a))
     tray.run_pending_update_if_any()
     assert calls == []
+
+
+def test_write_model_config_roundtrip(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(tray, "CONFIG_PATH", str(cfg))
+    tray.write_model_config("base")
+    assert json.loads(cfg.read_text(encoding="utf-8")) == {"model": "base"}
+
+
+def test_clear_model_env_posix_clears_only_process_env(monkeypatch):
+    import os
+    import sys
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("WHISPER_MODEL", "small")
+    tray.clear_model_env()
+    assert "WHISPER_MODEL" not in os.environ
