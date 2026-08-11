@@ -63,7 +63,12 @@ ImageDraw = None
 
 
 def load_tray_backend():
-    """Import pystray/PIL; False when they are not installed (headless mode)."""
+    """Import pystray/PIL; False when unusable (headless mode).
+
+    Catches everything, not just ImportError: on a headless Linux box
+    pystray's xorg backend raises Xlib DisplayNameError at import time —
+    and headless fallback is exactly the case we must not crash in.
+    """
     global pystray, Image, ImageDraw
     try:
         import pystray as _pystray
@@ -71,7 +76,7 @@ def load_tray_backend():
         from PIL import ImageDraw as _ImageDraw
         pystray, Image, ImageDraw = _pystray, _Image, _ImageDraw
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
