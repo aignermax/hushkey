@@ -113,6 +113,27 @@ def test_no_pending_update_is_a_noop(tmp_path, monkeypatch):
     assert calls == []
 
 
+def test_state_from_trusts_only_live_pids():
+    import os
+    assert tray.state_from({"state": "recording", "pid": os.getpid()}) == "recording"
+    assert tray.state_from({"state": "recording", "pid": 99999999}) == "stopped"
+    assert tray.state_from({"state": "recording"}) == "stopped"
+
+
+def test_overlay_wanted_gate(monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("PTT_OVERLAY", raising=False)
+    assert tray.overlay_wanted() is True       # default on for Windows
+    monkeypatch.setenv("PTT_OVERLAY", "0")
+    assert tray.overlay_wanted() is False      # explicit off
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("PTT_OVERLAY", raising=False)
+    assert tray.overlay_wanted() is False      # default off elsewhere
+    monkeypatch.setenv("PTT_OVERLAY", "1")
+    assert tray.overlay_wanted() is True       # opt-in (X11)
+
+
 def test_write_model_config_roundtrip(tmp_path, monkeypatch):
     cfg = tmp_path / "config.json"
     monkeypatch.setattr(tray, "CONFIG_PATH", str(cfg))
