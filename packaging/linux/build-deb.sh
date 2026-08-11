@@ -25,9 +25,10 @@ cp "$ROOT/udev/"*.rules "$DEST/opt/hushkey/udev/"
 
 # --- metadata ---------------------------------------------------------------
 sed "s|@VERSION@|$VER|" "$ROOT/packaging/linux/control.in" > "$DEST/DEBIAN/control"
-cp "$ROOT/packaging/linux/postinst" "$DEST/DEBIAN/postinst"
-cp "$ROOT/packaging/linux/prerm" "$DEST/DEBIAN/prerm"
-chmod 0755 "$DEST/DEBIAN/postinst" "$DEST/DEBIAN/prerm"
+for maint in postinst prerm postrm; do
+  cp "$ROOT/packaging/linux/$maint" "$DEST/DEBIAN/$maint"
+  chmod 0755 "$DEST/DEBIAN/$maint"
+done
 
 dpkg-deb --build --root-owner-group "$DEST" "$OUT/$PKG.deb"
 echo "built $OUT/$PKG.deb"

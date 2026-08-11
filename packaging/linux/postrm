@@ -1,0 +1,27 @@
+#!/bin/sh
+# hushkey postrm: clean up what install.sh created outside dpkg's view.
+# The udev rule is ours (namespaced) and security-relevant — remove it always.
+# /etc/modules-load.d/uinput.conf is generic and may predate us — left alone.
+# User-level copies and units are removed only on purge.
+case "$1" in
+  remove|purge)
+    rm -f /etc/udev/rules.d/99-whisper-ptt-uinput.rules
+    ;;
+esac
+if [ "$1" = "purge" ]; then
+    USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
+    if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
+        USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6 || true)"
+        if [ -n "$USER_HOME" ]; then
+            rm -f "$USER_HOME/.config/systemd/user/whisper-ptt.service" \
+                  "$USER_HOME/.config/systemd/user/ydotoold.service"
+            rm -rf "$USER_HOME/.local/share/hushkey"
+        fi
+        USER_ID="$(id -u "$USER_NAME" 2>/dev/null || true)"
+        if [ -n "$USER_ID" ]; then
+            sudo -u "$USER_NAME" XDG_RUNTIME_DIR="/run/user/$USER_ID" \
+                systemctl --user daemon-reload >/dev/null 2>&1 || true
+        fi
+    fi
+fi
+exit 0

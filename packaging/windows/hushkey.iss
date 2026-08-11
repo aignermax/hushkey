@@ -6,6 +6,8 @@
     #define MyAppVersion "0.0.0-dev"
   #endif
 #endif
+; SHA-256 of https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
+#define PythonSha256 "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
 
 [Setup]
 AppId={{7F3A9C2E-4B6D-4E1A-9C5F-2D8E6A1B3F47}
@@ -16,6 +18,7 @@ AppPublisher=aignermax
 AppPublisherURL=https://github.com/aignermax/hushkey
 DefaultDirName={localappdata}\Programs\hushkey
 PrivilegesRequired=lowest
+ArchitecturesAllowed=x64compatible
 OutputDir=dist
 OutputBaseFilename=hushkey-setup-{#MyAppVersion}
 SetupIconFile=logo.ico
@@ -39,23 +42,47 @@ Source: "..\..\assets\logo.png"; DestDir: "{app}\assets"
 Source: "logo.ico"; DestDir: "{app}"
 
 [UninstallRun]
-; stop tray + daemon, drop the autostart entry, before files are removed
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"""; Flags: runhidden waituntildone
+; stop tray + daemon, drop the autostart entry AND the venv (-Purge),
+; before Inno removes the payload files
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" -Purge"; Flags: runhidden waituntildone
 
 [Code]
 function HavePython(): Boolean;
 var
   ResultCode: Integer;
 begin
-  Result := Exec('cmd.exe', '/c python --version >nul 2>&1', '', SW_HIDE,
-                 ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  // version-aware: an ancient python on PATH must not suppress the bootstrap
+  Result := Exec('cmd.exe',
+    '/c python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
   if not Result then
-    Result := Exec('cmd.exe', '/c py -3 --version >nul 2>&1', '', SW_HIDE,
-                   ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+    Result := Exec('cmd.exe',
+      '/c py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
   if not Result then
-    // just bootstrapped by us, PATH of this process is stale
+    // just bootstrapped by us — PATH of this process is stale
     Result := FileExists(ExpandConstant(
                 '{localappdata}\Programs\Python\Python312\python.exe'));
+end;
+
+function VerifySha256(const FileName, Expected: string): Boolean;
+var
+  OutFile, Output, Clean: string;
+  ResultCode, I: Integer;
+begin
+  OutFile := ExpandConstant('{tmp}\pyhash.txt');
+  Exec('cmd.exe', '/c certutil -hashfile "' + FileName + '" SHA256 > "' + OutFile + '"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not LoadStringFromFile(OutFile, Output) then
+  begin
+    Result := False;
+    exit;
+  end;
+  Clean := '';
+  for I := 1 to Length(Output) do
+    if (Output[I] in ['0'..'9', 'a'..'f', 'A'..'F']) then
+      Clean := Clean + Uppercase(Output[I]);
+  Result := Pos(Uppercase(Expected), Clean) > 0;
 end;
 
 procedure InstallPython();
@@ -67,12 +94,20 @@ begin
   if Exec('cmd.exe', '/c winget install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements >nul 2>&1',
           '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
     exit;
-  // fallback: official per-user installer from python.org
+  // fallback: official per-user installer from python.org, checksum-pinned
   Installer := ExpandConstant('{tmp}\python-3.12.10-amd64.exe');
-  if Exec('cmd.exe', '/c curl -fsSL -o "' + Installer + '" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe',
-          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
-    Exec(Installer, '/quiet InstallAllUsers=0 PrependPath=1 Include_test=0',
-         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not (Exec('cmd.exe', '/c curl -fsSL -o "' + Installer + '" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe',
+          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0)) then
+    exit;
+  if not VerifySha256(Installer, '{#PythonSha256}') then
+  begin
+    DeleteFile(Installer);
+    MsgBox('The downloaded Python installer failed its checksum — ' +
+           'aborting the automatic Python install.', mbError, MB_OK);
+    exit;
+  end;
+  Exec(Installer, '/quiet InstallAllUsers=0 PrependPath=1 Include_test=0',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -93,9 +128,11 @@ begin
     else
     begin
       WizardForm.StatusLabel.Caption := 'Setting up hushkey (venv + dependencies + autostart) ...';
+      // visible console on purpose: pip can take minutes, a hidden window
+      // looks like a frozen installer
       if not Exec('powershell.exe',
                   '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\install.ps1"',
-                  ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)
+                  ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode)
          or (ResultCode <> 0) then
         MsgBox('hushkey setup failed. Run install.ps1 in ' + ExpandConstant('{app}')
                + ' to see the error.', mbError, MB_OK);

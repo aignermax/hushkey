@@ -3,8 +3,8 @@ Version: @VERSION@
 Section: utils
 Priority: optional
 Architecture: all
-Maintainer: aignermax <https://github.com/aignermax>
-Depends: python3 (>= 3.10), python3-venv, curl
+Maintainer: aignermax <aignermax@users.noreply.github.com>
+Depends: python3 (>= 3.10), python3-venv, python3-dev, build-essential, curl, sudo
 Recommends: pipewire-bin, ydotool, wl-clipboard
 Homepage: https://github.com/aignermax/hushkey
 Description: local, offline push-to-talk dictation
@@ -14,5 +14,6 @@ Description: local, offline push-to-talk dictation
  .
  The postinst script copies the sources into the installing user's
  ~/.local/share/hushkey and runs install.sh there (venv, dependencies,
- systemd user service). On Wayland it may ask for group membership in
- 'input', which needs one logout.
+ systemd user service). build-essential/python3-dev are hard dependencies so
+ install.sh never needs apt inside a dpkg transaction. On Wayland it may ask
+ for group membership in 'input', which needs one logout.

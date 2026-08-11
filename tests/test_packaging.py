@@ -24,10 +24,17 @@ def test_iss_sources_all_exist():
 def test_iss_mentions_every_runtime_file():
     """The Windows payload must mirror what install.ps1 needs at runtime."""
     text = ISS.read_text(encoding="utf-8")
-    for needed in ("dictate.py", "tray.py", "recorder.py", "install.ps1",
-                   "uninstall.ps1", "requirements.txt", "requirements-gpu.txt",
-                   "assets\\logo.png"):
+    for needed in ("dictate.py", "tray.py", "recorder.py", "transcribe.py",
+                   "install.ps1", "uninstall.ps1", "requirements.txt",
+                   "requirements-gpu.txt", "assets\\logo.png"):
         assert needed in text, f"{needed} not packed by hushkey.iss"
+
+
+def test_iss_uninstalls_and_verifies_properly():
+    text = ISS.read_text(encoding="utf-8")
+    assert "-Purge" in text              # UninstallRun must also drop the venv
+    assert "ArchitecturesAllowed" in text
+    assert "SHA256" in text              # python.org fallback is checksum-pinned
 
 
 def test_deb_payload_matches_install_sh_expectations():
@@ -49,7 +56,7 @@ def test_deb_control_has_mandatory_fields():
 def test_packaging_shell_scripts_parse():
     """bash -n for every shipped shell script (works on any CI OS)."""
     import subprocess
-    for script in [DEB / "build-deb.sh", DEB / "postinst", DEB / "prerm"]:
+    for script in [DEB / "build-deb.sh", DEB / "postinst", DEB / "prerm", DEB / "postrm"]:
         # relative path + cwd: keeps working whether "bash" is Git Bash or WSL
         subprocess.run(["bash", "-n", script.relative_to(ROOT).as_posix()],
                        cwd=ROOT, check=True)

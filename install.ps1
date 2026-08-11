@@ -42,8 +42,11 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
 } else {
     # A Python installed moments ago (e.g. by the setup.exe bootstrap via
     # winget) is not on this process's PATH yet — probe the standard spot.
+    # Version-aware: skip anything below 3.10 (e.g. a stray Python39).
     $candidate = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending | Select-Object -First 1
+        Where-Object { ($_.Directory.Name -replace '\D', '') -as [int] -ge 310 } |
+        Sort-Object { ($_.Directory.Name -replace '\D', '') -as [int] } -Descending |
+        Select-Object -First 1
     if ($candidate) {
         $Python = $candidate.FullName; $PyArgs = @()
     } else {

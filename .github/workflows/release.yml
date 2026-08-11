@@ -1,5 +1,8 @@
 name: release
 
+permissions:
+  contents: write  # attaching artifacts to the release
+
 on:
   push:
     tags: ["v*"]
@@ -36,14 +39,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hushkey-setup.exe
+          name: windows-exe
           path: packaging/windows/dist/*.exe
-
-      - name: Attach to GitHub release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: packaging/windows/dist/*.exe
 
   deb-package:
     runs-on: ubuntu-latest
@@ -58,11 +55,22 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hushkey-deb
+          name: linux-deb
           path: dist/*.deb
 
-      - name: Attach to GitHub release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+  publish:
+    # single job attaches everything — two parallel action-gh-release calls
+    # on a not-yet-existing release race (check-then-create)
+    if: github.ref_type == 'tag'
+    needs: [windows-installer, deb-package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: dist/*.deb
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.deb
