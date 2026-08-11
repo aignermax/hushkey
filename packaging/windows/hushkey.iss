@@ -44,7 +44,7 @@ Source: "logo.ico"; DestDir: "{app}"
 [UninstallRun]
 ; stop tray + daemon, drop the autostart entry AND the venv (-Purge),
 ; before Inno removes the payload files
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" -Purge"; Flags: runhidden waituntildone
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" -Purge"; Flags: runhidden waituntilterminated
 
 [Code]
 function HavePython(): Boolean;
