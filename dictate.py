@@ -102,12 +102,11 @@ def configured_model():
         return env
     try:
         with open(CONFIG_PATH, encoding="utf-8") as fh:
-            name = json.load(fh).get("model")
-        if isinstance(name, str) and name:
-            return name
+            data = json.load(fh)
     except (OSError, ValueError):
-        pass
-    return None
+        return None
+    name = data.get("model") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name else None
 
 
 def write_state(state):

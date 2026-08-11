@@ -160,6 +160,8 @@ def test_configured_model_from_tray_config(monkeypatch, tmp_path):
     assert dictate.configured_model() == "medium"
     cfg.write_text('{broken', encoding="utf-8")
     assert dictate.configured_model() is None  # corrupt config is ignored
+    cfg.write_text('"small"', encoding="utf-8")
+    assert dictate.configured_model() is None  # valid JSON, wrong shape: ignored
 
 
 def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):

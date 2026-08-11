@@ -1,6 +1,7 @@
 """Tests for tray.py — pure logic only; no icon is ever shown."""
 
 import json
+import time
 
 import tray
 
@@ -126,3 +127,65 @@ def test_clear_model_env_posix_clears_only_process_env(monkeypatch):
     monkeypatch.setenv("WHISPER_MODEL", "small")
     tray.clear_model_env()
     assert "WHISPER_MODEL" not in os.environ
+
+
+def test_model_menu_constructs_and_actions_fire(monkeypatch):
+    """Regression test: pystray rejects actions with >2 args (incl. defaults)."""
+    import pytest
+    if not tray.load_tray_backend():
+        pytest.skip("pystray not installed")
+    t = tray.Tray.__new__(tray.Tray)
+    chosen = []
+    monkeypatch.setattr(t, "_set_model", chosen.append)
+    menu = t._model_menu()
+    items = list(menu.items)
+    assert len(items) == len(tray.MODELS)
+    items[0](None)  # activate "tiny" — must reach _set_model
+    assert chosen == [tray.MODELS[0][0]]
+    monkeypatch.setattr(tray, "current_model", lambda: "small")
+    checked = [bool(i.checked) for i in items]
+    assert checked == [name == "small" for name, _ in tray.MODELS]
+
+
+def test_current_model_ignores_state_with_dead_pid(tmp_path, monkeypatch):
+    import os
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(tray, "STATE_PATH", str(state))
+    monkeypatch.setattr(tray.dictate, "CONFIG_PATH", str(tmp_path / "cfg.json"))
+    monkeypatch.delenv("WHISPER_MODEL", raising=False)
+    (tmp_path / "cfg.json").write_text('{"model": "medium"}', encoding="utf-8")
+    state.write_text(json.dumps({"state": "idle", "pid": 99999999,
+                                 "model": "tiny"}), encoding="utf-8")
+    assert tray.current_model() == "medium"  # dead pid -> config wins
+    state.write_text(json.dumps({"state": "idle", "pid": os.getpid(),
+                                 "model": "tiny"}), encoding="utf-8")
+    assert tray.current_model() == "tiny"  # live daemon reports the truth
+
+
+def test_poll_state_starting_while_child_alive_and_state_stale(tmp_path, monkeypatch):
+    import threading
+    monkeypatch.setattr(tray, "STATE_PATH", str(tmp_path / "missing.json"))
+    t = tray.Tray.__new__(tray.Tray)
+    t.state = "boot"
+    t.stopping = threading.Event()
+    t.daemon = type("D", (), {"alive": True})()
+    t.images = {"idle": None, "starting": None}
+    updates = []
+
+    class FakeIcon:
+        icon = None
+        title = None
+
+        def update_menu(self):
+            updates.append(1)
+
+    t.icon = FakeIcon()
+    thread = threading.Thread(target=t.poll_state, daemon=True)
+    thread.start()
+    deadline = time.time() + 3
+    while t.state != "starting" and time.time() < deadline:
+        time.sleep(0.05)
+    t.stopping.set()
+    thread.join(3)
+    assert t.state == "starting"
+    assert updates  # the menu was rebuilt for the state change

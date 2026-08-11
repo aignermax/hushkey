@@ -130,9 +130,14 @@ def write_model_config(name):
 
 
 def current_model():
-    """The model the daemon runs/reports, else the configured choice, else None."""
+    """The model the daemon reports, else the configured choice, else None.
+
+    A state file whose pid is gone is stale — trust the configuration then,
+    not the model some dead daemon used to run.
+    """
     data = read_state()
-    if isinstance(data.get("model"), str) and data["model"]:
+    if pid_alive(data.get("pid")) and isinstance(data.get("model"), str) \
+            and data["model"]:
         return data["model"]
     return dictate.configured_model()
 
@@ -439,7 +444,7 @@ _STRINGS = {
         "status": "hushkey {version} · {model} — {state}",
         "model_menu": "Modell",
         "model_switching_title": "hushkey Modell",
-        "model_switching": "wechsle zu {model} — beim ersten Mal {size} Download",
+        "model_switching": "wechsle zu {model} — beim ersten Mal werden {size} geladen",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -504,12 +509,19 @@ class Tray:
         )
 
     def _model_menu(self):
+        # pystray accepts at most 2-arg actions — bind the name via factory,
+        # not via a default argument (that would count towards co_argcount).
         item = pystray.MenuItem
+
+        def make_action(name):
+            return lambda _i, _m: self._set_model(name)
+
+        def make_checked(name):
+            return lambda _m: current_model() == name
+
         return pystray.Menu(*[
-            item(f"{name} ({size})",
-                 lambda _i, _m, n=name: self._set_model(n),
-                 checked=lambda _m, n=name: current_model() == n,
-                 radio=True)
+            item(f"{name} ({size})", make_action(name),
+                 checked=make_checked(name), radio=True)
             for name, size in MODELS
         ])
 
@@ -546,6 +558,8 @@ class Tray:
                          daemon=True).start()
 
     def _model_worker(self, name):
+        if name == current_model():
+            return  # re-clicking the active model must not restart the daemon
         clear_model_env()  # an env var would mask the tray's config choice
         write_model_config(name)
         size = dict(MODELS).get(name, "")

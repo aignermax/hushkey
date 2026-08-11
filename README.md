@@ -92,7 +92,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | Variable | Default | Meaning |
 |---|---|---|
 | `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`) |
-| `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; or pick it in the tray menu (**Model**) — the env var wins over the tray's choice |
+| `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
