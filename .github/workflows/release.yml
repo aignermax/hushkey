@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    # smoke-build the installers on packaging changes (no upload)
+    paths: ["packaging/**", ".github/workflows/release.yml", "install.ps1", "install.sh"]
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate logo.ico
+        run: |
+          pip install pillow
+          python packaging/windows/make_ico.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          if ("${{ github.ref_type }}" -ne "tag") { $ver = "0.0.0-ci" } else { $ver = $ver.TrimStart("v") }
+          $env:HUSHKEY_VERSION = $ver
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging/windows/hushkey.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushkey-setup.exe
+          path: packaging/windows/dist/*.exe
+
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/windows/dist/*.exe
+
+  deb-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .deb
+        run: |
+          ver="${GITHUB_REF_NAME}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] && ver="${ver#v}" || ver="0.0.0-ci"
+          bash packaging/linux/build-deb.sh "$ver" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hushkey-deb
+          path: dist/*.deb
+
+      - name: Attach to GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb

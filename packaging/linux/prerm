@@ -1,0 +1,11 @@
+#!/bin/sh
+# hushkey prerm: stop the user services before the payload leaves /opt.
+# Best effort — a user who never ran the postinst setup has nothing to stop.
+USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
+    USER_ID="$(id -u "$USER_NAME")"
+    sudo -u "$USER_NAME" XDG_RUNTIME_DIR="/run/user/$USER_ID" \
+        systemctl --user disable --now whisper-ptt.service ydotoold.service \
+        >/dev/null 2>&1 || true
+fi
+exit 0
