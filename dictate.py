@@ -798,6 +798,7 @@ class DictationDaemon:
             problem = component.check()
             if problem:
                 sys.exit(f"{which} backend unusable: {problem}")
+        write_state("starting")  # tray + overlay show the boot/download phase
         self.load_model()
         notify("dictation ready", f"hold {PTT_KEY} and speak")
         print(f"push-to-talk ready on '{PTT_KEY}' ({which}) — hold to record",

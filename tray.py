@@ -137,10 +137,12 @@ def state_from(data):
 
 
 def overlay_wanted():
-    """The recording overlay: on for Windows, opt-in elsewhere (PTT_OVERLAY=1),
-    off with PTT_OVERLAY=0. Linux desktops show their own mic indicator, and
-    macOS requires tkinter and pystray on the same main thread — so neither
-    gets it by default."""
+    """The recording overlay: on for Windows, opt-in on other X11-ish desktops
+    (PTT_OVERLAY=1), off with PTT_OVERLAY=0. Linux desktops show their own mic
+    indicator; on macOS tkinter and pystray would fight over the main thread,
+    so it is never enabled there."""
+    if sys.platform == "darwin":
+        return False
     default = "1" if sys.platform == "win32" else "0"
     return os.environ.get("PTT_OVERLAY", default) != "0"
 
@@ -505,6 +507,18 @@ def load_images():
     return images
 
 
+OVERLAY_COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20",
+                  "starting": "#718096"}
+OVERLAY_BG = "#2d3542"
+
+
+def pill_for(state):
+    """(color, text) for the overlay, or None when it should stay hidden."""
+    if state in OVERLAY_COLORS:
+        return OVERLAY_COLORS[state], S.get(state, state)
+    return None
+
+
 class RecordingOverlay:
     """Small always-on-top pill at the top of the screen while the daemon is
     recording or transcribing — the indicator an auto-hidden taskbar swallows.
@@ -514,9 +528,6 @@ class RecordingOverlay:
     cross-thread tkinter usage to go wrong.
     """
 
-    COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20",
-              "starting": "#718096"}
-    BG = "#2d3542"
     TITLE = "hushkey-overlay"
 
     def start(self):
@@ -532,25 +543,25 @@ class RecordingOverlay:
         except tk.TclError:
             return  # no display (headless) — same deal
         root.title(self.TITLE)
-        root.overrideredirect(True)
+        root.overrideredirect(True)  # Windows: Tk itself gives these WS_EX_TOOLWINDOW
         root.attributes("-topmost", True)
         # no -alpha: layered windows are invisible to screen captures and can
         # glitch on some setups — a solid dark pill is the reliable choice
-        frame = tk.Frame(root, bg=self.BG)
-        dot = tk.Label(frame, text="●", bg=self.BG, font=("Segoe UI", 11))
-        text = tk.Label(frame, bg=self.BG, fg="#ffffff",
+        frame = tk.Frame(root, bg=OVERLAY_BG)
+        dot = tk.Label(frame, text="●", bg=OVERLAY_BG, font=("Segoe UI", 11))
+        text = tk.Label(frame, bg=OVERLAY_BG, fg="#ffffff",
                         font=("Segoe UI", 10, "bold"))
         dot.pack(side="left", padx=(12, 6), pady=5)
         text.pack(side="left", padx=(0, 14), pady=5)
         frame.pack()
         root.withdraw()
-        self._click_through(root)
 
         def tick():
-            state = state_from(read_state())
-            if state in self.COLORS:
-                dot.config(fg=self.COLORS[state])
-                text.config(text=S.get(state, state))
+            pill = pill_for(state_from(read_state()))
+            if pill:
+                color, label = pill
+                dot.config(fg=color)
+                text.config(text=label)
                 root.update_idletasks()
                 x = (root.winfo_screenwidth() - root.winfo_reqwidth()) // 2
                 root.geometry(f"+{x}+6")
@@ -561,21 +572,6 @@ class RecordingOverlay:
 
         tick()
         root.mainloop()
-
-    @staticmethod
-    def _click_through(root):
-        """Windows: WS_EX_TOOLWINDOW keeps the pill out of the taskbar/alt-tab.
-        Click-through (WS_EX_TRANSPARENT) is deliberately not used: it needs
-        WS_EX_LAYERED, and layered windows vanish from screen captures."""
-        if sys.platform != "win32":
-            return
-        try:
-            import ctypes
-            hwnd = int(root.wm_frame(), 16)
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | 0x80)
-        except Exception:
-            pass
 
 
 class Tray:

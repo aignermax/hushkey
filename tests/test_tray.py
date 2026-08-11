@@ -132,6 +132,17 @@ def test_overlay_wanted_gate(monkeypatch):
     assert tray.overlay_wanted() is False      # default off elsewhere
     monkeypatch.setenv("PTT_OVERLAY", "1")
     assert tray.overlay_wanted() is True       # opt-in (X11)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert tray.overlay_wanted() is False      # never on macOS (main-thread clash)
+
+
+def test_pill_for_known_and_hidden_states():
+    color, label = tray.pill_for("recording")
+    assert color == tray.OVERLAY_COLORS["recording"] and label
+    assert tray.pill_for("idle") is None
+    assert tray.pill_for("stopped") is None
+    # every pill state must have a display string (and vice versa)
+    assert set(tray.OVERLAY_COLORS) <= set(tray.S)
 
 
 def test_write_model_config_roundtrip(tmp_path, monkeypatch):
