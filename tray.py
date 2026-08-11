@@ -17,6 +17,10 @@ one menu click splits the work into two phases so a running tray never locks
 a file the installer replaces (a loaded pillow .pyd is locked on Windows):
 phase 1 only swaps the source files; phase 2 (the installer with its pip
 installs) runs at the next tray startup, before pystray/PIL are imported.
+
+On Windows, a small always-on-top pill at the top of the screen shows
+recording/transcribing state — the indicator the (auto-hidden) taskbar
+swallows. PTT_OVERLAY=0 turns it off; PTT_OVERLAY=1 enables it on X11.
 """
 from __future__ import annotations
 
@@ -123,6 +127,24 @@ def pid_alive(pid):
         return True  # exists but is not ours (EPERM number varies by OS)
     except OSError:
         return False
+
+
+def state_from(data):
+    """Effective daemon state from a state-file dict: dead pid means stopped."""
+    if not pid_alive(data.get("pid")):
+        return "stopped"
+    return data.get("state", "stopped")
+
+
+def overlay_wanted():
+    """The recording overlay: on for Windows, opt-in on other X11-ish desktops
+    (PTT_OVERLAY=1), off with PTT_OVERLAY=0. Linux desktops show their own mic
+    indicator; on macOS tkinter and pystray would fight over the main thread,
+    so it is never enabled there."""
+    if sys.platform == "darwin":
+        return False
+    default = "1" if sys.platform == "win32" else "0"
+    return os.environ.get("PTT_OVERLAY", default) != "0"
 
 
 def write_model_config(name):
@@ -417,6 +439,7 @@ _STRINGS = {
         "idle": "ready",
         "recording": "recording …",
         "transcribing": "transcribing …",
+        "starting": "starting …",
         "stopped": "daemon stopped",
         "title": "hushkey — {state}",
         "status": "hushkey {version} · {model} — {state}",
@@ -444,6 +467,7 @@ _STRINGS = {
         "idle": "bereit",
         "recording": "Aufnahme …",
         "transcribing": "transkribiert …",
+        "starting": "startet …",
         "stopped": "Daemon gestoppt",
         "title": "hushkey — {state}",
         "status": "hushkey {version} · {model} — {state}",
@@ -481,6 +505,73 @@ def load_images():
         images[state] = img
     images["stopped"] = base.convert("L").convert("RGBA")  # greyed out
     return images
+
+
+OVERLAY_COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20",
+                  "starting": "#718096"}
+OVERLAY_BG = "#2d3542"
+
+
+def pill_for(state):
+    """(color, text) for the overlay, or None when it should stay hidden."""
+    if state in OVERLAY_COLORS:
+        return OVERLAY_COLORS[state], S.get(state, state)
+    return None
+
+
+class RecordingOverlay:
+    """Small always-on-top pill at the top of the screen while the daemon is
+    recording or transcribing — the indicator an auto-hidden taskbar swallows.
+
+    Fully self-contained: its own tkinter loop in its own thread, polling the
+    state file directly. Nobody calls into it from outside, so there is no
+    cross-thread tkinter usage to go wrong.
+    """
+
+    TITLE = "hushkey-overlay"
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            import tkinter as tk
+        except ImportError:
+            return  # python3-tk not installed — no overlay, no problem
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            return  # no display (headless) — same deal
+        root.title(self.TITLE)
+        root.overrideredirect(True)  # Windows: Tk itself gives these WS_EX_TOOLWINDOW
+        root.attributes("-topmost", True)
+        # no -alpha: layered windows are invisible to screen captures and can
+        # glitch on some setups — a solid dark pill is the reliable choice
+        frame = tk.Frame(root, bg=OVERLAY_BG)
+        dot = tk.Label(frame, text="●", bg=OVERLAY_BG, font=("Segoe UI", 11))
+        text = tk.Label(frame, bg=OVERLAY_BG, fg="#ffffff",
+                        font=("Segoe UI", 10, "bold"))
+        dot.pack(side="left", padx=(12, 6), pady=5)
+        text.pack(side="left", padx=(0, 14), pady=5)
+        frame.pack()
+        root.withdraw()
+
+        def tick():
+            pill = pill_for(state_from(read_state()))
+            if pill:
+                color, label = pill
+                dot.config(fg=color)
+                text.config(text=label)
+                root.update_idletasks()
+                x = (root.winfo_screenwidth() - root.winfo_reqwidth()) // 2
+                root.geometry(f"+{x}+6")
+                root.deiconify()
+            else:
+                root.withdraw()
+            root.after(200, tick)
+
+        tick()
+        root.mainloop()
 
 
 class Tray:
@@ -671,6 +762,8 @@ def main():
         print("another hushkey tray is already running", file=sys.stderr)
         return 1
     run_pending_update_if_any()  # before any GUI import locks files (Windows)
+    if overlay_wanted():
+        RecordingOverlay().start()
     if not load_tray_backend():
         print("pystray/pillow missing - supervising daemon without tray icon",
               file=sys.stderr)

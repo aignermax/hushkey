@@ -101,6 +101,7 @@ A trailing space is appended so consecutive dictations don't stick together.
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and daily, notify when a newer version is out (install is always one manual click); `0` disables the check |
+| `PTT_OVERLAY` | `1` on Windows, else `0` | Show a small always-on-top pill at the top of the screen while recording/transcribing — useful when the taskbar hides the tray icon. `1` also enables it on X11 |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
@@ -136,7 +137,9 @@ clipboard.
 ## Manage
 
 The **tray icon** (the husky) shows the live state — greyed out when the daemon
-is stopped, red badge while recording, amber while transcribing. Its menu lets
+is stopped, red badge while recording, amber while transcribing. On Windows a
+small always-on-top pill at the top of the screen shows the same state, so an
+auto-hidden taskbar cannot swallow it. The menu lets
 you switch the whisper model, restart the daemon, open the log folder, check
 for updates and install a new release with one click. If the icon cannot be
 shown (e.g. GNOME without an AppIndicator extension), the daemon keeps running
