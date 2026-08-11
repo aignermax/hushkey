@@ -67,7 +67,8 @@ end;
 
 function VerifySha256(const FileName, Expected: string): Boolean;
 var
-  OutFile, Output, Clean: string;
+  OutFile, Clean: string;
+  Output: AnsiString;
   ResultCode, I: Integer;
 begin
   OutFile := ExpandConstant('{tmp}\pyhash.txt');

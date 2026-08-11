@@ -1,0 +1,6 @@
+# Shell scripts must stay LF everywhere — Windows checkouts (autocrlf)
+# would otherwise break bash and the deb maintainer scripts.
+*.sh text eol=lf
+packaging/linux/postinst text eol=lf
+packaging/linux/prerm text eol=lf
+packaging/linux/postrm text eol=lf
