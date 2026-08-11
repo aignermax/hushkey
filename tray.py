@@ -42,8 +42,18 @@ import dictate  # noqa: E402  local module: single source for VERSION/STATE_DIR
 
 VERSION = dictate.VERSION
 STATE_PATH = dictate.STATE_PATH
+CONFIG_PATH = dictate.CONFIG_PATH
 UPDATE_LOG = os.path.join(dictate.STATE_DIR, "update.log")
 UPDATE_PENDING = os.path.join(dictate.STATE_DIR, "update-pending")
+
+# (name, download size) shown in the Model submenu
+MODELS = [
+    ("tiny", "~75 MB"),
+    ("base", "~150 MB"),
+    ("small", "~500 MB"),
+    ("medium", "~1.5 GB"),
+    ("large-v3", "~3 GB"),
+]
 
 # Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
 # must be able to run before these modules lock any of their files.
@@ -53,7 +63,12 @@ ImageDraw = None
 
 
 def load_tray_backend():
-    """Import pystray/PIL; False when they are not installed (headless mode)."""
+    """Import pystray/PIL; False when unusable (headless mode).
+
+    Catches everything, not just ImportError: on a headless Linux box
+    pystray's xorg backend raises Xlib DisplayNameError at import time —
+    and headless fallback is exactly the case we must not crash in.
+    """
     global pystray, Image, ImageDraw
     try:
         import pystray as _pystray
@@ -61,7 +76,7 @@ def load_tray_backend():
         from PIL import ImageDraw as _ImageDraw
         pystray, Image, ImageDraw = _pystray, _Image, _ImageDraw
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
@@ -108,6 +123,55 @@ def pid_alive(pid):
         return True  # exists but is not ours (EPERM number varies by OS)
     except OSError:
         return False
+
+
+def write_model_config(name):
+    """Persist the tray's model choice for the daemon (atomic write)."""
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"model": name}, fh)
+    os.replace(tmp, CONFIG_PATH)
+
+
+def current_model():
+    """The model the daemon reports, else the configured choice, else None.
+
+    A state file whose pid is gone is stale — trust the configuration then,
+    not the model some dead daemon used to run.
+    """
+    data = read_state()
+    if pid_alive(data.get("pid")) and isinstance(data.get("model"), str) \
+            and data["model"]:
+        return data["model"]
+    return dictate.configured_model()
+
+
+def clear_model_env():
+    """Unset WHISPER_MODEL so it cannot outrank the tray's config file.
+
+    Windows: delete the user-level (setx) value and broadcast the change; our
+    own process env is cleaned too, so a daemon we restart inherits the
+    cleared state. On Linux/macOS a service-level env var is a deliberate
+    manual override in a unit/plist — leave it alone.
+    """
+    os.environ.pop("WHISPER_MODEL", None)
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, "WHISPER_MODEL")
+    except FileNotFoundError:
+        return
+    try:
+        import ctypes
+        # WM_SETTINGCHANGE broadcast: new processes see the change at once.
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF, 0x1A, 0, "Environment", 0x2, 1000, None)
+    except Exception:
+        pass  # the next logon refreshes it anyway
 
 
 # --------------------------------------------------------------------------
@@ -355,7 +419,10 @@ _STRINGS = {
         "transcribing": "transcribing …",
         "stopped": "daemon stopped",
         "title": "hushkey — {state}",
-        "status": "hushkey {version} — {state}",
+        "status": "hushkey {version} · {model} — {state}",
+        "model_menu": "Model",
+        "model_switching_title": "hushkey model",
+        "model_switching": "switching to {model} — first use downloads {size}",
         "update_item": "Install update: v{version}",
         "check_now": "Check for updates",
         "restart": "Restart daemon",
@@ -379,7 +446,10 @@ _STRINGS = {
         "transcribing": "transkribiert …",
         "stopped": "Daemon gestoppt",
         "title": "hushkey — {state}",
-        "status": "hushkey {version} — {state}",
+        "status": "hushkey {version} · {model} — {state}",
+        "model_menu": "Modell",
+        "model_switching_title": "hushkey Modell",
+        "model_switching": "wechsle zu {model} — beim ersten Mal werden {size} geladen",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -429,8 +499,10 @@ class Tray:
         item = pystray.MenuItem
         return pystray.Menu(
             item(lambda _m: S["status"].format(
-                     version=VERSION, state=S.get(self.state, self.state)),
+                     version=VERSION, model=current_model() or "…",
+                     state=S.get(self.state, self.state)),
                  None, enabled=False),
+            item(S["model_menu"], self._model_menu()),
             pystray.Menu.SEPARATOR,
             item(lambda _m: S["update_item"].format(version=self.pending_update),
                  self._on_update, visible=lambda _m: self.pending_update is not None),
@@ -440,6 +512,23 @@ class Tray:
             pystray.Menu.SEPARATOR,
             item(S["quit"], self._on_quit),
         )
+
+    def _model_menu(self):
+        # pystray accepts at most 2-arg actions — bind the name via factory,
+        # not via a default argument (that would count towards co_argcount).
+        item = pystray.MenuItem
+
+        def make_action(name):
+            return lambda _i, _m: self._set_model(name)
+
+        def make_checked(name):
+            return lambda _m: current_model() == name
+
+        return pystray.Menu(*[
+            item(f"{name} ({size})", make_action(name),
+                 checked=make_checked(name), radio=True)
+            for name, size in MODELS
+        ])
 
     # -- menu actions ------------------------------------------------------
 
@@ -469,6 +558,20 @@ class Tray:
         threading.Thread(target=self.check_updates, kwargs={"manual": True},
                          daemon=True).start()
 
+    def _set_model(self, name):
+        threading.Thread(target=self._model_worker, args=(name,),
+                         daemon=True).start()
+
+    def _model_worker(self, name):
+        if name == current_model():
+            return  # re-clicking the active model must not restart the daemon
+        clear_model_env()  # an env var would mask the tray's config choice
+        write_model_config(name)
+        size = dict(MODELS).get(name, "")
+        self._notify(S["model_switching_title"],
+                     S["model_switching"].format(model=name, size=size))
+        self.daemon.restart()  # loads (and maybe downloads) the new model
+
     def _on_open_logs(self, _icon, _item):
         if sys.platform == "win32":
             os.startfile(dictate.STATE_DIR)
@@ -496,15 +599,16 @@ class Tray:
 
     def poll_state(self):
         while not self.stopping.is_set():
-            if not os.path.exists(STATE_PATH) and self.daemon.alive:
-                # First boot: the daemon is up but has not written state yet
-                # (the model download can take minutes) — not "stopped".
+            data = read_state()
+            pid = data.get("pid")
+            if os.path.exists(STATE_PATH) and pid_alive(pid):
+                state = data.get("state", "idle")
+            elif self.daemon.alive:
+                # Child is up but its state is missing or stale: first boot or
+                # a model download after a switch can take minutes.
                 state = "starting"
             else:
-                data = read_state()
-                state = data.get("state", "stopped")
-                if state != "stopped" and not pid_alive(data.get("pid")):
-                    state = "stopped"
+                state = "stopped"
             if state != self.state:
                 self.state = state
                 self.icon.icon = self.images.get(state, self.images["idle"])

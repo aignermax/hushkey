@@ -96,6 +96,7 @@ if (-not $NoAutostart) {
 Write-Host ""
 Write-Host "Done. Hold Right Ctrl in any window, speak, release - text gets typed."
 Write-Host "First dictation downloads the whisper model (~0.5-1.5 GB), then it is offline."
-Write-Host "Config: setx PTT_KEY f9 (also WHISPER_MODEL / WHISPER_LANG) - applies at next logon or daemon restart."
+Write-Host "Config: setx PTT_KEY f9 (also WHISPER_LANG) - applies at next logon or daemon restart."
+Write-Host "        the whisper model is easiest picked in the tray menu (or setx WHISPER_MODEL)."
 Write-Host "Logs:   $env:LOCALAPPDATA\whisper-ptt\dictate.log"
 Write-Host "Remove: powershell -ExecutionPolicy Bypass -File uninstall.ps1"

@@ -133,12 +133,35 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
 def test_write_state_publishes_json(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
+    monkeypatch.setattr(dictate, "CURRENT_MODEL", "small")
     dictate.write_state("recording")
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert data["state"] == "recording"
     assert data["pid"] == os.getpid()
     assert data["version"] == dictate.VERSION
+    assert data["model"] == "small"  # the tray shows this in its Model menu
     assert data["ts"] > 0
+
+
+def test_configured_model_env_wins_over_tray_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("WHISPER_MODEL", "tiny")
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"model": "medium"}', encoding="utf-8")
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(cfg))
+    assert dictate.configured_model() == "tiny"
+
+
+def test_configured_model_from_tray_config(monkeypatch, tmp_path):
+    monkeypatch.delenv("WHISPER_MODEL", raising=False)
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(cfg))
+    assert dictate.configured_model() is None  # nothing set -> device default
+    cfg.write_text('{"model": "medium"}', encoding="utf-8")
+    assert dictate.configured_model() == "medium"
+    cfg.write_text('{broken', encoding="utf-8")
+    assert dictate.configured_model() is None  # corrupt config is ignored
+    cfg.write_text('"small"', encoding="utf-8")
+    assert dictate.configured_model() is None  # valid JSON, wrong shape: ignored
 
 
 def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
