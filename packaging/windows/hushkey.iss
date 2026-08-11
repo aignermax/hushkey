@@ -83,7 +83,7 @@ begin
   Clean := '';
   for I := 1 to Length(S) do
     if (S[I] in ['0'..'9', 'a'..'f', 'A'..'F']) then
-      Clean := Clean + S[I];
+      Clean := Clean + Copy(S, I, 1);
   Result := Pos(Lowercase(Expected), Lowercase(Clean)) > 0;
 end;
 
