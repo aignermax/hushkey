@@ -53,12 +53,30 @@ def test_deb_control_has_mandatory_fields():
     assert "python3 (>= 3.10)" in control
 
 
+def _working_bash():
+    """A bash that actually runs — on GitHub's Windows runners, PATH finds
+    WSL's bash first, which has no distro and exits 1 on everything."""
+    import shutil
+    import subprocess
+    candidates = [shutil.which("bash"),
+                  r"C:\Program Files\Git\bin\bash.exe",
+                  r"C:\Program Files\Git\usr\bin\bash.exe"]
+    for cand in candidates:
+        if cand and subprocess.run([cand, "-c", "true"],
+                                   capture_output=True).returncode == 0:
+            return cand
+    return None
+
+
 def test_packaging_shell_scripts_parse():
     """bash -n for every shipped shell script (works on any CI OS)."""
     import subprocess
+    import pytest
+    bash = _working_bash()
+    if bash is None:
+        pytest.skip("no working bash on this machine")
     for script in [DEB / "build-deb.sh", DEB / "postinst", DEB / "prerm", DEB / "postrm"]:
-        # relative path + cwd: keeps working whether "bash" is Git Bash or WSL
-        subprocess.run(["bash", "-n", script.relative_to(ROOT).as_posix()],
+        subprocess.run([bash, "-n", script.relative_to(ROOT).as_posix()],
                        cwd=ROOT, check=True)
 
 

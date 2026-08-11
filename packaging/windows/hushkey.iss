@@ -67,7 +67,7 @@ end;
 
 function VerifySha256(const FileName, Expected: string): Boolean;
 var
-  OutFile, Clean: string;
+  OutFile, Clean, S: string;
   Output: AnsiString;
   ResultCode, I: Integer;
 begin
@@ -79,11 +79,12 @@ begin
     Result := False;
     exit;
   end;
+  S := string(Output);
   Clean := '';
-  for I := 1 to Length(Output) do
-    if (Output[I] in ['0'..'9', 'a'..'f', 'A'..'F']) then
-      Clean := Clean + Uppercase(Output[I]);
-  Result := Pos(Uppercase(Expected), Clean) > 0;
+  for I := 1 to Length(S) do
+    if (S[I] in ['0'..'9', 'a'..'f', 'A'..'F']) then
+      Clean := Clean + S[I];
+  Result := Pos(Lowercase(Expected), Lowercase(Clean)) > 0;
 end;
 
 procedure InstallPython();
