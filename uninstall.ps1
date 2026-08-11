@@ -24,9 +24,9 @@ if (Test-Path $LnkPath) {
     Write-Host "startup shortcut removed"
 }
 
-# Stop a daemon started from this checkout (no-op if none is running)
+# Stop tray + daemon started from this checkout (no-op if none is running)
 Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains("$Dir") -and $_.CommandLine.Contains("dictate.py") } |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains("$Dir") -and ($_.CommandLine.Contains("tray.py") -or $_.CommandLine.Contains("dictate.py")) } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Write-Host "daemon stopped (PID $($_.ProcessId))" }
 
 if ($Purge) {

@@ -194,7 +194,7 @@ def test_main_unit_is_always_written_and_substituted(sandbox):
         unit = (sandbox["units"] / "whisper-ptt.service").read_text()
         assert "@DIR@" not in unit
         assert str(sandbox["repo"]) in unit
-        assert "dictate.py" in unit
+        assert "tray.py" in unit  # the tray is the entry point and runs the daemon
 
 
 def test_unsupported_os_is_rejected(sandbox):
