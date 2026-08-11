@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+packaging/windows/logo.ico
+packaging/windows/dist/
+dist/

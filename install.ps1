@@ -40,8 +40,19 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
 } elseif (Get-Command py -ErrorAction SilentlyContinue) {
     $Python = "py"; $PyArgs = @("-3")
 } else {
-    Write-Error "Python 3 not found. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH')."
-    exit 1
+    # A Python installed moments ago (e.g. by the setup.exe bootstrap via
+    # winget) is not on this process's PATH yet — probe the standard spot.
+    # Version-aware: skip anything below 3.10 (e.g. a stray Python39).
+    $candidate = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Where-Object { ($_.Directory.Name -replace '\D', '') -as [int] -ge 310 } |
+        Sort-Object { ($_.Directory.Name -replace '\D', '') -as [int] } -Descending |
+        Select-Object -First 1
+    if ($candidate) {
+        $Python = $candidate.FullName; $PyArgs = @()
+    } else {
+        Write-Error "Python 3 not found. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH')."
+        exit 1
+    }
 }
 $verOk = & $Python @PyArgs -c "import sys; print(sys.version_info >= (3, 10))" 2>$null
 if ($verOk -ne "True") {

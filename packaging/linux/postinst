@@ -1,0 +1,41 @@
+#!/bin/sh
+# hushkey postinst: hand the payload to the installing user and run install.sh
+# as that user (venv + dependencies + systemd user service). Never fail the
+# package install because a user-level step did not work — print what to do.
+set -e
+
+manual_hint() {
+    echo "hushkey: finish setup as your desktop user:"
+    echo "  cp -r /opt/hushkey ~/.local/share/hushkey && bash ~/.local/share/hushkey/install.sh"
+}
+
+USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    echo "hushkey: installed to /opt/hushkey."
+    manual_hint
+    exit 0
+fi
+
+USER_ID="$(id -u "$USER_NAME" 2>/dev/null || true)"
+USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6 || true)"
+if [ -z "$USER_ID" ] || [ -z "$USER_HOME" ]; then
+    echo "hushkey: could not resolve user '$USER_NAME'."
+    manual_hint
+    exit 0
+fi
+
+DEST="$USER_HOME/.local/share/hushkey"
+mkdir -p "$DEST"
+cp -r /opt/hushkey/. "$DEST/"
+chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"
+
+# systemctl --user needs the user's runtime environment even via sudo.
+if ! sudo -u "$USER_NAME" \
+        XDG_RUNTIME_DIR="/run/user/$USER_ID" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus" \
+        bash "$DEST/install.sh"; then
+    echo "hushkey: automatic setup failed."
+    manual_hint
+fi
+
+exit 0
