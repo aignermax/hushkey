@@ -67,8 +67,9 @@ app: it types into the focused window. No plugin, no integration, no account.
 - **Every app becomes a dictation app.** Email, docs, chat, ticket comments,
   commit messages, search fields — if it takes text, hushkey types into it.
   On Windows and X11, terminals even get full-speed typing automatically.
-- **Speaks your language.** German, English, Italian, Spanish, French — plus
-  ~95 more via `WHISPER_LANG`, with auto-detect for mixed-language teams.
+- **Speaks your language.** German, English, Italian, Spanish, French,
+  Kannada, Chinese — plus dozens more via `WHISPER_LANG`, with auto-detect
+  for mixed-language teams.
 - **Private by design.** Everything runs offline on your machine: no cloud,
   no account, no telemetry — nothing you say ever leaves the box.
 - **No subscription.** MIT-licensed and free. Comparable cloud tools charge
@@ -122,7 +123,7 @@ key* (no config file or env var needed).
 |---|---|---|
 | `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
-| `WHISPER_LANG` | `de` | Language code; empty string = auto-detect. Easiest via the tray menu (**Language**: Auto/De/En/It/Es/Fr) — applies to the next dictation, no restart; an env var set inside a service unit still wins |
+| `WHISPER_LANG` | `de` | Language code; empty string = auto-detect. Easiest via the tray menu (**Language**: Auto/De/En/It/Es/Fr/Kn/Zh) — applies to the next dictation, no restart; an env var set inside a service unit still wins |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
 | `PTT_TYPE_DELAY_TERMINAL` | `0` | Windows + Linux/X11: delay used instead of `PTT_TYPE_DELAY` when the focused window is a terminal — consoles keep up with full-speed keystrokes, so dictation lands instantly there (Wayland pastes instead of typing, so no pacing applies) |
