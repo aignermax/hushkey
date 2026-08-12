@@ -826,10 +826,13 @@ class DictationDaemon:
             try:
                 notify("… transcribing", "")
                 lang = configured_lang()
+                t0 = time.time()
                 segments, _info = self.model.transcribe(wav, language=lang,
                                                         vad_filter=True, beam_size=5)
                 text = " ".join(s.text.strip() for s in segments).strip()
-                log(f"transcribed {duration:.1f}s audio -> {len(text)} chars")
+                model = CURRENT_MODEL or "?"
+                log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
+                    f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})")
                 if not text:
                     notify("dictation", "nothing recognized")
                     return
