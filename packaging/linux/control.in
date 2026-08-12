@@ -13,7 +13,7 @@ Description: local, offline push-to-talk dictation
  one-time model download. X11 and Wayland supported.
  .
  The postinst script copies the sources into the installing user's
- ~/.local/share/hushkey and runs install.sh there (venv, dependencies,
+ ~/.local/share/whisper-ptt and runs install.sh there (venv, dependencies,
  systemd user service). build-essential/python3-dev are hard dependencies so
  install.sh never needs apt inside a dpkg transaction. On Wayland it may ask
  for group membership in 'input', which needs one logout.

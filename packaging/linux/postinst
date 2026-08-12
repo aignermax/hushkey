@@ -6,7 +6,7 @@ set -e
 
 manual_hint() {
     echo "hushkey: finish setup as your desktop user:"
-    echo "  cp -r /opt/hushkey ~/.local/share/hushkey && bash ~/.local/share/hushkey/install.sh"
+    echo "  cp -r /opt/hushkey ~/.local/share/whisper-ptt && bash ~/.local/share/whisper-ptt/install.sh"
 }
 
 USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
@@ -24,7 +24,7 @@ if [ -z "$USER_ID" ] || [ -z "$USER_HOME" ]; then
     exit 0
 fi
 
-DEST="$USER_HOME/.local/share/hushkey"
+DEST="$USER_HOME/.local/share/whisper-ptt"
 mkdir -p "$DEST"
 cp -r /opt/hushkey/. "$DEST/"
 chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"

@@ -82,7 +82,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
