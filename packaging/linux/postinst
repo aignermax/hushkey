@@ -29,6 +29,11 @@ mkdir -p "$DEST"
 cp -r /opt/hushkey/. "$DEST/"
 chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"
 
+# the v0.4.0 deb used a differently named dir — drop it after a successful copy
+if [ -d "$USER_HOME/.local/share/hushkey" ]; then
+    rm -rf "$USER_HOME/.local/share/hushkey"
+fi
+
 # systemctl --user needs the user's runtime environment even via sudo.
 if ! sudo -u "$USER_NAME" \
         XDG_RUNTIME_DIR="/run/user/$USER_ID" \

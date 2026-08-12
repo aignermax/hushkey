@@ -18,10 +18,12 @@ Grab the installer from the
 **[latest release](https://github.com/aignermax/hushkey/releases/latest)**:
 
 - **Windows:** `hushkey-setup-….exe` — per-user (no admin), installs Python 3.12
-  if missing, sets up autostart. Uninstall cleanly via Windows' app list.
-- **Linux (Debian/Ubuntu):** `hushkey_…_all.deb` — `sudo dpkg -i` sets up
-  everything (venv, dependencies, systemd user service); `apt purge hushkey`
-  removes it again, including the udev rule.
+  if missing, sets up autostart. Uninstall via Windows' app list (leaves the
+  model cache in `~/.cache/huggingface` and the logs in
+  `%LOCALAPPDATA%\whisper-ptt` in place).
+- **Linux (Debian/Ubuntu):** `hushkey_…_all.deb` — `sudo apt install ./hushkey_…_all.deb`
+  resolves the dependencies and sets up everything (venv, systemd user
+  service); `apt purge hushkey` removes it again, including the udev rule.
 
 Prefer the terminal — or are on macOS? The one-liners do the same job, and
 re-running them updates in place:
