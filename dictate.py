@@ -87,7 +87,7 @@ VERSION = "0.5.0"
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 
-# The tray's persistent choices (currently just the whisper model).
+# The tray's persistent choices (model, push-to-talk key, …).
 CONFIG_PATH = os.path.join(STATE_DIR, "config.json")
 
 # Set by load_model(); published in the state file so the tray can show it.

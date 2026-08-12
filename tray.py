@@ -60,12 +60,13 @@ MODELS = [
 ]
 
 # (config value, display label) shown in the push-to-talk key submenu.
-# Only keys that are harmless when held: modifiers or keys apps ignore.
+# Only keys that do nothing when held alone: the daemon observes the key
+# without swallowing it, so caps_lock would toggle capitals on every
+# recording, and ctrl_l/alt_r are prefix keys for shortcuts (AltGr on DE).
 PTT_KEYS = [
     ("ctrl_r", "Right Ctrl"),
     ("f9", "F9"),
     ("f8", "F8"),
-    ("caps_lock", "Caps Lock"),
 ]
 
 # Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
@@ -474,7 +475,7 @@ _STRINGS = {
         "model_switching": "switching to {model} — first use downloads {size}",
         "key_menu": "Push-to-talk key",
         "key_switching_title": "hushkey key",
-        "key_switching": "push-to-talk key is now {key} — active in a few seconds",
+        "key_switching": "push-to-talk key is now {key} — active after the daemon restart",
         "update_item": "Install update: v{version}",
         "check_now": "Check for updates",
         "restart": "Restart daemon",
@@ -505,7 +506,7 @@ _STRINGS = {
         "model_switching": "wechsle zu {model} — beim ersten Mal werden {size} geladen",
         "key_menu": "Push-to-talk-Taste",
         "key_switching_title": "hushkey Taste",
-        "key_switching": "Push-to-talk-Taste ist jetzt {key} — in wenigen Sekunden aktiv",
+        "key_switching": "Push-to-talk-Taste ist jetzt {key} — aktiv nach dem Daemon-Neustart",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -640,18 +641,18 @@ class Tray:
     def _model_menu(self):
         # the thunks resolve the module-level getter at call time, so tests
         # (and code) can monkeypatch tray.current_model / current_ptt_key
-        return self._choice_menu(MODELS, lambda: current_model(),
-                                 self._set_model, suffix=dict(MODELS))
+        return self._choice_menu([(name, f"{name} ({size})") for name, size in MODELS],
+                                 lambda: current_model(), self._set_model)
 
     def _key_menu(self):
-        return self._choice_menu(PTT_KEYS, lambda: current_ptt_key(),
-                                 self._set_ptt_key)
+        return self._choice_menu(list(PTT_KEYS),
+                                 lambda: current_ptt_key(), self._set_ptt_key)
 
-    def _choice_menu(self, choices, current_getter, setter, suffix=None):
-        # pystray accepts at most 2-arg actions — bind the name via factory,
+    def _choice_menu(self, entries, current_getter, setter):
+        """Radio submenu from (value, display-text) pairs."""
+        # pystray accepts at most 2-arg actions — bind the value via factory,
         # not via a default argument (that would count towards co_argcount).
         item = pystray.MenuItem
-        suffix = suffix or {}
 
         def make_action(value):
             return lambda _i, _m: setter(value)
@@ -660,9 +661,9 @@ class Tray:
             return lambda _m: current_getter() == value
 
         return pystray.Menu(*[
-            item(f"{label} ({suffix[value]})" if suffix else label,
-                 make_action(value), checked=make_checked(value), radio=True)
-            for value, label in choices
+            item(text, make_action(value), checked=make_checked(value),
+                 radio=True)
+            for value, text in entries
         ])
 
     # -- menu actions ------------------------------------------------------

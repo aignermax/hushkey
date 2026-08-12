@@ -135,13 +135,14 @@ def test_write_state_publishes_json(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
     monkeypatch.setattr(dictate, "CURRENT_MODEL", "small")
+    monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")  # pin: it is import-time
     dictate.write_state("recording")
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert data["state"] == "recording"
     assert data["pid"] == os.getpid()
     assert data["version"] == dictate.VERSION
-    assert data["model"] == "small"  # the tray shows this in its Model menu
-    assert data["ptt_key"] == dictate.PTT_KEY  # …and this in its key menu
+    assert data["model"] == "small"    # the tray shows this in its Model menu
+    assert data["ptt_key"] == "ctrl_r"  # …and this in its key menu
     assert data["ts"] > 0
 
 

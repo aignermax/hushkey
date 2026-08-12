@@ -110,15 +110,15 @@ ask for your password once:
 Dictated text is only *inserted* — nothing is submitted; review and hit Enter.
 A trailing space is appended so consecutive dictations don't stick together.
 
-**No <kbd>Right Ctrl</kbd> on your laptop?** Pick <kbd>F9</kbd>, <kbd>F8</kbd>
-or <kbd>Caps Lock</kbd> instead — right in the tray menu under *Push-to-talk
+**No <kbd>Right Ctrl</kbd> on your laptop?** Pick <kbd>F9</kbd> or
+<kbd>F8</kbd> instead — right in the tray menu under *Push-to-talk
 key* (no config file or env var needed).
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY` |
+| `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |

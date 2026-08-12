@@ -174,6 +174,7 @@ def test_model_menu_constructs_and_actions_fire(monkeypatch):
     menu = t._model_menu()
     items = list(menu.items)
     assert len(items) == len(tray.MODELS)
+    assert [i.text for i in items] == [f"{n} ({s})" for n, s in tray.MODELS]
     items[0](None)  # activate "tiny" — must reach _set_model
     assert chosen == [tray.MODELS[0][0]]
     monkeypatch.setattr(tray, "current_model", lambda: "small")
@@ -190,6 +191,7 @@ def test_key_menu_constructs_and_actions_fire(monkeypatch):
     monkeypatch.setattr(t, "_set_ptt_key", chosen.append)
     items = list(t._key_menu().items)
     assert len(items) == len(tray.PTT_KEYS)
+    assert [i.text for i in items] == [label for _, label in tray.PTT_KEYS]
     items[0](None)
     assert chosen == [tray.PTT_KEYS[0][0]]
     monkeypatch.setattr(tray, "current_ptt_key", lambda: "f9")
