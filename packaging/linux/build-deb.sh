@@ -14,7 +14,7 @@ DEST="$STAGE/$PKG"
 mkdir -p "$DEST/opt/hushkey" "$DEST/DEBIAN" "$OUT"
 
 # --- payload: exactly what install.sh needs at runtime ----------------------
-for f in dictate.py tray.py recorder.py transcribe.py install.sh uninstall.sh \
+for f in dictate.py tray.py update_helper.py recorder.py transcribe.py install.sh uninstall.sh \
          requirements.txt requirements-gpu.txt README.md; do
   cp "$ROOT/$f" "$DEST/opt/hushkey/"
 done

@@ -60,10 +60,14 @@ if ($verOk -ne "True") {
     exit 1
 }
 
-Write-Host "==> creating venv at $Venv"
-& $Python @PyArgs -m venv $Venv
-if ($LASTEXITCODE -ne 0) { Write-Error "venv creation failed"; exit 1 }
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
+Write-Host "==> creating venv at $Venv"
+if (-not (Test-Path $VenvPython)) {
+    & $Python @PyArgs -m venv $Venv
+    if ($LASTEXITCODE -ne 0) { Write-Error "venv creation failed"; exit 1 }
+}
+# else: exists — recreating copies fresh launchers over running ones, which
+# fails while a tray/daemon/update-helper is using them
 & $VenvPython -m pip install -q --upgrade pip
 
 Write-Host "==> installing python dependencies"

@@ -16,7 +16,10 @@ Update checks query the GitHub releases API once at startup and then daily
 one menu click splits the work into two phases so a running tray never locks
 a file the installer replaces (a loaded pillow .pyd is locked on Windows):
 phase 1 only swaps the source files; phase 2 (the installer with its pip
-installs) runs at the next tray startup, before pystray/PIL are imported.
+installs) is run by update_helper.py — a detached one-shot process that also
+brings the new tray up, so a failed handover never leaves nothing running.
+If that helper never gets spawned, the next tray start completes a pending
+update itself (run_pending_update_if_any).
 
 On Windows, a small always-on-top pill at the top of the screen shows
 recording/transcribing state — the indicator the (auto-hidden) taskbar
@@ -412,15 +415,12 @@ def run_pending_update_if_any():
             dictate.log(f"tray: update installer failed: {exc}")
 
 
-def restart_self():
-    """Hand over to the freshly installed code.
+def spawn_update_helper():
+    """Spawn the detached update helper and hand it our pid.
 
-    The spawned replacement waits for this instance's lock, so the two never
-    run side by side. Under systemd the spawn dies with the service cgroup —
-    that is fine and expected: exiting with code 1 makes Restart=on-failure
-    bring up the new code as a clean service instance. On macOS launchd
-    (KeepAlive) relaunches too; the lock decides which spawn wins. On
-    Windows the spawned instance simply becomes the new tray.
+    The helper waits for this process to exit, runs the installer and starts
+    the new tray — the handover no longer depends on a process that is
+    halfway through dying.
     """
     kwargs = {"cwd": DIR, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL, "close_fds": True}
@@ -429,8 +429,8 @@ def restart_self():
                                    | subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen([sys.executable, os.path.abspath(__file__)], **kwargs)
-    os._exit(1 if sys.platform.startswith("linux") else 0)
+    subprocess.Popen([sys.executable, os.path.join(DIR, "update_helper.py"),
+                      str(os.getpid())], **kwargs)
 
 
 def acquire_lock(wait=0):
@@ -710,7 +710,8 @@ class Tray:
         try:
             self.daemon.stop()
             refresh_code()
-            open(UPDATE_PENDING, "w").close()  # phase 2 marker for the next boot
+            open(UPDATE_PENDING, "w").close()  # tells the helper to run the installer
+            spawn_update_helper()  # spawned while we are fully alive — see #12
         except (OSError, subprocess.SubprocessError) as exc:
             dictate.log(f"tray: update failed: {exc}")
             self._notify(S["update_failed_title"],
@@ -722,7 +723,9 @@ class Tray:
         except Exception:
             pass
         time.sleep(0.3)
-        restart_self()
+        # systemd (Restart=on-failure) and launchd (KeepAlive) bring up a
+        # service-managed instance; the helper's spawn wins the lock elsewhere.
+        os._exit(1 if sys.platform.startswith("linux") else 0)
 
     def _on_check_now(self, _icon, _item):
         threading.Thread(target=self.check_updates, kwargs={"manual": True},
