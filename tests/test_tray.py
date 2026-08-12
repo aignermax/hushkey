@@ -145,6 +145,15 @@ def test_pill_for_known_and_hidden_states():
     assert set(tray.OVERLAY_COLORS) <= set(tray.S)
 
 
+def test_icon_key_priority():
+    assert tray.icon_key_for("recording", True) == "recording"  # activity beats update
+    assert tray.icon_key_for("transcribing", True) == "transcribing"
+    assert tray.icon_key_for("idle", True) == "update"          # blue badge when idle
+    assert tray.icon_key_for("idle", False) == "idle"
+    assert tray.icon_key_for("stopped", True) == "stopped"      # problem beats update
+    assert tray.icon_key_for("starting", False) == "starting"
+
+
 def test_write_config_merges_instead_of_overwriting(tmp_path, monkeypatch):
     cfg = tmp_path / "config.json"
     monkeypatch.setattr(tray, "CONFIG_PATH", str(cfg))
@@ -264,6 +273,7 @@ def test_poll_state_starting_while_child_alive_and_state_stale(tmp_path, monkeyp
     monkeypatch.setattr(tray, "STATE_PATH", str(tmp_path / "missing.json"))
     t = tray.Tray.__new__(tray.Tray)
     t.state = "boot"
+    t.pending_update = None
     t.stopping = threading.Event()
     t.daemon = type("D", (), {"alive": True})()
     t.images = {"idle": None, "starting": None}

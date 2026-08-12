@@ -41,7 +41,7 @@ DAEMON = os.path.join(DIR, "dictate.py")
 LOGO = os.path.join(DIR, "assets", "logo.png")
 REPO = "aignermax/hushkey"
 RELEASES_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
-UPDATE_CHECK_INTERVAL = 24 * 60 * 60
+UPDATE_CHECK_INTERVAL = 4 * 60 * 60  # every 4 h (+ once at startup)
 ICON_SIZE = 64
 
 sys.path.insert(0, DIR)
@@ -476,7 +476,18 @@ def acquire_lock(wait=0):
 # --------------------------------------------------------------------------
 # the tray icon
 
-BADGE_COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20"}
+BADGE_COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20",
+                "update": "#2b6cb0"}  # blue: an update is waiting
+
+
+def icon_key_for(state, update_pending):
+    """Which image the tray shows: activity badges beat the update badge,
+    a stopped daemon beats everything (it needs attention first)."""
+    if state == "stopped":
+        return "stopped"
+    if state in BADGE_COLORS and state != "update":
+        return state
+    return "update" if update_pending else state
 
 
 def _ui_lang():
@@ -835,10 +846,14 @@ class Tray:
                 state = "stopped"
             if state != self.state:
                 self.state = state
-                self.icon.icon = self.images.get(state, self.images["idle"])
+                self._apply_icon()
                 self.icon.title = S["title"].format(state=S.get(state, state))
                 self.icon.update_menu()  # the status line rebuilds only on this
             time.sleep(0.3)
+
+    def _apply_icon(self):
+        key = icon_key_for(self.state, self.pending_update is not None)
+        self.icon.icon = self.images.get(key, self.images["idle"])
 
     def check_updates(self, manual=False):
         try:
@@ -850,6 +865,7 @@ class Tray:
             return
         if is_newer(tag, VERSION):
             self.pending_update = tag.lstrip("v")
+            self._apply_icon()  # blue badge: an update is waiting
             self.icon.update_menu()
             self._notify(S["update_available_title"],
                          S["update_available"].format(version=self.pending_update))
