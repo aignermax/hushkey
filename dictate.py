@@ -82,7 +82,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -151,13 +151,14 @@ def configured_lang():
     return name
 
 
-# the language codes whisper's tokenizer knows (faster-whisper's list)
+# the language codes whisper's tokenizer knows (kept in sync with
+# faster-whisper's tokenizer._LANGUAGE_CODES — 100 codes)
 _WHISPER_LANGS = frozenset(
     "af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi "
     "fo fr gl gu ha haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb "
     "ln lo lt lv mg mi mk ml mn mr ms mt my ne nl nn no oc pa pl ps pt ro ru "
     "sa sd si sk sl sn so sq sr su sv sw ta te tg th tk tl tr tt uk ur uz vi "
-    "yi yo zh".split())
+    "yi yo yue zh".split())
 
 
 def write_state(state):

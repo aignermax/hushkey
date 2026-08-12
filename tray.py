@@ -82,6 +82,8 @@ LANGS = [
     ("it", "Italiano"),
     ("es", "Español"),
     ("fr", "Français"),
+    ("kn", "Kannada (ಕನ್ನಡ)"),
+    ("zh", "中文 (Chinese)"),
 ]
 
 # Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
