@@ -199,6 +199,29 @@ def test_key_menu_constructs_and_actions_fire(monkeypatch):
     assert checked == [name == "f9" for name, _ in tray.PTT_KEYS]
 
 
+def test_lang_menu_constructs_and_actions_fire(monkeypatch):
+    import pytest
+    if not tray.load_tray_backend():
+        pytest.skip("pystray not installed")
+    t = tray.Tray.__new__(tray.Tray)
+    chosen = []
+    monkeypatch.setattr(t, "_set_lang", chosen.append)
+    items = list(t._lang_menu().items)
+    assert [i.text for i in items] == [label for _, label in tray.LANGS]
+    items[3](None)  # Italiano
+    assert chosen == ["it"]
+    monkeypatch.setattr(tray, "current_lang", lambda: "auto")
+    checked = [bool(i.checked) for i in items]
+    assert checked == [name == "auto" for name, _ in tray.LANGS]
+
+
+def test_current_lang_maps_none_to_auto(monkeypatch):
+    monkeypatch.setattr(tray.dictate, "configured_lang", lambda: None)
+    assert tray.current_lang() == "auto"
+    monkeypatch.setattr(tray.dictate, "configured_lang", lambda: "es")
+    assert tray.current_lang() == "es"
+
+
 def test_current_model_ignores_state_with_dead_pid(tmp_path, monkeypatch):
     import os
     state = tmp_path / "state.json"

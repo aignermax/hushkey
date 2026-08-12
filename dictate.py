@@ -82,7 +82,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -122,6 +122,26 @@ def configured_ptt_key():
         return "ctrl_r"
     name = data.get("ptt_key") if isinstance(data, dict) else None
     return name if isinstance(name, str) and name else "ctrl_r"
+
+
+def configured_lang():
+    """Dictation language: WHISPER_LANG env wins (documented), then the tray's
+    config file, else 'de'. Returns None for auto-detect — spelled 'auto' in
+    the config file, '' in the env var.
+
+    Read on every dictation, so a tray language switch needs no restart.
+    """
+    if "WHISPER_LANG" in os.environ:
+        return os.environ["WHISPER_LANG"] or None
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return "de"
+    name = data.get("lang") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name:
+        return "de"
+    return None if name == "auto" else name
 
 
 def write_state(state):
@@ -788,7 +808,7 @@ class DictationDaemon:
             write_state("transcribing")
             try:
                 notify("… transcribing", "")
-                lang = os.environ.get("WHISPER_LANG", "de") or None
+                lang = configured_lang()
                 segments, _info = self.model.transcribe(wav, language=lang,
                                                         vad_filter=True, beam_size=5)
                 text = " ".join(s.text.strip() for s in segments).strip()

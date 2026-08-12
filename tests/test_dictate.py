@@ -160,6 +160,21 @@ def test_configured_ptt_key_precedence(monkeypatch, tmp_path):
     assert dictate.configured_ptt_key() == "ctrl_r"  # wrong shape -> default
 
 
+def test_configured_lang_precedence(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(cfg))
+    monkeypatch.delenv("WHISPER_LANG", raising=False)
+    assert dictate.configured_lang() == "de"         # default
+    cfg.write_text('{"lang": "it"}', encoding="utf-8")
+    assert dictate.configured_lang() == "it"         # tray choice
+    cfg.write_text('{"lang": "auto"}', encoding="utf-8")
+    assert dictate.configured_lang() is None         # auto-detect
+    monkeypatch.setenv("WHISPER_LANG", "es")
+    assert dictate.configured_lang() == "es"         # env wins
+    monkeypatch.setenv("WHISPER_LANG", "")
+    assert dictate.configured_lang() is None         # empty env = auto-detect
+
+
 def test_configured_model_env_wins_over_tray_config(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_MODEL", "tiny")
     cfg = tmp_path / "config.json"
