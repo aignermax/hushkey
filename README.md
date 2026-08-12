@@ -55,18 +55,31 @@ itself afterwards.
 The first dictation downloads the whisper model (~0.5–1.5 GB) into
 `~/.cache/huggingface`; after that everything is offline.
 
-## What you get
+## Why hushkey?
 
-- **`tray.py`** — the system-tray companion (autostart entry point): live status
-  icon, supervises the daemon, update checks with one-click install
-- **`dictate.py`** — the push-to-talk daemon (supervised by the tray; can also
-  run standalone for debugging)
-- **`transcribe.py`** — batch-transcribe a folder of audio files into Markdown
-  notes (voice memos → text), with skip-unchanged state tracking
-- **`recorder.py`** — recording backends: `pw-record` (PipeWire) on Linux,
-  `sounddevice`/PortAudio on Windows/macOS
-- **`install.sh` / `uninstall.sh`** — one-command setup/removal (Linux, macOS)
-- **`install.ps1` / `uninstall.ps1`** — one-command setup/removal (Windows)
+**Speaking is ~3× faster than typing** — and hushkey works *everywhere*: it
+types into whatever window has focus. No plugin, no integration, no account.
+
+- **Prompt AI at the speed of thought.** Long prompts are the bottleneck when
+  working with AI — and many AI tools have no voice input at all. Hold Right
+  Ctrl, think out loud, release: IDE chat, web UI, terminal — the words land
+  where your cursor is.
+- **Every app becomes a dictation app.** Mails, docs, chat, ticket comments,
+  commit messages, search fields — if it takes text, hushkey types into it.
+  Terminals even get full-speed typing automatically.
+- **Private by design.** After a one-time model download, everything runs
+  offline on your machine. No cloud, no account, no telemetry — nothing you
+  say ever leaves the box.
+- **No subscription.** MIT-licensed and free. Comparable cloud dictation
+  charges $8–15 per month.
+- **You see it working.** A tray icon and a small on-screen pill show when the
+  mic is live and when your text is being written — and you can switch between
+  five model sizes (fast ↔ accurate) right from the tray.
+- **Voice memos too.** `transcribe.py` turns a whole folder of recordings into
+  Markdown notes in one go.
+
+Built for heavy prompters, fast thinkers, slow typists and sore wrists — for
+anyone who would rather *say* it than type it.
 
 ## Requirements
 
