@@ -127,21 +127,37 @@ def configured_ptt_key():
 def configured_lang():
     """Dictation language: WHISPER_LANG env wins (documented), then the tray's
     config file, else 'de'. Returns None for auto-detect — spelled 'auto' in
-    the config file, '' in the env var.
+    the config file, '' or 'auto' in the env var. Unknown codes fall back to
+    'de' instead of killing every dictation with a tokenizer error.
 
     Read on every dictation, so a tray language switch needs no restart.
     """
     if "WHISPER_LANG" in os.environ:
-        return os.environ["WHISPER_LANG"] or None
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+        name = os.environ["WHISPER_LANG"]
+    else:
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            name = data.get("lang") if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            name = None
+        if not isinstance(name, str) or not name:
+            name = "de"
+    if name in ("", "auto"):
+        return None
+    if name not in _WHISPER_LANGS:
+        log(f"unknown language code '{name}' — falling back to 'de'")
         return "de"
-    name = data.get("lang") if isinstance(data, dict) else None
-    if not isinstance(name, str) or not name:
-        return "de"
-    return None if name == "auto" else name
+    return name
+
+
+# the language codes whisper's tokenizer knows (faster-whisper's list)
+_WHISPER_LANGS = frozenset(
+    "af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi "
+    "fo fr gl gu ha haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb "
+    "ln lo lt lv mg mi mk ml mn mr ms mt my ne nl nn no oc pa pl ps pt ro ru "
+    "sa sd si sk sl sn so sq sr su sv sw ta te tg th tk tl tr tt uk ur uz vi "
+    "yi yo zh".split())
 
 
 def write_state(state):

@@ -68,7 +68,7 @@ app: it types into the focused window. No plugin, no integration, no account.
   commit messages, search fields — if it takes text, hushkey types into it.
   On Windows and X11, terminals even get full-speed typing automatically.
 - **Speaks your language.** German, English, Italian, Spanish, French — plus
-  ~90 more, with auto-detect for mixed-language teams. One click in the tray.
+  ~95 more via `WHISPER_LANG`, with auto-detect for mixed-language teams.
 - **Private by design.** Everything runs offline on your machine: no cloud,
   no account, no telemetry — nothing you say ever leaves the box.
 - **No subscription.** MIT-licensed and free. Comparable cloud tools charge

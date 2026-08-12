@@ -222,6 +222,28 @@ def test_current_lang_maps_none_to_auto(monkeypatch):
     assert tray.current_lang() == "es"
 
 
+def test_set_lang_restarts_only_when_env_masks_the_config(tmp_path, monkeypatch):
+    """An env var in the daemon's process env wins over the config file —
+    so a language switch must restart the daemon exactly in that case."""
+    import os
+    t = tray.Tray.__new__(tray.Tray)
+    calls = []
+    t.daemon = type("D", (), {"restart": lambda _s: calls.append("restart")})()
+    t.icon = type("I", (), {"update_menu": lambda _s: calls.append("menu"),
+                            "notify": lambda *a: None})()
+    monkeypatch.setattr(tray, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(tray, "current_lang", lambda: "de")
+
+    monkeypatch.delenv("WHISPER_LANG", raising=False)
+    t._lang_worker("it")
+    assert calls == ["menu"]  # config is enough — no restart
+
+    monkeypatch.setenv("WHISPER_LANG", "de")  # as if the daemon inherited it
+    t._lang_worker("es")
+    assert "restart" in calls
+    assert "WHISPER_LANG" not in os.environ  # cleared from the tray's env
+
+
 def test_current_model_ignores_state_with_dead_pid(tmp_path, monkeypatch):
     import os
     state = tmp_path / "state.json"

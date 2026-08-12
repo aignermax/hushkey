@@ -169,21 +169,25 @@ def overlay_wanted():
     return os.environ.get("PTT_OVERLAY", default) != "0"
 
 
+_CONFIG_LOCK = threading.Lock()
+
+
 def write_config(**updates):
     """Merge settings into the tray's config file (atomic, keeps other keys)."""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
+    with _CONFIG_LOCK:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
             data = {}
-    except (OSError, ValueError):
-        data = {}
-    data.update(updates)
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    os.replace(tmp, CONFIG_PATH)
+        data.update(updates)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, CONFIG_PATH)
 
 
 def current_model():
@@ -753,16 +757,29 @@ class Tray:
         self.daemon.restart()  # re-grabs the listener on the new key
 
     def _set_lang(self, name):
-        """Language needs no restart: the daemon re-reads the config file on
-        every dictation. Called directly on the UI thread — nothing blocks."""
+        threading.Thread(target=self._lang_worker, args=(name,),
+                         daemon=True).start()
+
+    def _lang_worker(self, name):
+        """No restart needed — the daemon re-reads the config per dictation.
+        Exception: an env var inside the daemon's process env masks the
+        config, and only a restart clears that."""
         if name == current_lang():
             return
+        had_env = "WHISPER_LANG" in os.environ
         clear_env_var("WHISPER_LANG")
-        write_config(lang=name)
+        try:
+            write_config(lang=name)
+        except OSError as exc:
+            self._notify(S["lang_switching_title"], str(exc)[:120])
+            return
         label = dict(LANGS).get(name, name)
         self._notify(S["lang_switching_title"],
                      S["lang_switching"].format(lang=label))
-        self.icon.update_menu()  # move the checkmark right away
+        if had_env:
+            self.daemon.restart()
+        else:
+            self.icon.update_menu()  # move the checkmark right away
 
     def _on_open_logs(self, _icon, _item):
         if sys.platform == "win32":
