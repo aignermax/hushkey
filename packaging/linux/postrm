@@ -15,7 +15,9 @@ if [ "$1" = "purge" ]; then
         if [ -n "$USER_HOME" ]; then
             rm -f "$USER_HOME/.config/systemd/user/whisper-ptt.service" \
                   "$USER_HOME/.config/systemd/user/ydotoold.service"
-            rm -rf "$USER_HOME/.local/share/hushkey"
+            rm -rf "$USER_HOME/.local/share/whisper-ptt" \
+                  "$USER_HOME/.local/share/hushkey" \
+                  "$USER_HOME/.local/state/whisper-ptt"
         fi
         USER_ID="$(id -u "$USER_NAME" 2>/dev/null || true)"
         if [ -n "$USER_ID" ]; then

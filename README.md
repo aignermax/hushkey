@@ -14,6 +14,20 @@ Nothing leaves your machine after the one-time model download.
 
 ## Install
 
+Grab the installer from the
+**[latest release](https://github.com/aignermax/hushkey/releases/latest)**:
+
+- **Windows:** `hushkey-setup-….exe` — per-user (no admin), installs Python 3.12
+  if missing, sets up autostart. Uninstall via Windows' app list (leaves the
+  model cache in `~/.cache/huggingface` and the logs in
+  `%LOCALAPPDATA%\whisper-ptt` in place).
+- **Linux (Debian/Ubuntu):** `hushkey_…_all.deb` — `sudo apt install ./hushkey_…_all.deb`
+  resolves the dependencies and sets up everything (venv, systemd user
+  service); `apt purge hushkey` removes it again, including the udev rule.
+
+Prefer the terminal — or are on macOS? The one-liners do the same job, and
+re-running them updates in place:
+
 **Linux / macOS:**
 
 ```bash
@@ -26,15 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh
 irm https://raw.githubusercontent.com/aignermax/hushkey/master/install.ps1 | iex
 ```
 
-Both one-liners fetch the sources (into `~/.local/share/whisper-ptt` on
-Linux/macOS, `%LOCALAPPDATA%\Programs\whisper-ptt` on Windows), install all
-dependencies and set up autostart. Re-running the same line updates to the
-latest version. If you prefer your own checkout location, the classic way
-keeps working: `git clone https://github.com/aignermax/hushkey.git`,
-then `./install.sh` (Windows: `powershell -ExecutionPolicy Bypass -File install.ps1`).
-
+Both fetch the sources (into `~/.local/share/whisper-ptt` on Linux/macOS,
+`%LOCALAPPDATA%\Programs\whisper-ptt` on Windows), install all dependencies and
+set up autostart. From your own checkout, `./install.sh` /
+`powershell -ExecutionPolicy Bypass -File install.ps1` work the same way
 (`install.ps1 -NoAutostart` skips the autostart entry if you prefer to run
-`.venv\Scripts\python.exe dictate.py` manually.)
+`.venv\Scripts\python.exe dictate.py` manually).
 
 That's it: the daemon is running and starts on every login. The one exception is
 Linux/Wayland — if the installer had to add you to the `input` group, it says so
