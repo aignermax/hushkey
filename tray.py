@@ -69,6 +69,18 @@ PTT_KEYS = [
     ("f8", "F8"),
 ]
 
+# (config value, display label) in the Language submenu. "auto" maps to
+# None in the daemon (whisper auto-detect); any other ISO 639-1 code can be
+# set via WHISPER_LANG if the menu is not enough.
+LANGS = [
+    ("auto", "Auto-detect"),
+    ("de", "Deutsch"),
+    ("en", "English"),
+    ("it", "Italiano"),
+    ("es", "Español"),
+    ("fr", "Français"),
+]
+
 # Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
 # must be able to run before these modules lock any of their files.
 pystray = None
@@ -157,21 +169,25 @@ def overlay_wanted():
     return os.environ.get("PTT_OVERLAY", default) != "0"
 
 
+_CONFIG_LOCK = threading.Lock()
+
+
 def write_config(**updates):
     """Merge settings into the tray's config file (atomic, keeps other keys)."""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
+    with _CONFIG_LOCK:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
             data = {}
-    except (OSError, ValueError):
-        data = {}
-    data.update(updates)
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    os.replace(tmp, CONFIG_PATH)
+        data.update(updates)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, CONFIG_PATH)
 
 
 def current_model():
@@ -194,6 +210,13 @@ def current_ptt_key():
             and data["ptt_key"]:
         return data["ptt_key"]
     return dictate.configured_ptt_key()
+
+
+def current_lang():
+    """The effective dictation language — the config file is authoritative
+    the moment it is written (the daemon reads it per dictation), so unlike
+    model/key there is no need to consult the state file. 'auto' for detect."""
+    return dictate.configured_lang() or "auto"
 
 
 def clear_env_var(name):
@@ -476,6 +499,9 @@ _STRINGS = {
         "key_menu": "Push-to-talk key",
         "key_switching_title": "hushkey key",
         "key_switching": "push-to-talk key is now {key} — active after the daemon restart",
+        "lang_menu": "Language",
+        "lang_switching_title": "hushkey language",
+        "lang_switching": "language is now {lang} — active on the next dictation",
         "update_item": "Install update: v{version}",
         "check_now": "Check for updates",
         "restart": "Restart daemon",
@@ -507,6 +533,9 @@ _STRINGS = {
         "key_menu": "Push-to-talk-Taste",
         "key_switching_title": "hushkey Taste",
         "key_switching": "Push-to-talk-Taste ist jetzt {key} — aktiv nach dem Daemon-Neustart",
+        "lang_menu": "Sprache",
+        "lang_switching_title": "hushkey Sprache",
+        "lang_switching": "Sprache ist jetzt {lang} — ab dem nächsten Diktat aktiv",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -628,6 +657,7 @@ class Tray:
                  None, enabled=False),
             item(S["model_menu"], self._model_menu()),
             item(S["key_menu"], self._key_menu()),
+            item(S["lang_menu"], self._lang_menu()),
             pystray.Menu.SEPARATOR,
             item(lambda _m: S["update_item"].format(version=self.pending_update),
                  self._on_update, visible=lambda _m: self.pending_update is not None),
@@ -647,6 +677,10 @@ class Tray:
     def _key_menu(self):
         return self._choice_menu(list(PTT_KEYS),
                                  lambda: current_ptt_key(), self._set_ptt_key)
+
+    def _lang_menu(self):
+        return self._choice_menu(list(LANGS),
+                                 lambda: current_lang(), self._set_lang)
 
     def _choice_menu(self, entries, current_getter, setter):
         """Radio submenu from (value, display-text) pairs."""
@@ -721,6 +755,31 @@ class Tray:
         self._notify(S["key_switching_title"],
                      S["key_switching"].format(key=label))
         self.daemon.restart()  # re-grabs the listener on the new key
+
+    def _set_lang(self, name):
+        threading.Thread(target=self._lang_worker, args=(name,),
+                         daemon=True).start()
+
+    def _lang_worker(self, name):
+        """No restart needed — the daemon re-reads the config per dictation.
+        Exception: an env var inside the daemon's process env masks the
+        config, and only a restart clears that."""
+        if name == current_lang():
+            return
+        had_env = "WHISPER_LANG" in os.environ
+        clear_env_var("WHISPER_LANG")
+        try:
+            write_config(lang=name)
+        except OSError as exc:
+            self._notify(S["lang_switching_title"], str(exc)[:120])
+            return
+        label = dict(LANGS).get(name, name)
+        self._notify(S["lang_switching_title"],
+                     S["lang_switching"].format(lang=label))
+        if had_env:
+            self.daemon.restart()
+        else:
+            self.icon.update_menu()  # move the checkmark right away
 
     def _on_open_logs(self, _icon, _item):
         if sys.platform == "win32":

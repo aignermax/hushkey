@@ -160,6 +160,43 @@ def test_configured_ptt_key_precedence(monkeypatch, tmp_path):
     assert dictate.configured_ptt_key() == "ctrl_r"  # wrong shape -> default
 
 
+def test_configured_lang_precedence(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(cfg))
+    monkeypatch.delenv("WHISPER_LANG", raising=False)
+    assert dictate.configured_lang() == "de"         # default
+    cfg.write_text('{"lang": "it"}', encoding="utf-8")
+    assert dictate.configured_lang() == "it"         # tray choice
+    cfg.write_text('{"lang": "auto"}', encoding="utf-8")
+    assert dictate.configured_lang() is None         # auto-detect
+    monkeypatch.setenv("WHISPER_LANG", "es")
+    assert dictate.configured_lang() == "es"         # env wins
+    monkeypatch.setenv("WHISPER_LANG", "")
+    assert dictate.configured_lang() is None         # empty env = auto-detect
+    monkeypatch.setenv("WHISPER_LANG", "auto")
+    assert dictate.configured_lang() is None         # "auto" env = auto-detect
+    monkeypatch.setenv("WHISPER_LANG", "xx")
+    assert dictate.configured_lang() == "de"         # unknown code -> fallback
+
+
+def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
+    """The daemon must hand the configured language to faster-whisper."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    seen = {}
+
+    class FakeModel:
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+            seen["language"] = language
+            return [type("Seg", (), {"text": " ciao "})()], None
+
+    d.model = FakeModel()
+    d.injector = type("I", (), {"insert": lambda _self, t: None})()
+    monkeypatch.setattr(dictate, "configured_lang", lambda: "it")
+    d._transcribe_and_insert(wav, 1.0)
+    assert seen["language"] == "it"
+
+
 def test_configured_model_env_wins_over_tray_config(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_MODEL", "tiny")
     cfg = tmp_path / "config.json"

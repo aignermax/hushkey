@@ -82,7 +82,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -122,6 +122,42 @@ def configured_ptt_key():
         return "ctrl_r"
     name = data.get("ptt_key") if isinstance(data, dict) else None
     return name if isinstance(name, str) and name else "ctrl_r"
+
+
+def configured_lang():
+    """Dictation language: WHISPER_LANG env wins (documented), then the tray's
+    config file, else 'de'. Returns None for auto-detect — spelled 'auto' in
+    the config file, '' or 'auto' in the env var. Unknown codes fall back to
+    'de' instead of killing every dictation with a tokenizer error.
+
+    Read on every dictation, so a tray language switch needs no restart.
+    """
+    if "WHISPER_LANG" in os.environ:
+        name = os.environ["WHISPER_LANG"]
+    else:
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            name = data.get("lang") if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            name = None
+        if not isinstance(name, str) or not name:
+            name = "de"
+    if name in ("", "auto"):
+        return None
+    if name not in _WHISPER_LANGS:
+        log(f"unknown language code '{name}' — falling back to 'de'")
+        return "de"
+    return name
+
+
+# the language codes whisper's tokenizer knows (faster-whisper's list)
+_WHISPER_LANGS = frozenset(
+    "af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi "
+    "fo fr gl gu ha haw he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb "
+    "ln lo lt lv mg mi mk ml mn mr ms mt my ne nl nn no oc pa pl ps pt ro ru "
+    "sa sd si sk sl sn so sq sr su sv sw ta te tg th tk tl tr tt uk ur uz vi "
+    "yi yo zh".split())
 
 
 def write_state(state):
@@ -788,7 +824,7 @@ class DictationDaemon:
             write_state("transcribing")
             try:
                 notify("… transcribing", "")
-                lang = os.environ.get("WHISPER_LANG", "de") or None
+                lang = configured_lang()
                 segments, _info = self.model.transcribe(wav, language=lang,
                                                         vad_filter=True, beam_size=5)
                 text = " ".join(s.text.strip() for s in segments).strip()
