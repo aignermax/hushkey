@@ -219,6 +219,23 @@ def log(msg):
         fh.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}\n")
 
 
+def _audio_rms(wav):
+    """RMS level of a 16-bit mono WAV (0.0–1.0); None when unreadable."""
+    try:
+        import wave
+        import numpy as np
+        with wave.open(wav, "rb") as fh:
+            if fh.getsampwidth() != 2:
+                return None
+            frames = fh.readframes(fh.getnframes())
+        if not frames:
+            return None
+        pcm = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        return float(np.sqrt(np.mean(pcm ** 2)))
+    except Exception:
+        return None
+
+
 def notify(title, body=""):
     """Best-effort desktop notification; never raises."""
     try:
@@ -834,7 +851,16 @@ class DictationDaemon:
                 log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
                     f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})")
                 if not text:
-                    notify("dictation", "nothing recognized")
+                    rms = _audio_rms(wav)
+                    if rms is not None and rms < 0.001:
+                        # a dead or disconnected input device records digital
+                        # silence — say so, "nothing recognized" sends users
+                        # down the wrong path
+                        log(f"nothing heard — mic silent (rms={rms:.5f})")
+                        notify("nothing heard",
+                               "the mic recorded silence — check the input device")
+                    else:
+                        notify("dictation", "nothing recognized")
                     return
                 time.sleep(0.15)  # let the modifier release settle
                 self.injector.insert(text + " ")  # space separates dictations

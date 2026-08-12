@@ -197,6 +197,34 @@ def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
     assert seen["language"] == "it"
 
 
+def _write_wav(path, amplitude):
+    import wave
+    import numpy as np
+    samples = (np.full(16000, amplitude, dtype=np.int16))
+    with wave.open(str(path), "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)
+        fh.setframerate(16000)
+        fh.writeframes(samples.tobytes())
+
+
+def test_silent_recording_gets_a_mic_warning(monkeypatch, tmp_path):
+    """A dead input device must not be reported as 'nothing recognized'."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    notes = []
+    monkeypatch.setattr(dictate, "notify", lambda title, body: notes.append(body))
+    d.model = type("M", (), {"transcribe": lambda _s, *a, **k: ([], None)})()
+    d.injector = type("I", (), {"insert": lambda _self, t: None})()
+
+    _write_wav(tmp_path / "silent.wav", 0)
+    d._transcribe_and_insert(str(tmp_path / "silent.wav"), 1.0)
+    assert "silence" in notes[-1]
+
+    _write_wav(tmp_path / "loud.wav", 8000)
+    d._transcribe_and_insert(str(tmp_path / "loud.wav"), 1.0)
+    assert notes[-1] == "nothing recognized"
+
+
 def test_configured_model_env_wins_over_tray_config(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_MODEL", "tiny")
     cfg = tmp_path / "config.json"
