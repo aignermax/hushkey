@@ -14,10 +14,11 @@ import dictate
 
 @pytest.fixture(autouse=True)
 def isolated_log(monkeypatch, tmp_path):
-    """Keep tests out of the real operational log and state file."""
+    """Keep tests out of the real operational log, state and config files."""
     monkeypatch.setattr(dictate, "STATE_DIR", str(tmp_path))
     monkeypatch.setattr(dictate, "LOG_PATH", str(tmp_path / "dictate.log"))
     monkeypatch.setattr(dictate, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(tmp_path / "config.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -134,13 +135,29 @@ def test_write_state_publishes_json(monkeypatch, tmp_path):
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
     monkeypatch.setattr(dictate, "CURRENT_MODEL", "small")
+    monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")  # pin: it is import-time
     dictate.write_state("recording")
     data = json.loads(state_file.read_text(encoding="utf-8"))
     assert data["state"] == "recording"
     assert data["pid"] == os.getpid()
     assert data["version"] == dictate.VERSION
-    assert data["model"] == "small"  # the tray shows this in its Model menu
+    assert data["model"] == "small"    # the tray shows this in its Model menu
+    assert data["ptt_key"] == "ctrl_r"  # …and this in its key menu
     assert data["ts"] > 0
+
+
+def test_configured_ptt_key_precedence(monkeypatch, tmp_path):
+    monkeypatch.delenv("PTT_KEY", raising=False)
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(dictate, "CONFIG_PATH", str(cfg))
+    assert dictate.configured_ptt_key() == "ctrl_r"  # default
+    cfg.write_text('{"ptt_key": "f9"}', encoding="utf-8")
+    assert dictate.configured_ptt_key() == "f9"      # tray choice
+    monkeypatch.setenv("PTT_KEY", "f6")
+    assert dictate.configured_ptt_key() == "f6"      # env wins
+    cfg.write_text('["oops"]', encoding="utf-8")
+    monkeypatch.delenv("PTT_KEY")
+    assert dictate.configured_ptt_key() == "ctrl_r"  # wrong shape -> default
 
 
 def test_configured_model_env_wins_over_tray_config(monkeypatch, tmp_path):

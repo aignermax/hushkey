@@ -5,8 +5,8 @@
 <p align="center"><em>formerly whisper-ptt</em></p>
 
 Local, offline push-to-talk dictation for **Linux (X11 and Wayland), Windows and
-macOS** — hold a key, speak, release, and the transcript lands in whatever
-window has focus. Terminal, editor, browser, chat: any app. Powered by
+macOS** — hold <kbd>Right Ctrl</kbd>, speak, release, and the transcript lands
+in whatever window has focus. Terminal, editor, browser, chat: any app. Powered by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper), CUDA-accelerated
 when an NVIDIA GPU is present (Linux/Windows), CPU otherwise.
 
@@ -61,9 +61,9 @@ The first dictation downloads the whisper model (~0.5–1.5 GB) into
 app: it types into the focused window. No plugin, no integration, no account.
 
 - **Prompt AI at the speed of thought.** Long prompts are the bottleneck when
-  working with AI — and many AI tools have no voice input at all. Hold Right
-  Ctrl, think out loud, release: IDE chat, web UI, terminal — the words land
-  where your cursor is.
+  working with AI — and many AI tools have no voice input at all. Hold
+  <kbd>Right Ctrl</kbd>, think out loud, release: IDE chat, web UI, terminal —
+  the words land where your cursor is.
 - **Every app becomes a dictation app.** Email, docs, chat, ticket comments,
   commit messages, search fields — if it takes text, hushkey types into it.
   On Windows and X11, terminals even get full-speed typing automatically.
@@ -104,17 +104,21 @@ ask for your password once:
 
 | Action | How |
 |---|---|
-| Dictate into any app | Focus the input field, **hold Right Ctrl**, speak, release → text is inserted |
+| Dictate into any app | Focus the input field, **hold <kbd>Right Ctrl</kbd>**, speak, release → text is inserted |
 | Batch-transcribe voice memos | `.venv/bin/python transcribe.py ~/path/to/audio --out ~/notes` (Windows: `.venv\Scripts\python.exe transcribe.py ...`) |
 
 Dictated text is only *inserted* — nothing is submitted; review and hit Enter.
 A trailing space is appended so consecutive dictations don't stick together.
 
+**No <kbd>Right Ctrl</kbd> on your laptop?** Pick <kbd>F9</kbd> or
+<kbd>F8</kbd> instead — right in the tray menu under *Push-to-talk
+key* (no config file or env var needed).
+
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`) |
+| `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |

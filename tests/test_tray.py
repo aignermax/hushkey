@@ -145,19 +145,21 @@ def test_pill_for_known_and_hidden_states():
     assert set(tray.OVERLAY_COLORS) <= set(tray.S)
 
 
-def test_write_model_config_roundtrip(tmp_path, monkeypatch):
+def test_write_config_merges_instead_of_overwriting(tmp_path, monkeypatch):
     cfg = tmp_path / "config.json"
     monkeypatch.setattr(tray, "CONFIG_PATH", str(cfg))
-    tray.write_model_config("base")
-    assert json.loads(cfg.read_text(encoding="utf-8")) == {"model": "base"}
+    tray.write_config(model="base")
+    tray.write_config(ptt_key="f9")
+    assert json.loads(cfg.read_text(encoding="utf-8")) == {
+        "model": "base", "ptt_key": "f9"}
 
 
-def test_clear_model_env_posix_clears_only_process_env(monkeypatch):
+def test_clear_env_var_posix_clears_only_process_env(monkeypatch):
     import os
     import sys
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("WHISPER_MODEL", "small")
-    tray.clear_model_env()
+    tray.clear_env_var("WHISPER_MODEL")
     assert "WHISPER_MODEL" not in os.environ
 
 
@@ -172,11 +174,29 @@ def test_model_menu_constructs_and_actions_fire(monkeypatch):
     menu = t._model_menu()
     items = list(menu.items)
     assert len(items) == len(tray.MODELS)
+    assert [i.text for i in items] == [f"{n} ({s})" for n, s in tray.MODELS]
     items[0](None)  # activate "tiny" — must reach _set_model
     assert chosen == [tray.MODELS[0][0]]
     monkeypatch.setattr(tray, "current_model", lambda: "small")
     checked = [bool(i.checked) for i in items]
     assert checked == [name == "small" for name, _ in tray.MODELS]
+
+
+def test_key_menu_constructs_and_actions_fire(monkeypatch):
+    import pytest
+    if not tray.load_tray_backend():
+        pytest.skip("pystray not installed")
+    t = tray.Tray.__new__(tray.Tray)
+    chosen = []
+    monkeypatch.setattr(t, "_set_ptt_key", chosen.append)
+    items = list(t._key_menu().items)
+    assert len(items) == len(tray.PTT_KEYS)
+    assert [i.text for i in items] == [label for _, label in tray.PTT_KEYS]
+    items[0](None)
+    assert chosen == [tray.PTT_KEYS[0][0]]
+    monkeypatch.setattr(tray, "current_ptt_key", lambda: "f9")
+    checked = [bool(i.checked) for i in items]
+    assert checked == [name == "f9" for name, _ in tray.PTT_KEYS]
 
 
 def test_current_model_ignores_state_with_dead_pid(tmp_path, monkeypatch):
