@@ -62,12 +62,18 @@ if ($verOk -ne "True") {
 
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 Write-Host "==> creating venv at $Venv"
-if (-not (Test-Path $VenvPython)) {
+$needVenv = -not (Test-Path $VenvPython)
+if (-not $needVenv) {
+    # exists — but is it functional? (a removed/upgraded base Python breaks it)
+    & $VenvPython -c "pass" 2>$null
+    $needVenv = ($LASTEXITCODE -ne 0)
+}
+# only (re)create when needed: recreation copies fresh launchers over running
+# ones, which fails while a tray/daemon/update-helper is using them
+if ($needVenv) {
     & $Python @PyArgs -m venv $Venv
     if ($LASTEXITCODE -ne 0) { Write-Error "venv creation failed"; exit 1 }
 }
-# else: exists — recreating copies fresh launchers over running ones, which
-# fails while a tray/daemon/update-helper is using them
 & $VenvPython -m pip install -q --upgrade pip
 
 Write-Host "==> installing python dependencies"

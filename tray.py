@@ -400,7 +400,10 @@ def run_pending_update_if_any():
     """
     if not os.path.exists(UPDATE_PENDING):
         return
-    os.remove(UPDATE_PENDING)
+    try:
+        os.remove(UPDATE_PENDING)
+    except FileNotFoundError:
+        return  # the update helper consumed it first
     with open(UPDATE_LOG, "ab") as out:
         out.write(b"--- update phase 2 (installer) ---\n")
         if sys.platform == "win32":
@@ -420,10 +423,12 @@ def spawn_update_helper():
 
     The helper waits for this process to exit, runs the installer and starts
     the new tray — the handover no longer depends on a process that is
-    halfway through dying.
+    halfway through dying. Its stderr lands in update.log, so even an
+    import-time crash stays diagnosable.
     """
-    kwargs = {"cwd": DIR, "stdout": subprocess.DEVNULL,
-              "stderr": subprocess.DEVNULL, "close_fds": True}
+    errlog = open(UPDATE_LOG, "ab")
+    kwargs = {"cwd": DIR, "stdout": errlog, "stderr": subprocess.STDOUT,
+              "close_fds": True}
     if sys.platform == "win32":
         kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
                                    | subprocess.CREATE_NEW_PROCESS_GROUP)
@@ -436,8 +441,9 @@ def spawn_update_helper():
 def acquire_lock(wait=0):
     """Single-instance file lock; returns the open handle or None.
 
-    Waiting a few seconds lets an updated instance take over from the one
-    that is about to exit (see restart_self) without ever running two trays.
+    Waiting a few seconds lets a successor (spawned by the update helper, the
+    service manager or the installer) take over from the tray that is about
+    to exit — without ever running two trays side by side.
     """
     if sys.platform == "win32":
         import msvcrt
@@ -711,7 +717,11 @@ class Tray:
             self.daemon.stop()
             refresh_code()
             open(UPDATE_PENDING, "w").close()  # tells the helper to run the installer
-            spawn_update_helper()  # spawned while we are fully alive — see #12
+            # systemd kills our cgroup (and with it any helper we spawn), so
+            # there the restarted service completes the update via the safety
+            # net in main() instead.
+            if not os.environ.get("INVOCATION_ID"):
+                spawn_update_helper()  # while we are fully alive — see #12
         except (OSError, subprocess.SubprocessError) as exc:
             dictate.log(f"tray: update failed: {exc}")
             self._notify(S["update_failed_title"],
