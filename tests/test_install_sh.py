@@ -173,9 +173,74 @@ def test_wayland_grants_uinput_and_group_access(sandbox):
     assert ("99-whisper-ptt-uinput.rules" in log) != rule_already_current
     assert ("udevadm control --reload-rules" in log) != rule_already_current
 
+    # Ask the way the installer asks. Bare `id -nG` reports the current
+    # process's credentials, `id -nG $user` reads /etc/group — and between
+    # usermod and the next login the two disagree. The installer trusts the
+    # latter, so probing with the former made this test fail on any machine
+    # sitting in that window.
+    me = subprocess.run(["id", "-un"], capture_output=True,
+                        text=True).stdout.strip()
     in_input_group = "input" in subprocess.run(
-        ["id", "-nG"], capture_output=True, text=True).stdout.split()
+        ["id", "-nG", me], capture_output=True, text=True).stdout.split()
     assert ("usermod -aG input" in log) != in_input_group
+
+
+@pytest.mark.skipif(
+    any(os.path.exists(os.path.join(d, "ydotoold")) for d in ("/usr/bin", "/bin")),
+    reason="host ships a real ydotoold, and the sandbox PATH cannot hide it")
+def test_missing_ydotoold_is_asked_for_as_its_own_package(sandbox):
+    """Debian and Ubuntu ship the daemon in a separate 'ydotoold' package, so
+    installing 'ydotool' leaves the installer without a daemon.
+
+    This gap survived because the sandbox shims ydotoold like everything else:
+    with the binary always on PATH the installer never had to ask for it. Here
+    the shim is removed, which is the real Ubuntu 24.04 shape.
+
+    Removing a shim can only uncover the host's own binary, so this skips where
+    ydotoold is really installed — including, ironically, a machine that hit the
+    bug and fixed it by hand. CI runners have no ydotoold, which is where it
+    counts.
+    """
+    shims = sandbox["repo"].parent / "shims"
+    os.remove(shims / "ydotoold")
+
+    proc, log = run_installer(sandbox, "wayland", packaged_ydotool="0")
+
+    assert "apt-get install -y ydotoold" in log, \
+        "installer never asked for the ydotoold package"
+    # The shim cannot actually install it, so the pre-existing guard must still
+    # fire rather than writing a unit that points at a missing binary.
+    assert proc.returncode != 0
+    assert "ydotoold not found in PATH" in proc.stdout + proc.stderr
+    assert not (sandbox["units"] / "ydotoold.service").exists()
+
+
+def test_ydotoold_is_a_package_the_installer_knows_about():
+    """Host-independent companion to the test above, which skips wherever
+    ydotoold happens to be installed. Cheap, but it holds everywhere."""
+    with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "install_pkg ydotoold" in text, \
+        "installer never asks for the separate ydotoold package"
+
+
+def test_venv_is_created_with_system_site_packages():
+    """The tray needs the distro's PyGObject plus an AppIndicator typelib, and
+    pip can supply neither. In a sealed venv pystray falls back to its Xorg
+    backend, which on GNOME/Wayland draws the icon into a tray that is not
+    there — dictation works, every menu is unreachable.
+
+    Asserted on the source text rather than by running it: exercising this means
+    letting the installer build a real venv and pip-install the whole dependency
+    tree, which needs the network and minutes per test.
+    """
+    with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    creating = [ln for ln in lines if "python3 -m venv" in ln]
+    assert creating, "no venv creation found in install.sh"
+    for line in creating:
+        assert "--system-site-packages" in line, \
+            f"venv created without --system-site-packages: {line.strip()}"
 
 
 def test_x11_skips_the_whole_wayland_setup(sandbox):
