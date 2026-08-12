@@ -65,11 +65,19 @@ MODELS = [
 # (config value, display label) shown in the push-to-talk key submenu.
 # Only keys that do nothing when held alone: the daemon observes the key
 # without swallowing it, so caps_lock would toggle capitals on every
-# recording, and ctrl_l/alt_r are prefix keys for shortcuts (AltGr on DE).
+# recording, and ctrl_l is a prefix key for shortcuts.
+# menu and alt_gr are listed for compact laptops that have neither a right
+# Ctrl nor a usable F-row. alt_gr stays a live modifier, so it only suits
+# layouts where AltGr is not typed with (on DE, Ctrl+Alt reaches the same
+# glyphs). Note alt_gr is KEY_RIGHTALT: on keyboards whose AltGr emits
+# Ctrl+Alt as a pair there is no single key to hold, and the daemon cannot
+# use it — pick another key there.
 PTT_KEYS = [
     ("ctrl_r", "Right Ctrl"),
     ("f9", "F9"),
     ("f8", "F8"),
+    ("menu", "Menu key"),
+    ("alt_gr", "AltGr"),
 ]
 
 # (config value, display label) in the Language submenu. "auto" maps to
