@@ -24,7 +24,7 @@ def test_iss_sources_all_exist():
 def test_iss_mentions_every_runtime_file():
     """The Windows payload must mirror what install.ps1 needs at runtime."""
     text = ISS.read_text(encoding="utf-8")
-    for needed in ("dictate.py", "tray.py", "recorder.py", "transcribe.py",
+    for needed in ("dictate.py", "tray.py", "update_helper.py", "recorder.py", "transcribe.py",
                    "install.ps1", "uninstall.ps1", "requirements.txt",
                    "requirements-gpu.txt", "assets\\logo.png"):
         assert needed in text, f"{needed} not packed by hushkey.iss"
@@ -86,3 +86,12 @@ def test_release_workflow_builds_on_tags_and_smoke_tests_prs():
     assert "pull_request:" in wf          # packaging changes smoke-build in PRs
     assert "ISCC.exe" in wf               # windows installer actually compiles
     assert "build-deb.sh" in wf           # deb actually builds
+
+
+def test_update_helper_compiles_and_is_wired():
+    """The update handover depends on update_helper.py — keep it importable
+    and referenced by the tray."""
+    import py_compile
+    py_compile.compile(str(ROOT / "update_helper.py"), doraise=True)
+    tray_src = (ROOT / "tray.py").read_text(encoding="utf-8")
+    assert "update_helper.py" in tray_src

@@ -31,6 +31,7 @@ DisableProgramGroupPage=yes
 [Files]
 Source: "..\..\dictate.py"; DestDir: "{app}"
 Source: "..\..\tray.py"; DestDir: "{app}"
+Source: "..\..\update_helper.py"; DestDir: "{app}"
 Source: "..\..\recorder.py"; DestDir: "{app}"
 Source: "..\..\transcribe.py"; DestDir: "{app}"
 Source: "..\..\install.ps1"; DestDir: "{app}"
