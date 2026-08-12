@@ -57,24 +57,23 @@ The first dictation downloads the whisper model (~0.5–1.5 GB) into
 
 ## Why hushkey?
 
-**Speaking is ~3× faster than typing** — and hushkey works *everywhere*: it
-types into whatever window has focus. No plugin, no integration, no account.
+**Speaking is ~3× faster than typing** — and hushkey works in virtually every
+app: it types into the focused window. No plugin, no integration, no account.
 
 - **Prompt AI at the speed of thought.** Long prompts are the bottleneck when
   working with AI — and many AI tools have no voice input at all. Hold Right
   Ctrl, think out loud, release: IDE chat, web UI, terminal — the words land
   where your cursor is.
-- **Every app becomes a dictation app.** Mails, docs, chat, ticket comments,
+- **Every app becomes a dictation app.** Email, docs, chat, ticket comments,
   commit messages, search fields — if it takes text, hushkey types into it.
-  Terminals even get full-speed typing automatically.
-- **Private by design.** After a one-time model download, everything runs
-  offline on your machine. No cloud, no account, no telemetry — nothing you
-  say ever leaves the box.
-- **No subscription.** MIT-licensed and free. Comparable cloud dictation
-  charges $8–15 per month.
-- **You see it working.** A tray icon and a small on-screen pill show when the
-  mic is live and when your text is being written — and you can switch between
-  five model sizes (fast ↔ accurate) right from the tray.
+  On Windows and X11, terminals even get full-speed typing automatically.
+- **Private by design.** Everything runs offline on your machine: no cloud,
+  no account, no telemetry — nothing you say ever leaves the box.
+- **No subscription.** MIT-licensed and free. Comparable cloud tools charge
+  $8–15/month.
+- **You see it working.** A tray icon — and on Windows a small on-screen
+  pill — shows when the mic is live and when your text is being written.
+  Switch between five model sizes (fast ↔ accurate) right from the tray.
 - **Voice memos too.** `transcribe.py` turns a whole folder of recordings into
   Markdown notes in one go.
 
