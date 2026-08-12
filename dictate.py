@@ -82,7 +82,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -109,6 +109,21 @@ def configured_model():
     return name if isinstance(name, str) and name else None
 
 
+def configured_ptt_key():
+    """Push-to-talk key: PTT_KEY env wins (documented), then the tray's
+    config file, else the default 'ctrl_r'."""
+    env = os.environ.get("PTT_KEY")
+    if env:
+        return env
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return "ctrl_r"
+    name = data.get("ptt_key") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name else "ctrl_r"
+
+
 def write_state(state):
     """Publish the daemon state ('idle'/'recording'/'transcribing') for tray.py.
 
@@ -122,12 +137,13 @@ def write_state(state):
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"state": state, "pid": os.getpid(),
                        "version": VERSION, "model": CURRENT_MODEL,
+                       "ptt_key": PTT_KEY,
                        "ts": time.time()}, fh)
         os.replace(tmp, STATE_PATH)
     except OSError:
         pass
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
-PTT_KEY = os.environ.get("PTT_KEY", "ctrl_r")
+PTT_KEY = configured_ptt_key()
 
 
 def _env_float(name, default):

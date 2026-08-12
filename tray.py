@@ -59,6 +59,15 @@ MODELS = [
     ("large-v3", "~3 GB"),
 ]
 
+# (config value, display label) shown in the push-to-talk key submenu.
+# Only keys that are harmless when held: modifiers or keys apps ignore.
+PTT_KEYS = [
+    ("ctrl_r", "Right Ctrl"),
+    ("f9", "F9"),
+    ("f8", "F8"),
+    ("caps_lock", "Caps Lock"),
+]
+
 # Imported lazily by load_tray_backend(): the update phase 2 (pip installs)
 # must be able to run before these modules lock any of their files.
 pystray = None
@@ -147,12 +156,20 @@ def overlay_wanted():
     return os.environ.get("PTT_OVERLAY", default) != "0"
 
 
-def write_model_config(name):
-    """Persist the tray's model choice for the daemon (atomic write)."""
+def write_config(**updates):
+    """Merge settings into the tray's config file (atomic, keeps other keys)."""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data.update(updates)
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"model": name}, fh)
+        json.dump(data, fh)
     os.replace(tmp, CONFIG_PATH)
 
 
@@ -169,22 +186,31 @@ def current_model():
     return dictate.configured_model()
 
 
-def clear_model_env():
-    """Unset WHISPER_MODEL so it cannot outrank the tray's config file.
+def current_ptt_key():
+    """The key the daemon listens on, else the configured choice, else ctrl_r."""
+    data = read_state()
+    if pid_alive(data.get("pid")) and isinstance(data.get("ptt_key"), str) \
+            and data["ptt_key"]:
+        return data["ptt_key"]
+    return dictate.configured_ptt_key()
 
-    Windows: delete the user-level (setx) value and broadcast the change; our
-    own process env is cleaned too, so a daemon we restart inherits the
+
+def clear_env_var(name):
+    """Unset a user-level env var so it cannot outrank the tray's config file.
+
+    Windows: delete the setx value from the registry and broadcast the change;
+    our own process env is cleaned too, so a daemon we restart inherits the
     cleared state. On Linux/macOS a service-level env var is a deliberate
     manual override in a unit/plist — leave it alone.
     """
-    os.environ.pop("WHISPER_MODEL", None)
+    os.environ.pop(name, None)
     if sys.platform != "win32":
         return
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
                             winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, "WHISPER_MODEL")
+            winreg.DeleteValue(key, name)
     except FileNotFoundError:
         return
     try:
@@ -446,6 +472,9 @@ _STRINGS = {
         "model_menu": "Model",
         "model_switching_title": "hushkey model",
         "model_switching": "switching to {model} — first use downloads {size}",
+        "key_menu": "Push-to-talk key",
+        "key_switching_title": "hushkey key",
+        "key_switching": "push-to-talk key is now {key} — active in a few seconds",
         "update_item": "Install update: v{version}",
         "check_now": "Check for updates",
         "restart": "Restart daemon",
@@ -474,6 +503,9 @@ _STRINGS = {
         "model_menu": "Modell",
         "model_switching_title": "hushkey Modell",
         "model_switching": "wechsle zu {model} — beim ersten Mal werden {size} geladen",
+        "key_menu": "Push-to-talk-Taste",
+        "key_switching_title": "hushkey Taste",
+        "key_switching": "Push-to-talk-Taste ist jetzt {key} — in wenigen Sekunden aktiv",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -594,6 +626,7 @@ class Tray:
                      state=S.get(self.state, self.state)),
                  None, enabled=False),
             item(S["model_menu"], self._model_menu()),
+            item(S["key_menu"], self._key_menu()),
             pystray.Menu.SEPARATOR,
             item(lambda _m: S["update_item"].format(version=self.pending_update),
                  self._on_update, visible=lambda _m: self.pending_update is not None),
@@ -605,20 +638,31 @@ class Tray:
         )
 
     def _model_menu(self):
+        # the thunks resolve the module-level getter at call time, so tests
+        # (and code) can monkeypatch tray.current_model / current_ptt_key
+        return self._choice_menu(MODELS, lambda: current_model(),
+                                 self._set_model, suffix=dict(MODELS))
+
+    def _key_menu(self):
+        return self._choice_menu(PTT_KEYS, lambda: current_ptt_key(),
+                                 self._set_ptt_key)
+
+    def _choice_menu(self, choices, current_getter, setter, suffix=None):
         # pystray accepts at most 2-arg actions — bind the name via factory,
         # not via a default argument (that would count towards co_argcount).
         item = pystray.MenuItem
+        suffix = suffix or {}
 
-        def make_action(name):
-            return lambda _i, _m: self._set_model(name)
+        def make_action(value):
+            return lambda _i, _m: setter(value)
 
-        def make_checked(name):
-            return lambda _m: current_model() == name
+        def make_checked(value):
+            return lambda _m: current_getter() == value
 
         return pystray.Menu(*[
-            item(f"{name} ({size})", make_action(name),
-                 checked=make_checked(name), radio=True)
-            for name, size in MODELS
+            item(f"{label} ({suffix[value]})" if suffix else label,
+                 make_action(value), checked=make_checked(value), radio=True)
+            for value, label in choices
         ])
 
     # -- menu actions ------------------------------------------------------
@@ -656,12 +700,26 @@ class Tray:
     def _model_worker(self, name):
         if name == current_model():
             return  # re-clicking the active model must not restart the daemon
-        clear_model_env()  # an env var would mask the tray's config choice
-        write_model_config(name)
+        clear_env_var("WHISPER_MODEL")  # an env var would mask the tray's choice
+        write_config(model=name)
         size = dict(MODELS).get(name, "")
         self._notify(S["model_switching_title"],
                      S["model_switching"].format(model=name, size=size))
         self.daemon.restart()  # loads (and maybe downloads) the new model
+
+    def _set_ptt_key(self, name):
+        threading.Thread(target=self._key_worker, args=(name,),
+                         daemon=True).start()
+
+    def _key_worker(self, name):
+        if name == current_ptt_key():
+            return  # re-clicking the active key must not restart the daemon
+        clear_env_var("PTT_KEY")
+        write_config(ptt_key=name)
+        label = dict(PTT_KEYS).get(name, name)
+        self._notify(S["key_switching_title"],
+                     S["key_switching"].format(key=label))
+        self.daemon.restart()  # re-grabs the listener on the new key
 
     def _on_open_logs(self, _icon, _item):
         if sys.platform == "win32":
