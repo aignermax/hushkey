@@ -51,7 +51,29 @@ exit 1
 """
 
 LOGINCTL_SHIM = """#!/usr/bin/env bash
-if [ -n "${FAKE_SESSIONS:-}" ]; then printf '%s\\n' "$FAKE_SESSIONS"; fi
+# FAKE_SESSIONS: one "sid|user|class|type" per line.
+case "$1" in
+  list-sessions)
+    printf '%s\n' "${FAKE_SESSIONS:-}" | awk -F'|' 'NF {print $1" 1000 "$2" seat0 "$4}'
+    ;;
+  show-session)
+    sid="$2"; prop=""
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -p) prop="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    line="$(printf '%s\n' "${FAKE_SESSIONS:-}" | awk -F'|' -v s="$sid" '$1==s')"
+    case "$prop" in
+      Class) printf '%s' "$line" | cut -d'|' -f3 ;;
+      Type)  printf '%s' "$line" | cut -d'|' -f4 ;;
+      Name)  printf '%s' "$line" | cut -d'|' -f2 ;;
+    esac
+    echo
+    ;;
+esac
 exit 0
 """
 
@@ -129,7 +151,7 @@ def test_packagekit_install_falls_back_to_the_logged_in_user(sandbox):
     """PackageKit leaves no caller identity at all; the desktop session does."""
     proc, log = run_postinst(
         sandbox, FAKE_USER="carol",
-        FAKE_SESSIONS="   3 1000 carol seat0 tty2")
+        FAKE_SESSIONS="3|carol|user|wayland")
     assert proc.returncode == 0
     assert (_dest(sandbox) / "dictate.py").exists()
     assert "sudo -u carol" in log
@@ -139,11 +161,41 @@ def test_ambiguous_sessions_install_nothing_rather_than_guess(sandbox):
     """Two logged-in users: installing into either home would be a coin flip."""
     proc, log = run_postinst(
         sandbox, FAKE_USER="carol",
-        FAKE_SESSIONS="   3 1000 carol seat0 tty2\n   5 1001 dave seat1 tty3")
+        FAKE_SESSIONS="3|carol|user|wayland\n5|dave|user|x11")
     assert proc.returncode == 0, "a user-level step must never fail the package"
     assert not _dest(sandbox).exists()
     assert "finish setup as your desktop user" in proc.stdout
     assert "sudo -u" not in log
+
+
+def test_greeter_sessions_are_ignored(sandbox):
+    """A hanging gdm greeter session must not create false ambiguity."""
+    proc, log = run_postinst(
+        sandbox, FAKE_USER="carol",
+        FAKE_SESSIONS="c1|gdm|greeter|wayland\n3|carol|user|wayland")
+    assert proc.returncode == 0
+    assert (_dest(sandbox) / "dictate.py").exists()
+    assert "sudo -u carol" in log
+
+
+def test_only_a_greeter_session_installs_nothing(sandbox):
+    """A lone greeter is not a user — installing into gdm's home would be wrong."""
+    proc, log = run_postinst(
+        sandbox, FAKE_USER="carol",
+        FAKE_SESSIONS="c1|gdm|greeter|wayland")
+    assert proc.returncode == 0
+    assert not _dest(sandbox).exists()
+    assert "finish setup as your desktop user" in proc.stdout
+
+
+def test_same_user_with_two_sessions_is_unambiguous(sandbox):
+    """One user, two graphical sessions (e.g. switched seats): still one home."""
+    proc, log = run_postinst(
+        sandbox, FAKE_USER="carol",
+        FAKE_SESSIONS="3|carol|user|wayland\n7|carol|user|x11")
+    assert proc.returncode == 0
+    assert (_dest(sandbox) / "dictate.py").exists()
+    assert "sudo -u carol" in log
 
 
 def test_root_only_environment_still_prints_the_manual_hint(sandbox):

@@ -69,18 +69,22 @@ else
 fi
 
 echo "==> creating venv at $VENV"
-# --system-site-packages is required, not a convenience: the tray icon needs
-# PyGObject and an AppIndicator typelib, and both only exist as distro packages
-# (there is no usable PyGObject wheel). A sealed venv cannot see them, so
-# pystray silently falls back to its Xorg backend — which on GNOME/Wayland
-# draws an icon into a tray that does not exist, and the icon never appears.
+# --system-site-packages is required on Linux, not a convenience: the tray
+# icon needs PyGObject and an AppIndicator typelib, and both only exist as
+# distro packages (there is no usable PyGObject wheel). A sealed venv cannot
+# see them, so pystray silently falls back to its Xorg backend — which on
+# GNOME/Wayland draws an icon into a tray that does not exist.
+# Linux only: on macOS it would merely expose brew's site-packages to pip,
+# where an outdated system package can shadow a fresh wheel.
+VENV_FLAGS=""
+[ "$OS" = "Linux" ] && VENV_FLAGS="--system-site-packages"
 if [ ! -x "$VENV/bin/python" ]; then
   # Debian/Ubuntu split ensurepip into a versioned package, so name the exact one.
   pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  python3 -m venv --system-site-packages "$VENV" 2>/dev/null || {
+  python3 -m venv $VENV_FLAGS "$VENV" 2>/dev/null || {
     echo "    ensurepip unavailable — installing python${pyver}-venv"
     install_pkg "python${pyver}-venv"
-    python3 -m venv --system-site-packages "$VENV"
+    python3 -m venv $VENV_FLAGS "$VENV"
   }
 fi
 "$VENV/bin/pip" -q install --upgrade pip
@@ -112,18 +116,37 @@ else
   echo "==> no NVIDIA GPU — CPU mode (works fine, just slower)"
 fi
 
+# Older installs sealed their venv (created before --system-site-packages
+# became the default here). Flip the flag instead of recreating the venv:
+# site.py re-reads pyvenv.cfg on every interpreter start.
+if [ "$OS" = "Linux" ] && [ -f "$VENV/pyvenv.cfg" ] \
+    && grep -q "^include-system-site-packages = false" "$VENV/pyvenv.cfg"; then
+  sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' \
+    "$VENV/pyvenv.cfg"
+  echo "    existing venv: enabled access to system packages (was sealed)"
+fi
+
+appindicator_probe() {
+  # pystray tries the legacy namespace first, then Ayatana — probe in the
+  # same order, or older releases get a false "no tray" warning.
+  "$VENV/bin/python" - >/dev/null 2>&1 <<'PY'
+import gi
+try:
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3  # noqa: F401
+except (ValueError, ImportError):
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3  # noqa: F401
+PY
+}
+
 # The tray icon needs an AppIndicator implementation. GNOME removed the XEmbed
 # system tray years ago, so without one pystray picks its Xorg backend and the
 # icon is simply never shown: dictation still works, but every menu — model,
 # language, push-to-talk key — becomes unreachable. PyGObject and the typelib
 # exist only as distro packages, which is why the venv is created with
 # --system-site-packages above.
-if [ "$OS" = "Linux" ] && ! "$VENV/bin/python" - >/dev/null 2>&1 <<'PY'
-import gi
-gi.require_version("AyatanaAppIndicator3", "0.1")
-from gi.repository import AyatanaAppIndicator3  # noqa: F401
-PY
-then
+if [ "$OS" = "Linux" ] && ! appindicator_probe; then
   echo "==> installing AppIndicator support for the tray icon"
   if command -v apt-get >/dev/null; then
     install_pkg gir1.2-ayatanaappindicator3-0.1 python3-gi || true
@@ -132,8 +155,7 @@ then
   elif command -v pacman >/dev/null; then
     install_pkg libayatana-appindicator python-gobject || true
   fi
-  if ! "$VENV/bin/python" -c \
-      'import gi; gi.require_version("AyatanaAppIndicator3", "0.1")' 2>/dev/null; then
+  if ! appindicator_probe; then
     echo "    WARNING: no AppIndicator available — the daemon will run, but"
     echo "             without a tray icon (see README 'no tray icon')."
     echo "             On GNOME the AppIndicator shell extension is also needed."

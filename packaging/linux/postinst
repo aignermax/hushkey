@@ -43,10 +43,25 @@ resolve_user() {
     # 3. PackageKit leaves no caller identity at all, so fall back to the
     #    logged-in desktop user. Only accept an unambiguous answer: with two
     #    users logged in, guessing would install into the wrong home.
+    #    Only real desktop sessions count — greeter sessions (gdm/sddm) and
+    #    remote logins would create false ambiguity, and a lone greeter would
+    #    install into the display manager's home.
     if command -v loginctl >/dev/null 2>&1; then
-        name="$(loginctl list-sessions --no-legend 2>/dev/null \
-                | awk '$3 != "" && $3 != "root" { print $3 }' \
-                | sort -u)"
+        name=""
+        for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk 'NF {print $1}'); do
+            [ "$(loginctl show-session "$sid" -p Class --value 2>/dev/null)" = "user" ] \
+                || continue
+            case "$(loginctl show-session "$sid" -p Type --value 2>/dev/null)" in
+                x11|wayland) ;;
+                *) continue ;;
+            esac
+            user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null)"
+            if [ -n "$user" ] && [ "$user" != "root" ]; then
+                name="${name:+$name
+}$user"
+            fi
+        done
+        name="$(printf '%s\n' "$name" | sed '/^$/d' | sort -u)"
         if [ -n "$name" ] && [ "$(printf '%s\n' "$name" | wc -l)" -eq 1 ]; then
             printf '%s\n' "$name"
             return 0

@@ -234,7 +234,7 @@ def test_ydotoold_is_a_package_the_installer_knows_about():
         "installer never asks for the separate ydotoold package"
 
 
-def test_venv_is_created_with_system_site_packages():
+def test_venv_creation_uses_system_site_packages_on_linux():
     """The tray needs the distro's PyGObject plus an AppIndicator typelib, and
     pip can supply neither. In a sealed venv pystray falls back to its Xorg
     backend, which on GNOME/Wayland draws the icon into a tray that is not
@@ -245,12 +245,15 @@ def test_venv_is_created_with_system_site_packages():
     tree, which needs the network and minutes per test.
     """
     with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-    creating = [ln for ln in lines if "python3 -m venv" in ln]
+        text = fh.read()
+    creating = [ln for ln in text.splitlines() if "python3 -m venv" in ln]
     assert creating, "no venv creation found in install.sh"
     for line in creating:
-        assert "--system-site-packages" in line, \
-            f"venv created without --system-site-packages: {line.strip()}"
+        assert "$VENV_FLAGS" in line, "venv creation must go through $VENV_FLAGS"
+    # the flag is set for Linux only — on macOS it would shadow fresh wheels
+    assert '[ "$OS" = "Linux" ] && VENV_FLAGS="--system-site-packages"' in text
+    # and installs created before the flag existed get it flipped in place
+    assert "include-system-site-packages = false" in text
 
 
 def test_x11_skips_the_whole_wayland_setup(sandbox):
