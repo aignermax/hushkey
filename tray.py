@@ -626,7 +626,14 @@ class RecordingOverlay:
         try:
             import tkinter as tk
         except ImportError:
-            return  # python3-tk not installed — no overlay, no problem
+            # Only reached when the overlay was actually asked for, so staying
+            # silent left the user with no window and no reason for it. tkinter
+            # ships with Python on Windows but is a separate distro package on
+            # Linux, and nothing in the project used to mention that.
+            dictate.log("tray: overlay requested (PTT_OVERLAY) but tkinter is "
+                        "missing — install python3-tk (Debian/Ubuntu), "
+                        "python3-tkinter (Fedora) or tk (Arch)")
+            return
         try:
             root = tk.Tk()
         except tk.TclError:

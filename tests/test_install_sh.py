@@ -215,6 +215,16 @@ def test_missing_ydotoold_is_asked_for_as_its_own_package(sandbox):
     assert not (sandbox["units"] / "ydotoold.service").exists()
 
 
+def test_tkinter_is_a_package_the_installer_knows_about():
+    """PTT_OVERLAY=1 is inert without tkinter, and tkinter is a distro package
+    on Linux while being part of Python on Windows — which is why nothing here
+    ever asked for it."""
+    with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "install_pkg python3-tk" in text, \
+        "installer never asks for tkinter, so the overlay switch does nothing"
+
+
 def test_ydotoold_is_a_package_the_installer_knows_about():
     """Host-independent companion to the test above, which skips wherever
     ydotoold happens to be installed. Cheap, but it holds everywhere."""

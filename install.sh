@@ -140,6 +140,22 @@ then
   fi
 fi
 
+# tkinter, for the recording overlay (PTT_OVERLAY=1). The overlay is off by
+# default on Linux — the tray icon and the desktop's own mic indicator cover it —
+# so this is an optional dependency. Install it anyway: it is small, and without
+# it flipping PTT_OVERLAY=1 does nothing at all. tkinter is part of Python on
+# Windows, which is why nothing here ever asked for it.
+if [ "$OS" = "Linux" ] && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
+  echo "==> installing tkinter (for the PTT_OVERLAY recording overlay)"
+  if command -v apt-get >/dev/null; then
+    install_pkg python3-tk || true
+  elif command -v dnf >/dev/null; then
+    install_pkg python3-tkinter || true
+  elif command -v pacman >/dev/null; then
+    install_pkg tk || true
+  fi
+fi
+
 if [ "$SESSION" = "wayland" ]; then
   echo "==> Wayland detected — setting up evdev key grab and ydotool typing"
 

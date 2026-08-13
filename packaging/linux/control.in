@@ -5,7 +5,7 @@ Priority: optional
 Architecture: all
 Maintainer: aignermax <aignermax@users.noreply.github.com>
 Depends: python3 (>= 3.10), python3-venv, python3-dev, build-essential, curl, sudo
-Recommends: pipewire-bin, ydotool, ydotoold, wl-clipboard, python3-gi, gir1.2-ayatanaappindicator3-0.1
+Recommends: pipewire-bin, ydotool, ydotoold, wl-clipboard, python3-gi, gir1.2-ayatanaappindicator3-0.1, python3-tk
 Homepage: https://github.com/aignermax/hushkey
 Description: local, offline push-to-talk dictation
  Hold a key, speak, release — the transcript is typed into whatever window
