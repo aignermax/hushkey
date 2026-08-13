@@ -4,12 +4,73 @@
 # package install because a user-level step did not work — print what to do.
 set -e
 
+PAYLOAD="${HUSHKEY_PAYLOAD:-/opt/hushkey}"
+
 manual_hint() {
     echo "hushkey: finish setup as your desktop user:"
     echo "  cp -r /opt/hushkey ~/.local/share/whisper-ptt && bash ~/.local/share/whisper-ptt/install.sh"
 }
 
-USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
+# Which user's home should receive the install?
+#
+# `sudo dpkg -i` sets SUDO_USER, and that used to be the only case handled. But
+# a graphical install (GNOME Software, gdebi, double-clicking the .deb) runs the
+# maintainer script through pkexec/PackageKit instead: SUDO_USER is unset and
+# logname fails for want of a controlling terminal. The old one-liner then left
+# USER_NAME empty, printed the hint into a log nobody reads and exited 0 — dpkg
+# reported success while nothing but /opt had been touched.
+#
+# So try the identities in order of trustworthiness and stop at the first hit.
+resolve_user() {
+    # 1. sudo, and pkexec, each state the caller outright.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        printf '%s\n' "$SUDO_USER"
+        return 0
+    fi
+    if [ -n "${PKEXEC_UID:-}" ]; then
+        name="$(getent passwd "$PKEXEC_UID" 2>/dev/null | cut -d: -f1)"
+        if [ -n "$name" ] && [ "$name" != root ]; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    fi
+    # 2. A controlling terminal, when there is one.
+    name="$(logname 2>/dev/null || true)"
+    if [ -n "$name" ] && [ "$name" != root ]; then
+        printf '%s\n' "$name"
+        return 0
+    fi
+    # 3. PackageKit leaves no caller identity at all, so fall back to the
+    #    logged-in desktop user. Only accept an unambiguous answer: with two
+    #    users logged in, guessing would install into the wrong home.
+    #    Only real desktop sessions count — greeter sessions (gdm/sddm) and
+    #    remote logins would create false ambiguity, and a lone greeter would
+    #    install into the display manager's home.
+    if command -v loginctl >/dev/null 2>&1; then
+        name=""
+        for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk 'NF {print $1}'); do
+            [ "$(loginctl show-session "$sid" -p Class --value 2>/dev/null)" = "user" ] \
+                || continue
+            case "$(loginctl show-session "$sid" -p Type --value 2>/dev/null)" in
+                x11|wayland) ;;
+                *) continue ;;
+            esac
+            user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null)"
+            if [ -n "$user" ] && [ "$user" != "root" ]; then
+                name="${name:+$name
+}$user"
+            fi
+        done
+        name="$(printf '%s\n' "$name" | sed '/^$/d' | sort -u)"
+        if [ -n "$name" ] && [ "$(printf '%s\n' "$name" | wc -l)" -eq 1 ]; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+USER_NAME="$(resolve_user || true)"
 if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
     echo "hushkey: installed to /opt/hushkey."
     manual_hint
@@ -26,7 +87,7 @@ fi
 
 DEST="$USER_HOME/.local/share/whisper-ptt"
 mkdir -p "$DEST"
-cp -r /opt/hushkey/. "$DEST/"
+cp -r "$PAYLOAD/." "$DEST/"
 chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"
 
 # the v0.4.0 deb used a differently named dir — drop it after a successful copy

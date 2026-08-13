@@ -69,13 +69,22 @@ else
 fi
 
 echo "==> creating venv at $VENV"
+# --system-site-packages is required on Linux, not a convenience: the tray
+# icon needs PyGObject and an AppIndicator typelib, and both only exist as
+# distro packages (there is no usable PyGObject wheel). A sealed venv cannot
+# see them, so pystray silently falls back to its Xorg backend — which on
+# GNOME/Wayland draws an icon into a tray that does not exist.
+# Linux only: on macOS it would merely expose brew's site-packages to pip,
+# where an outdated system package can shadow a fresh wheel.
+VENV_FLAGS=""
+[ "$OS" = "Linux" ] && VENV_FLAGS="--system-site-packages"
 if [ ! -x "$VENV/bin/python" ]; then
   # Debian/Ubuntu split ensurepip into a versioned package, so name the exact one.
   pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  python3 -m venv "$VENV" 2>/dev/null || {
+  python3 -m venv $VENV_FLAGS "$VENV" 2>/dev/null || {
     echo "    ensurepip unavailable — installing python${pyver}-venv"
     install_pkg "python${pyver}-venv"
-    python3 -m venv "$VENV"
+    python3 -m venv $VENV_FLAGS "$VENV"
   }
 fi
 "$VENV/bin/pip" -q install --upgrade pip
@@ -107,10 +116,77 @@ else
   echo "==> no NVIDIA GPU — CPU mode (works fine, just slower)"
 fi
 
+# Older installs sealed their venv (created before --system-site-packages
+# became the default here). Flip the flag instead of recreating the venv:
+# site.py re-reads pyvenv.cfg on every interpreter start.
+if [ "$OS" = "Linux" ] && [ -f "$VENV/pyvenv.cfg" ] \
+    && grep -q "^include-system-site-packages = false" "$VENV/pyvenv.cfg"; then
+  sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' \
+    "$VENV/pyvenv.cfg"
+  echo "    existing venv: enabled access to system packages (was sealed)"
+fi
+
+appindicator_probe() {
+  # pystray tries the legacy namespace first, then Ayatana — probe in the
+  # same order, or older releases get a false "no tray" warning.
+  "$VENV/bin/python" - >/dev/null 2>&1 <<'PY'
+import gi
+try:
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3  # noqa: F401
+except (ValueError, ImportError):
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3  # noqa: F401
+PY
+}
+
+# The tray icon needs an AppIndicator implementation. GNOME removed the XEmbed
+# system tray years ago, so without one pystray picks its Xorg backend and the
+# icon is simply never shown: dictation still works, but every menu — model,
+# language, push-to-talk key — becomes unreachable. PyGObject and the typelib
+# exist only as distro packages, which is why the venv is created with
+# --system-site-packages above.
+if [ "$OS" = "Linux" ] && ! appindicator_probe; then
+  echo "==> installing AppIndicator support for the tray icon"
+  if command -v apt-get >/dev/null; then
+    install_pkg gir1.2-ayatanaappindicator3-0.1 python3-gi || true
+  elif command -v dnf >/dev/null; then
+    install_pkg libayatana-appindicator-gtk3 python3-gobject || true
+  elif command -v pacman >/dev/null; then
+    install_pkg libayatana-appindicator python-gobject || true
+  fi
+  if ! appindicator_probe; then
+    echo "    WARNING: no AppIndicator available — the daemon will run, but"
+    echo "             without a tray icon (see README 'no tray icon')."
+    echo "             On GNOME the AppIndicator shell extension is also needed."
+  fi
+fi
+
+# tkinter, for the recording overlay (PTT_OVERLAY=1). The overlay is off by
+# default on Linux — the tray icon and the desktop's own mic indicator cover it —
+# so this is an optional dependency. Install it anyway: it is small, and without
+# it flipping PTT_OVERLAY=1 does nothing at all. tkinter is part of Python on
+# Windows, which is why nothing here ever asked for it.
+if [ "$OS" = "Linux" ] && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
+  echo "==> installing tkinter (for the PTT_OVERLAY recording overlay)"
+  if command -v apt-get >/dev/null; then
+    install_pkg python3-tk || true
+  elif command -v dnf >/dev/null; then
+    install_pkg python3-tkinter || true
+  elif command -v pacman >/dev/null; then
+    install_pkg tk || true
+  fi
+fi
+
 if [ "$SESSION" = "wayland" ]; then
   echo "==> Wayland detected — setting up evdev key grab and ydotool typing"
 
   command -v ydotool  >/dev/null || install_pkg ydotool
+  # Debian and Ubuntu split the daemon into its own 'ydotoold' package, so
+  # installing 'ydotool' alone leaves ydotoold missing and the run aborts below.
+  # Other distros bundle both; tolerate the failure there and let the check
+  # further down report what is actually missing.
+  command -v ydotoold >/dev/null || install_pkg ydotoold || true
   command -v wl-copy  >/dev/null || install_pkg wl-clipboard
 
   # /dev/uinput is root-only by default; hand it to the 'input' group so

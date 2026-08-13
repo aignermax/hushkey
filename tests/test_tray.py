@@ -296,3 +296,20 @@ def test_poll_state_starting_while_child_alive_and_state_stale(tmp_path, monkeyp
     thread.join(3)
     assert t.state == "starting"
     assert updates  # the menu was rebuilt for the state change
+
+
+def test_overlay_reports_a_missing_tkinter(monkeypatch):
+    """The overlay used to return silently when tkinter was absent, so setting
+    PTT_OVERLAY=1 on Linux produced no window and no explanation anywhere."""
+    import sys
+
+    import dictate
+
+    monkeypatch.setitem(sys.modules, "tkinter", None)  # makes the import raise
+    logged = []
+    monkeypatch.setattr(dictate, "log", logged.append)
+
+    tray.RecordingOverlay()._run()
+
+    assert len(logged) == 1
+    assert "tkinter" in logged[0] and "python3-tk" in logged[0]

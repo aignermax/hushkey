@@ -131,7 +131,7 @@ key* (no config file or env var needed).
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
-| `PTT_OVERLAY` | `1` on Windows, else `0` | Show a small always-on-top pill at the top of the screen while recording/transcribing — useful when the taskbar hides the tray icon. `1` also enables it on X11 |
+| `PTT_OVERLAY` | `1` on Windows, else `0` | Show a small always-on-top pill at the top of the screen while recording/transcribing — useful when the taskbar hides the tray icon. `1` also enables it on X11. Needs tkinter, which `install.sh` installs on Linux (`python3-tk`); without it the overlay says so in the log and stays away. It is a Tk window, so on Wayland it goes through Xwayland — usually fine, but the tray icon is the supported indicator there |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
