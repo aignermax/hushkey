@@ -5,6 +5,8 @@ Documentation=https://github.com/ReimuNotMoe/ydotool
 [Service]
 # Runs as the user, not root: the udev rule in udev/99-whisper-ptt-uinput.rules
 # gives the 'input' group rw on /dev/uinput, and the user is in that group.
+# ydotoold 0.1.x (Ubuntu 24.04/Debian 12) ignores these flags and always binds
+# /tmp/.ydotool_socket — harmless: the daemon probes both socket locations.
 ExecStart=@YDOTOOLD@ --socket-path=%t/.ydotool_socket --socket-perm=0600
 Restart=on-failure
 RestartSec=3

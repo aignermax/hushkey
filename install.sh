@@ -233,12 +233,13 @@ if [ "$SESSION" = "wayland" ]; then
 
   # Prefer the distribution's own ydotool.service when it ships one.
   #
-  # ydotoold's default socket path is already $XDG_RUNTIME_DIR/.ydotool_socket —
-  # exactly what our unit would pin — so the packaged unit and ours do not
-  # coexist: whichever loses the race dies with "Another ydotoold is running
-  # with the same socket" and, with Restart=on-failure, retries forever. Debian
-  # enables its unit by preset, so it normally wins and ours crash-loops in the
-  # background while dictation appears to work.
+  # Two ydotoold units do not coexist: whichever loses the race dies with
+  # "Another ydotoold is running with the same socket" and, with
+  # Restart=on-failure, retries forever. Debian enables its unit by preset, so
+  # it normally wins and ours crash-loops in the background while dictation
+  # appears to work. (Socket location differs by version — 1.x honours
+  # --socket-path, 0.1.x always binds /tmp/.ydotool_socket — but either way
+  # the loser still claims the same one; the daemon probes both.)
   mkdir -p "$UNIT_DIR"
   if systemctl --user list-unit-files ydotool.service --no-legend 2>/dev/null \
       | grep -q '^ydotool\.service'; then

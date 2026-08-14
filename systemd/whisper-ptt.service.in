@@ -10,7 +10,6 @@ After=ydotool.service ydotoold.service
 
 [Service]
 ExecStart=@DIR@/.venv/bin/python @DIR@/tray.py
-Environment=YDOTOOL_SOCKET=%t/.ydotool_socket
 Restart=on-failure
 RestartSec=3
 

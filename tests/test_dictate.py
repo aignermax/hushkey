@@ -471,8 +471,10 @@ def test_make_backends_pairs_listener_and_injector(monkeypatch):
     assert isinstance(injector, dictate.WaylandInjector)
 
 
-def test_paste_chord_presses_then_releases_in_reverse():
+def test_paste_chord_presses_then_releases_in_reverse(monkeypatch):
     pytest.importorskip("evdev")  # Linux-only dependency
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "code"))
     from evdev import ecodes
     args = dictate.WaylandInjector._build_chord("ctrl+shift+v")
     ctrl, shift, v = ecodes.KEY_LEFTCTRL, ecodes.KEY_LEFTSHIFT, ecodes.KEY_V
@@ -532,23 +534,29 @@ def wayland(monkeypatch):
     """A WaylandInjector whose helpers are all faked, with a call log."""
     pytest.importorskip("evdev")
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
-    state = {"calls": [], "procs": [], "paste": b"old clipboard",
+    state = {"calls": [], "cmds": [], "procs": [], "paste": b"old clipboard",
              "copy_alive": True}
 
     def fake_popen(cmd, **kwargs):
         state["calls"].append(cmd[0])
+        state["cmds"].append(cmd)
         proc = FakeCopyProc(alive=state["copy_alive"])
         state["procs"].append(proc)
         return proc
 
     def fake_run(cmd, **kwargs):
         state["calls"].append(cmd[0])
+        state["cmds"].append(cmd)
         if cmd[0] == "wl-paste":
             return subprocess.CompletedProcess(cmd, 0, state["paste"], b"")
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
     monkeypatch.setattr(dictate.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    # The style detection would otherwise add an extra ydotool --help call.
+    # These tests assume the 1.x KEYCODE:STATE format.
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "code"))
     state["injector"] = dictate.WaylandInjector()
     return state
 
@@ -732,17 +740,127 @@ def test_evdev_lost_device_is_dropped_not_fatal(monkeypatch):
     assert gone.closed and survivor.closed
 
 
-def test_wayland_socket_prefers_explicit_env(monkeypatch):
+def test_wayland_socket_resolution_order(monkeypatch, tmp_path):
     monkeypatch.setenv("YDOTOOL_SOCKET", "/run/custom.sock")
     assert dictate.WaylandInjector._socket_path() == "/run/custom.sock"
     monkeypatch.delenv("YDOTOOL_SOCKET")
-    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-    # os.path.join, so the separator is the host's — this asserts the lookup
-    # order, not the spelling. The path itself is only ever used on Linux.
-    assert dictate.WaylandInjector._socket_path() == os.path.join(
-        "/run/user/1000", ".ydotool_socket")
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    runtime_sock = runtime / ".ydotool_socket"
+    # Both sockets connectable: the runtime-dir one must win. Patching
+    # os.access hermetically pins this — otherwise the assert only passes
+    # because /tmp/.ydotool_socket happens not to exist on the test host.
+    monkeypatch.setattr("os.access", lambda p, m: True)
+    assert dictate.WaylandInjector._socket_path() == str(runtime_sock)
+
+    # Older ydotoold (e.g. Ubuntu 24.04's 0.1.x) ignores --socket-path and
+    # creates /tmp/.ydotool_socket. The runtime-dir socket is gone, so we
+    # must fall back to the legacy path.
+    monkeypatch.setattr("os.access",
+                        lambda p, m: str(p) == "/tmp/.ydotool_socket")
+    assert dictate.WaylandInjector._socket_path() == "/tmp/.ydotool_socket"
+
     monkeypatch.delenv("XDG_RUNTIME_DIR")
-    assert dictate.WaylandInjector._socket_path() is None
+    # Without a runtime dir we still know the legacy fallback path.
+    assert dictate.WaylandInjector._socket_path() == "/tmp/.ydotool_socket"
+
+
+def test_wayland_socket_skips_foreign_socket(monkeypatch):
+    """Multi-user box: another user's 0.1.x socket exists in /tmp but is
+    not connectable for us — it must not be picked."""
+    monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr("os.access", lambda p, m: False)
+    # Nothing usable: report the preferred path so the error names it.
+    assert dictate.WaylandInjector._socket_path() == \
+        os.path.join("/run/user/1000", ".ydotool_socket")
+
+
+def test_wayland_check_accepts_legacy_tmp_socket(monkeypatch):
+    """The Ubuntu 24.04 crash loop: only /tmp/.ydotool_socket exists —
+    check() must find the backend usable instead of exiting."""
+    pytest.importorskip("evdev")
+    monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(dictate.shutil, "which", lambda t: f"/usr/bin/{t}")
+    monkeypatch.setattr("os.access",
+                        lambda p, m: str(p) == "/tmp/.ydotool_socket")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    injector = dictate.WaylandInjector()
+    assert injector.check() is None
+
+
+def test_build_chord_uses_key_names_for_ydotool_01x(monkeypatch):
+    pytest.importorskip("evdev")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    assert dictate.WaylandInjector._build_chord("ctrl+v") == ["ctrl+v"]
+    assert dictate.WaylandInjector._build_chord("ctrl+shift+v") == ["ctrl+shift+v"]
+
+
+def test_build_chord_uses_keycodes_for_ydotool_1x(monkeypatch):
+    pytest.importorskip("evdev")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "code"))
+    args = dictate.WaylandInjector._build_chord("ctrl+v")
+    # press ctrl, press v, release v, release ctrl
+    assert args == ["29:1", "47:1", "47:0", "29:0"]
+
+
+def test_ydotool_key_style_detects_01x_from_help_stdout(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0,
+            "Usage: key [--delay <ms>] ...\n"
+            "Each key sequence can be any number of modifiers and keys, "
+            "separated by plus (+)\n", "")
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    assert dictate.WaylandInjector._ydotool_key_style() == "name"
+
+
+def test_ydotool_key_style_detects_01x_from_help_stderr(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "",
+            "Usage: key [--delay <ms>] ...\n"
+            "Each key sequence can be any number of modifiers and keys, "
+            "separated by plus (+)\n")
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    assert dictate.WaylandInjector._ydotool_key_style() == "name"
+
+
+def test_ydotool_key_style_defaults_to_code_format(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0,
+            "Usage: key [--delay <ms>] <KEYCODE:STATE> ...\n", "")
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    assert dictate.WaylandInjector._ydotool_key_style() == "code"
+
+
+def test_ydotool_key_style_defaults_to_code_on_probe_error(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 5)
+    monkeypatch.setattr(dictate.subprocess, "run", fake_run)
+    assert dictate.WaylandInjector._ydotool_key_style() == "code"
+
+
+def test_build_chord_normalizes_aliases_for_ydotool_01x(monkeypatch):
+    """0.1.x's key table knows ctrl, not control — an unknown token would
+    silently degrade to its first letter and press 'c'."""
+    pytest.importorskip("evdev")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    assert dictate.WaylandInjector._build_chord("control+v") == ["ctrl+v"]
+    assert dictate.WaylandInjector._build_chord("KEY_BACKSPACE") == ["backspace"]
+
+
+def test_insert_with_ydotool_01x_sends_key_names(wayland, monkeypatch):
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    wayland["injector"].insert("hallo")
+    paste = [c for c in wayland["cmds"] if c[0] == "ydotool"]
+    assert paste == [["ydotool", "key", "ctrl+v"]]
 
 
 def test_missing_backend_does_not_crash(monkeypatch):

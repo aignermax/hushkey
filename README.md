@@ -99,7 +99,8 @@ Security) — the global hotkey and synthetic typing depend on them.
 **On Linux/Wayland additionally** — the installer handles all of this and will
 ask for your password once:
 
-- `ydotool` and `wl-clipboard` packages
+- `ydotool` and `wl-clipboard` packages (ydotool 0.1.x and 1.x both work —
+  the daemon detects which key syntax and socket path the installed one uses)
 - a udev rule giving the `input` group access to `/dev/uinput`
 - your user added to the `input` group (**requires one logout**)
 
@@ -264,18 +265,23 @@ layout-stable paste chord is synthesized.
 > inherent to doing this on Wayland at all, not specific to this tool — but only
 > set it up on a machine you trust. `./uninstall.sh --purge-system` reverts both.
 
-**One ydotoold, not two.** `ydotoold`'s default socket path already *is*
-`$XDG_RUNTIME_DIR/.ydotool_socket`, so a second unit pinning that path does not
-coexist with the first — the loser exits with `Another ydotoold is running with
-the same socket` and, under `Restart=on-failure`, retries forever. Debian/Ubuntu
-ship `ydotool.service` and enable it by preset, so it normally wins while the
-duplicate crash-loops in the background; dictation keeps working, which is what
-makes this easy to miss.
+**One ydotoold, not two.** Two ydotoold units do not coexist — the loser exits
+with `Another ydotoold is running with the same socket` and, under
+`Restart=on-failure`, retries forever. Debian/Ubuntu ship `ydotool.service` and
+enable it by preset, so it normally wins while the duplicate crash-loops in the
+background; dictation keeps working, which is what makes this easy to miss.
 
 The installer therefore uses the packaged `ydotool.service` when the
-distribution provides one, and only installs its own `ydotoold.service`
-(socket path and permissions pinned explicitly) when there is none. If a
-previous run left a redundant unit behind, re-running `./install.sh` removes it.
+distribution provides one, and only installs its own `ydotoold.service` when
+there is none. If a previous run left a redundant unit behind, re-running
+`./install.sh` removes it.
+
+**ydotool 0.1.x vs 1.x.** Both are supported; the daemon auto-detects which
+key syntax (`ctrl+v` vs `KEYCODE:STATE`) and which socket the installed
+version uses. Where they differ: 1.x honours `--socket-path` and defaults to
+`$XDG_RUNTIME_DIR/.ydotool_socket`; 0.1.x (the Ubuntu 24.04/Debian 12 package)
+ignores its arguments and always binds `/tmp/.ydotool_socket`, which is why the
+daemon probes both locations rather than trusting one.
 
 ## Limitations
 

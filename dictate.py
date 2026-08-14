@@ -491,14 +491,29 @@ class WaylandInjector:
 
         Resolving it ourselves (rather than only honouring an explicitly set
         YDOTOOL_SOCKET) means a manual `python dictate.py` run validates the
-        same socket the systemd unit uses, instead of failing later inside
-        ydotool with a less obvious message.
+        socket up front, instead of failing later inside ydotool with a less
+        obvious message.
+
+        Older ydotoold versions (e.g. the 0.1.x packages in Ubuntu 24.04)
+        ignore --socket-path and always create /tmp/.ydotool_socket, so we
+        fall back to that location when the runtime-dir socket is absent.
         """
         explicit = os.environ.get("YDOTOOL_SOCKET")
         if explicit:
             return explicit
         runtime = os.environ.get("XDG_RUNTIME_DIR")
-        return os.path.join(runtime, ".ydotool_socket") if runtime else None
+        candidates = []
+        if runtime:
+            candidates.append(os.path.join(runtime, ".ydotool_socket"))
+        candidates.append("/tmp/.ydotool_socket")
+        # Prefer the runtime-dir default, but accept the legacy path when
+        # ydotoold is an old version that ignores --socket-path. os.access:
+        # on a multi-user machine /tmp/.ydotool_socket may belong to another
+        # user's session — it exists, but we could never connect to it.
+        for path in candidates:
+            if os.access(path, os.W_OK):
+                return path
+        return candidates[0] if candidates else None
 
     def check(self):
         """Return a human-readable problem description, or None if usable."""
@@ -510,13 +525,33 @@ class WaylandInjector:
         except ValueError as exc:
             return str(exc)
         socket = self._socket_path()
-        if socket is None:
-            return ("neither YDOTOOL_SOCKET nor XDG_RUNTIME_DIR is set — "
-                    "cannot locate the ydotoold socket")
-        if not os.path.exists(socket):
-            return (f"ydotoold socket {socket} missing — "
+        if socket is None or not os.access(socket, os.W_OK):
+            return (f"ydotoold socket {socket} missing or not writable — "
                     "systemctl --user start ydotoold.service")
         return None
+
+    @staticmethod
+    def _ydotool_key_style():
+        """Detect whether the installed ydotool expects KEYCODE:STATE (1.x)
+        or key-name sequences like 'ctrl+v' (0.1.x).
+
+        Runs a probe subprocess on every call — in practice twice per daemon
+        (once in check(), once on the first insert). Deliberately not cached
+        with lru_cache: the tests probe with different monkeypatched runs,
+        and a cache would leak the first result into the later ones.
+        """
+        try:
+            proc = subprocess.run(["ydotool", "key", "--help"],
+                                  capture_output=True, text=True,
+                                  timeout=5)
+            out = proc.stdout + proc.stderr
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        # ydotool 0.1.x help says: "modifiers and keys, separated by plus (+)".
+        # ydotool 1.x help describes KEYCODE:STATE pairs.
+        if "plus (+)" in out and "KEYCODE" not in out:
+            return "name"
+        return "code"
 
     @staticmethod
     def _build_chord(chord):
@@ -525,21 +560,34 @@ class WaylandInjector:
         names = {"ctrl": "KEY_LEFTCTRL", "control": "KEY_LEFTCTRL",
                  "shift": "KEY_LEFTSHIFT", "alt": "KEY_LEFTALT",
                  "super": "KEY_LEFTMETA", "meta": "KEY_LEFTMETA"}
+        # The spellings ydotool 0.1.x accepts for modifiers; anything its key
+        # table does not know silently degrades to the token's first letter.
+        display_names = {"KEY_LEFTCTRL": "ctrl", "KEY_LEFTSHIFT": "shift",
+                         "KEY_LEFTALT": "alt", "KEY_LEFTMETA": "super"}
         codes = []
+        display_parts = []
         for part in chord.lower().split("+"):
             part = part.strip()
             if not part:
                 continue
             evname = names.get(part) or (
-                part.upper() if part.startswith("KEY_") else "KEY_" + part.upper())
+                # part is already lowercased, so KEY_ arrives as 'key_'
+                part.upper() if part.startswith("key_") else "KEY_" + part.upper())
             code = getattr(ecodes, evname, None)
             if code is None:
                 raise ValueError(f"unknown key '{part}' in PTT_PASTE_KEY={chord}")
             codes.append(code)
+            display = display_names.get(evname)
+            if display is None:
+                display = (evname[4:].lower() if evname.startswith("KEY_")
+                           else part)
+            display_parts.append(display)
         if not codes:
             raise ValueError("PTT_PASTE_KEY is empty")
-        # ydotool 1.x takes KEYCODE:STATE pairs; numeric codes avoid depending
-        # on its own (version-dependent) key-name parser.
+        # ydotool 0.1.x (Ubuntu 24.04 package) expects key-name sequences like
+        # 'ctrl+v'. ydotool 1.x expects KEYCODE:STATE pairs.
+        if WaylandInjector._ydotool_key_style() == "name":
+            return ["+".join(display_parts)]
         return ([f"{c}:1" for c in codes]
                 + [f"{c}:0" for c in reversed(codes)])
 
