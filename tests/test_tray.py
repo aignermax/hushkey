@@ -313,3 +313,58 @@ def test_overlay_reports_a_missing_tkinter(monkeypatch):
 
     assert len(logged) == 1
     assert "tkinter" in logged[0] and "python3-tk" in logged[0]
+
+
+def test_update_worker_defers_exit_to_main_thread(tmp_path, monkeypatch):
+    """Regression: the worker used to os._exit(1) itself after a 0.3 s sleep,
+    but icon.stop() makes the main thread return from icon.run() and exit 0
+    first — systemd's Restart=on-failure never fired, and a pending update
+    left the service dead (the app looked uninstalled)."""
+    import sys
+    t = tray.Tray.__new__(tray.Tray)
+    t._update_exit_code = None
+    stopped = []
+    t.daemon = type("D", (), {"stop": lambda _s: stopped.append("daemon"),
+                              "restart": lambda _s: None})()
+    t.icon = type("I", (), {"stop": lambda _s: stopped.append("icon")})()
+    monkeypatch.setattr(t, "_notify", lambda *a: None)
+    monkeypatch.setattr(tray, "refresh_code", lambda: None)
+    monkeypatch.setattr(tray, "UPDATE_PENDING", str(tmp_path / "update-pending"))
+    monkeypatch.setenv("INVOCATION_ID", "test")  # under systemd: no helper
+    exits = []
+    monkeypatch.setattr(tray.os, "_exit", exits.append)
+
+    t._update_worker()
+
+    assert exits == []  # the worker must never exit the process itself
+    assert t._update_exit_code == (1 if sys.platform.startswith("linux") else 0)
+    assert (tmp_path / "update-pending").exists()  # phase 2 stays armed
+    assert stopped == ["daemon", "icon"]
+
+
+def _run_tray_with_fake_icon(monkeypatch, exit_code):
+    import threading
+    t = tray.Tray.__new__(tray.Tray)
+    t.stopping = threading.Event()
+    t.daemon = type("D", (), {"ensure_supervising": lambda _s: None})()
+    t.icon = type("I", (), {"run": lambda _s: None})()  # returns immediately
+    t._update_exit_code = exit_code
+    monkeypatch.setattr(tray.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda _s: None})())
+    exits = []
+    monkeypatch.setattr(tray.os, "_exit", exits.append)
+    t.run()
+    return exits
+
+
+def test_run_exits_with_update_code_after_icon_run(monkeypatch):
+    assert _run_tray_with_fake_icon(monkeypatch, 1) == [1]
+
+
+def test_run_exits_with_zero_when_update_arms_zero(monkeypatch):
+    # Windows/macOS arm exit code 0 — the check is `is not None`, not truthy.
+    assert _run_tray_with_fake_icon(monkeypatch, 0) == [0]
+
+
+def test_run_without_update_exits_normally(monkeypatch):
+    assert _run_tray_with_fake_icon(monkeypatch, None) == []

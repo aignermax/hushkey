@@ -675,6 +675,9 @@ class Tray:
         self.images = load_images()
         self.state = "starting"
         self.pending_update = None
+        # Set by _update_worker; run() exits the process with this code from
+        # the main thread once the icon loop has unwound.
+        self._update_exit_code = None
         self.stopping = threading.Event()
         self.daemon = DaemonSupervisor(on_give_up=self._on_give_up)
         self.icon = pystray.Icon("hushkey", self.images["starting"],
@@ -756,14 +759,16 @@ class Tray:
                          S["update_failed"].format(log=UPDATE_LOG))
             self.daemon.restart()  # restores supervision, not just the process
             return
+        # The exit must come from the main thread: icon.stop() makes its
+        # icon.run() return, and run() then exits with this code. A worker-
+        # thread os._exit raced the interpreter shutdown and usually lost —
+        # the tray exited 0, systemd's Restart=on-failure never fired, and
+        # the pending update left the service dead (app looked uninstalled).
+        self._update_exit_code = 1 if sys.platform.startswith("linux") else 0
         try:
             self.icon.stop()  # NIM_DELETE now, else a ghost icon lingers
         except Exception:
             pass
-        time.sleep(0.3)
-        # systemd (Restart=on-failure) and launchd (KeepAlive) bring up a
-        # service-managed instance; the helper's spawn wins the lock elsewhere.
-        os._exit(1 if sys.platform.startswith("linux") else 0)
 
     def _on_check_now(self, _icon, _item):
         threading.Thread(target=self.check_updates, kwargs={"manual": True},
@@ -906,8 +911,17 @@ class Tray:
             # duplicate daemon, and two daemons type every dictation twice.
             print(f"tray icon unavailable ({exc}) - supervising headless",
                   file=sys.stderr)
-            while not self.stopping.is_set():
+            # Bail on an armed update too: the worker's icon.stop() is a
+            # no-op when the icon loop died on its own, and parking here
+            # would leave the marker armed with no exit ever happening.
+            while (not self.stopping.is_set()
+                   and self._update_exit_code is None):
                 self.stopping.wait(3600)
+        if self._update_exit_code is not None:
+            # systemd (Restart=on-failure) and launchd (KeepAlive) bring up a
+            # service-managed instance; the helper's spawn wins the lock
+            # elsewhere. os._exit: GUI/teardown threads must not delay this.
+            os._exit(self._update_exit_code)
 
 
 def supervise_headless():
