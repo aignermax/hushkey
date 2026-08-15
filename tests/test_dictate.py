@@ -119,7 +119,7 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
     done = threading.Event()
     seen = {}
 
-    def fake_transcribe(w, duration):
+    def fake_transcribe(w, duration, stream=None):
         seen["wav"] = w
         done.set()
 
@@ -871,3 +871,241 @@ def test_missing_backend_does_not_crash(monkeypatch):
     d.start_recording()
     assert d.recording is None
     assert notes  # user got a "no recorder" notification
+
+
+# --------------------------------------------------------------------------
+# streaming mode (PTT_STREAMING)
+
+
+class _Seg:
+    def __init__(self, start, end, text):
+        self.start, self.end, self.text = start, end, text
+
+
+def _stream_daemon(inserts, results):
+    """A bare daemon shell for streaming ticks: fake recorder/model/injector.
+
+    results: queue of (segments, info) return values, one per transcribe call.
+    """
+    d = dictate.DictationDaemon.__new__(dictate.DictationDaemon)
+    d.busy_lock = threading.Lock()
+    d.recorder = type("R", (), {"snapshot_wav": lambda _s: "snap.wav"})()
+    d.model = type("M", (), {"transcribe": lambda _s, win, **kw:
+                             results.pop(0)})()
+    d.injector = type("I", (), {"insert": lambda _s, t: inserts.append(t)})()
+    return d
+
+
+def test_stream_tick_skips_when_too_little_new_audio(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000, dtype=np.float32))  # 1.0 s
+    calls = []
+    d = _stream_daemon([], [])
+    d.model = type("M", (), {"transcribe": lambda _s, w, **kw:
+                             calls.append(w) or ([], None)})()
+    d._stream_tick(dictate._StreamSession())
+    assert calls == []  # 1.0 s - tail guard < STREAM_MIN_SLICE: not worth it
+
+
+def test_stream_tick_commits_only_finished_segments(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 5, dtype=np.float32))  # 5 s
+    inserts = []
+    segs = [_Seg(0.2, 2.0, " erster Block "), _Seg(3.0, 4.6, " läuft noch")]
+    d = _stream_daemon(inserts, [(segs, None)])
+    session = dictate._StreamSession()
+    d._stream_tick(session)
+    # window is [0, 4.7]; the second segment reaches the edge → left for later
+    assert inserts == ["erster Block "]
+    assert session.committed_end == pytest.approx(2.0)
+    assert session.inserted is True
+
+
+def test_stream_tick_commits_nothing_when_speech_runs_to_the_edge(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 5, dtype=np.float32))
+    inserts = []
+    d = _stream_daemon(inserts, [([_Seg(0.2, 4.6, "noch im Fluss")], None)])
+    session = dictate._StreamSession()
+    d._stream_tick(session)
+    assert inserts == []
+    assert session.committed_end == 0.0  # nothing committed, all re-read later
+
+
+def test_stream_tick_ignores_empty_transcription(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 5, dtype=np.float32))
+    inserts = []
+    d = _stream_daemon(inserts, [([_Seg(0.0, 2.0, "   ")], None)])
+    session = dictate._StreamSession()
+    d._stream_tick(session)
+    assert inserts == []
+    assert session.committed_end == 0.0
+
+
+def test_start_recording_streams_only_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    monkeypatch.setattr(dictate, "write_state", lambda *a: None)
+    for name in ("a.wav", "b.wav", "c.wav"):
+        (tmp_path / name).write_bytes(b"\0" * 10)
+
+    class SnapRecorder(FakeRecorder):
+        def snapshot_wav(self):
+            return None
+
+    # default: off — no worker even with a capable recorder
+    monkeypatch.setattr(dictate, "STREAMING", False)
+    rec = SnapRecorder(str(tmp_path / "a.wav"))
+    monkeypatch.setattr(dictate, "pick_recorder", lambda: rec)
+    d = dictate.DictationDaemon()
+    d.start_recording()
+    assert d._stream is None
+    d.stop_recording()
+
+    # on + capable recorder: worker starts and is cleaned up on release
+    monkeypatch.setattr(dictate, "STREAMING", True)
+    monkeypatch.setattr(dictate, "pick_recorder",
+                        lambda: SnapRecorder(str(tmp_path / "b.wav")))
+    d2 = dictate.DictationDaemon()
+    d2.start_recording()
+    assert d2._stream is not None
+    d2.stop_recording()
+    assert d2._stream is None
+
+    # on but recorder cannot snapshot: stay non-streaming
+    rec3 = FakeRecorder(str(tmp_path / "c.wav"))
+    monkeypatch.setattr(dictate, "pick_recorder", lambda: rec3)
+    d3 = dictate.DictationDaemon()
+    d3.start_recording()
+    assert d3._stream is None
+    d3.stop_recording()
+
+
+def test_tail_pass_transcribes_only_after_committed(monkeypatch, tmp_path):
+    import numpy as np
+    d, _rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    seen = {}
+
+    class FakeModel:
+        def transcribe(self, audio, **kw):
+            seen["audio"] = audio
+            return [type("Seg", (), {"text": " Rest "})()], None
+
+    d.model = FakeModel()
+    inserts = []
+    d.injector = type("I", (), {"insert": lambda _s, t: inserts.append(t)})()
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 10, dtype=np.float32))
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    session = dictate._StreamSession()
+    session.committed_end = 6.0
+    session.inserted = True
+    d._transcribe_and_insert(wav, 10.0, stream=session)
+    assert len(seen["audio"]) == 16000 * 4  # only the 4 s tail was transcribed
+    assert inserts == ["Rest "]
+
+
+def test_empty_tail_after_streaming_stays_quiet(monkeypatch, tmp_path):
+    """Blocks already inserted; an empty tail must not cry 'nothing recognized'."""
+    import numpy as np
+    d, _rec, wav = make_daemon(monkeypatch, tmp_path)
+    notes = []
+    monkeypatch.setattr(dictate, "notify", lambda *a: notes.append(a))
+    d.model = type("M", (), {"transcribe": lambda _s, a, **kw: ([], None)})()
+    d.injector = type("I", (), {"insert": lambda _s, t: None})()
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 10, dtype=np.float32))
+    session = dictate._StreamSession()
+    session.committed_end = 9.0
+    session.inserted = True
+    d._transcribe_and_insert(wav, 10.0, stream=session)
+    assert notes == [("… transcribing", "")]  # no "nothing recognized" noise
+
+
+def test_streaming_inserts_blocks_before_release(monkeypatch):
+    """Integration: growing fake recording + fake whisper + fake injector.
+    Blocks must land while the key is (virtually) still held, in order,
+    without duplicates; the release pass adds exactly the tail."""
+    import wave
+
+    import numpy as np
+
+    import recorder as recorder_mod
+
+    monkeypatch.setattr(dictate, "STREAMING", True)
+    monkeypatch.setattr(dictate, "STREAM_INTERVAL", 0.05)
+    monkeypatch.setattr(dictate, "STREAM_MIN_SLICE", 0.5)
+    monkeypatch.setattr(dictate, "STREAM_TAIL_GUARD", 0.1)
+    monkeypatch.setattr(dictate, "STREAM_TRAILING_SILENCE", 0.4)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    monkeypatch.setattr(dictate, "write_state", lambda *a: None)
+
+    class GrowingRecorder:
+        """16 kHz mono PCM, fed in chunks as if speech were coming in."""
+
+        def __init__(self):
+            self.pcm = bytearray()
+
+        def start(self):
+            pass
+
+        def feed(self, seconds):
+            self.pcm += b"\0" * int(seconds * 16000) * 2
+
+        def snapshot_wav(self):
+            return recorder_mod._write_wav(bytes(self.pcm), 16000)
+
+        def stop(self):
+            return recorder_mod._write_wav(bytes(self.pcm), 16000)
+
+    def fake_decode(path):  # cheap stand-in for faster_whisper's PyAV decode
+        with wave.open(path, "rb") as fh:
+            frames = fh.readframes(fh.getnframes())
+        return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    monkeypatch.setattr(dictate, "_decode_wav_16k", fake_decode)
+
+    call_n = [0]
+
+    class FakeModel:
+        def transcribe(self, window, **kw):
+            # one block per call, ending inside the trailing-silence margin,
+            # so every tick with enough new audio commits exactly one block;
+            # a window too short for that yields nothing (and no counter bump)
+            dur = len(window) / 16000
+            end = dur - 0.45
+            if end <= 0.1:
+                return [], None
+            call_n[0] += 1
+            return [_Seg(0.1, end, f" Block{call_n[0]}")], None
+
+    inserts = []
+    rec = GrowingRecorder()
+    monkeypatch.setattr(dictate, "pick_recorder", lambda: rec)
+    d = dictate.DictationDaemon()
+    d.model = FakeModel()
+    d.injector = type("I", (), {"insert": lambda _s, t: inserts.append(t)})()
+
+    d.start_recording()
+    for _ in range(20):  # generous margin so a loaded CI runner still streams
+        rec.feed(0.5)
+        time.sleep(0.06)
+    d._stream.stop.set()          # freeze streaming; the rest is tail work
+    d._stream.thread.join(2)
+    rec.feed(1.5)                 # speech the ticks never see
+    before_release = len(inserts)
+    d.recording = time.time() - 6.0  # pretend a 6 s hold (> MIN_SECONDS)
+    d.stop_recording()
+
+    deadline = time.time() + 5
+    while time.time() < deadline and len(inserts) == before_release:
+        time.sleep(0.02)  # wait for the tail pass
+
+    assert before_release >= 2  # streaming really streamed, mid-hold
+    assert len(inserts) == before_release + 1  # the release pass adds the tail
+    texts = [t.strip() for t in inserts]
+    assert texts == [f"Block{i}" for i in range(1, len(texts) + 1)]  # ordered, no dups

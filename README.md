@@ -133,6 +133,8 @@ key* (no config file or env var needed).
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
 | `PTT_OVERLAY` | `1` on Windows, else `0` | Show a small always-on-top pill at the top of the screen while recording/transcribing — useful when the taskbar hides the tray icon. `1` also enables it on X11. Needs tkinter, which `install.sh` installs on Linux (`python3-tk`); without it the overlay says so in the log and stays away. It is a Tk window, so on Wayland it goes through Xwayland — usually fine, but the tray icon is the supported indicator there |
+| `PTT_STREAMING` | `0` | Experimental: while the key is held, completed speech blocks are already transcribed and inserted every few seconds instead of one big paste on release — see "Streaming mode" below |
+| `PTT_STREAM_INTERVAL` | `3.0` | Seconds between streaming ticks (streaming mode only) |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
 How to set them:
@@ -164,6 +166,31 @@ Environment=PTT_PASTE_KEY=ctrl+shift+v
 If you dictate into both terminals and GUI apps, `PTT_KEEP_CLIPBOARD=1` plus a
 manual paste is the escape hatch — the transcript is simply waiting in the
 clipboard.
+
+### Streaming mode (experimental)
+
+With `PTT_STREAMING=1` the daemon already transcribes and inserts finished
+blocks every few seconds while you are still holding the key, instead of
+pasting everything on release. A block is only inserted once a pause follows
+it in the audio — speech that runs to the edge of the current buffer is left
+for the next round, so words are never cut in half. Whatever is left over is
+transcribed on release, as before.
+
+Notes:
+
+- On CPU the inserted blocks trail your speech by a few seconds; with a GPU
+  they are close to live.
+- Each block is its own paste/typing burst, so stay in the window you are
+  dictating into (sound advice either way, but it matters more here).
+- With a modifier as the push-to-talk key (Right Ctrl, AltGr) the mid-hold
+  paste still sees that modifier held; toolkits normally ignore that when
+  matching the paste shortcut, but if an app only pastes after you release,
+  use a plain key (F9, Menu) with streaming.
+- On Wayland every block is a full clipboard save → paste → restore cycle, so
+  a clipboard manager records each block and the clipboard flickers briefly
+  mid-hold.
+- Off by default; enable with `Environment=PTT_STREAMING=1` (see "How to set
+  them" above).
 
 ## Manage
 

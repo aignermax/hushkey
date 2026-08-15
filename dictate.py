@@ -41,6 +41,10 @@ Config via environment:
                    Wayland pastes instead of typing, so nothing to pace)
   PTT_PASTE_KEY    Wayland paste chord (default: ctrl+v; terminals usually
                    need ctrl+shift+v)
+  PTT_STREAMING    1 = experimental: while the key is held, completed speech
+                   blocks are transcribed and inserted every few seconds
+                   instead of one big paste on release (default: 0)
+  PTT_STREAM_INTERVAL  seconds between streaming ticks (default: 3.0)
   PTT_KEEP_CLIPBOARD  1 = leave the transcript in the clipboard instead of
                    restoring the previous contents
   PTT_CLIPBOARD_SETTLE  Wayland: seconds to wait before restoring the previous
@@ -205,6 +209,21 @@ CLIPBOARD_HANDOFF = _env_float("PTT_CLIPBOARD_HANDOFF", 0.2)
 # dictations, so this is deliberately generous. 0 removes the limit entirely.
 CMD_TIMEOUT = _env_float("PTT_CMD_TIMEOUT", 30) or None
 
+# Streaming mode (experimental, opt-in): while the key is held, completed
+# speech blocks are transcribed and inserted every STREAM_INTERVAL seconds
+# instead of one big paste on release. The tail is still handled on release.
+STREAMING = os.environ.get("PTT_STREAMING", "0") != "0"
+# 0.5 s floor: a 0 interval would spin the worker in a back-to-back
+# snapshot+transcribe loop for the whole hold.
+STREAM_INTERVAL = max(0.5, _env_float("PTT_STREAM_INTERVAL", 3.0))
+# Never transcribe right up to the snapshot edge: the recorder may still be
+# flushing. And never commit a segment that reaches the slice end — speech
+# touching the edge is likely cut mid-word and comes back, complete, on the
+# next tick with more context.
+STREAM_TAIL_GUARD = 0.3
+STREAM_TRAILING_SILENCE = 0.8
+STREAM_MIN_SLICE = 1.0  # seconds of new audio before a tick bothers
+
 try:
     from pynput.keyboard import Key
     # control chars type as their keys, same as pynput's Controller.type()
@@ -234,6 +253,16 @@ def _audio_rms(wav):
         return float(np.sqrt(np.mean(pcm ** 2)))
     except Exception:
         return None
+
+
+def _decode_wav_16k(path):
+    """Decode any WAV to a float32 16 kHz mono array — whisper's input shape.
+
+    Lazy import: faster-whisper pulls in PyAV, and this is only needed once a
+    model exists anyway (streaming mode and its tail pass slice numpy arrays).
+    """
+    from faster_whisper.audio import decode_audio
+    return decode_audio(path, sampling_rate=16000)
 
 
 def notify(title, body=""):
@@ -821,12 +850,26 @@ def make_backends(key_name):
 
 # --------------------------------------------------------------------------
 
+class _StreamSession:
+    """Per-recording streaming state (one key hold), PTT_STREAMING=1 only.
+
+    committed_end: seconds of audio already transcribed and inserted by the
+    streaming ticks; the release pass only transcribes the tail after it.
+    """
+    def __init__(self):
+        self.stop = threading.Event()
+        self.thread = None
+        self.committed_end = 0.0
+        self.inserted = False
+
+
 class DictationDaemon:
     def __init__(self):
         self.model = None
         self.recorder = pick_recorder()
         self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
+        self._stream = None  # _StreamSession while a streaming dictation runs
         self.listener, self.injector = make_backends(PTT_KEY)
 
     def load_model(self):
@@ -863,12 +906,24 @@ class DictationDaemon:
         self.recording = time.time()
         write_state("recording")
         notify("● recording", f"(release {PTT_KEY} to transcribe)")
+        if STREAMING and hasattr(self.recorder, "snapshot_wav"):
+            session = _StreamSession()
+            session.thread = threading.Thread(target=self._stream_loop,
+                                              args=(session,), daemon=True)
+            session.thread.start()  # before the assignment: a failed start
+            self._stream = session  # must not leave a thread-less session
 
     def stop_recording(self):
         started, self.recording = self.recording, None
         if started is None:
             return
         duration = time.time() - started
+        session, self._stream = self._stream, None
+        if session is not None:
+            # A tick may be mid-transcribe; the busy_lock inside keeps its
+            # insert ordered before the tail pass below.
+            session.stop.set()
+            session.thread.join(timeout=30)
         try:
             wav = self.recorder.stop()
         except Exception as exc:
@@ -883,22 +938,84 @@ class DictationDaemon:
             write_state("idle")
             return
         threading.Thread(target=self._transcribe_and_insert,
-                         args=(wav, duration), daemon=True).start()
+                         args=(wav, duration, session), daemon=True).start()
 
-    def _transcribe_and_insert(self, wav, duration):
+    def _stream_loop(self, session):
+        """Streaming mode: transcribe completed blocks while the key is held."""
+        while not session.stop.wait(STREAM_INTERVAL):
+            try:
+                self._stream_tick(session)
+            except Exception as exc:  # a tick must never kill the dictation
+                log(f"streaming tick failed: {exc}")
+
+    def _stream_tick(self, session):
+        wav = self.recorder.snapshot_wav()
+        if not wav:
+            return
+        try:
+            audio = _decode_wav_16k(wav)
+        finally:
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+        total = len(audio) / 16000.0
+        end = total - STREAM_TAIL_GUARD
+        if end - session.committed_end < STREAM_MIN_SLICE:
+            return
+        window = audio[int(session.committed_end * 16000):int(end * 16000)]
+        # Runs outside busy_lock: the previous dictation's tail pass may be
+        # transcribing concurrently — ctranslate2 is thread-safe per call.
+        segments, _info = self.model.transcribe(
+            window, language=configured_lang(), vad_filter=True, beam_size=5)
+        segs = [s for s in segments if s.text.strip()]
+        if not segs:
+            return
+        window_dur = len(window) / 16000.0
+        # Speech touching the slice edge is probably cut mid-word — leave that
+        # segment for the next tick, which sees it complete with more context.
+        if segs[-1].end >= window_dur - STREAM_TRAILING_SILENCE:
+            segs = segs[:-1]
+        if not segs:
+            return
+        if session.stop.is_set():
+            # Released mid-tick: the tail pass re-covers this block, because
+            # committed_end only advances after a successful insert.
+            return
+        text = " ".join(s.text.strip() for s in segs).strip()
+        with self.busy_lock:
+            self.injector.insert(text + " ")
+        session.committed_end += segs[-1].end
+        session.inserted = True
+        log(f"streamed {len(text)} chars "
+            f"(audio committed up to {session.committed_end:.1f}s)")
+
+    def _transcribe_and_insert(self, wav, duration, stream=None):
         with self.busy_lock:
             write_state("transcribing")
             try:
                 notify("… transcribing", "")
                 lang = configured_lang()
                 t0 = time.time()
-                segments, _info = self.model.transcribe(wav, language=lang,
-                                                        vad_filter=True, beam_size=5)
+                skip = stream.committed_end if stream else 0.0
+                if skip > 0:
+                    # Streaming ticks already transcribed and inserted up to
+                    # here — only the tail since then is left.
+                    audio = _decode_wav_16k(wav)
+                    audio = audio[int(skip * 16000):]
+                    segments, _info = self.model.transcribe(
+                        audio, language=lang, vad_filter=True, beam_size=5)
+                else:
+                    segments, _info = self.model.transcribe(
+                        wav, language=lang, vad_filter=True, beam_size=5)
                 text = " ".join(s.text.strip() for s in segments).strip()
                 model = CURRENT_MODEL or "?"
                 log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
-                    f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})")
+                    f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})"
+                    + (f" [tail after {skip:.1f}s streamed]" if skip > 0 else ""))
                 if not text:
+                    if stream is not None and stream.inserted:
+                        return  # blocks already went out; an empty tail is fine
                     rms = _audio_rms(wav)
                     if rms is not None and rms < 0.001:
                         # a dead or disconnected input device records digital

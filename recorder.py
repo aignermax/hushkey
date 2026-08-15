@@ -11,6 +11,7 @@ native sample rate when 16 kHz is refused — no manual resampling needed.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import signal
@@ -21,10 +22,52 @@ import wave
 
 TARGET_RATE = 16000
 
+_wav_counter = itertools.count()
+
 
 def _wav_path():
+    # counter: snapshot mode can mint two of these in the same millisecond
     return os.path.join(tempfile.gettempdir(),
-                        f"whisper-ptt-{int(time.time() * 1000)}.wav")
+                        f"whisper-ptt-{int(time.time() * 1000)}-"
+                        f"{next(_wav_counter)}.wav")
+
+
+def _write_wav(pcm_bytes, rate):
+    """Wrap raw int16 mono PCM in a proper WAV file; return its path."""
+    wav = _wav_path()
+    with wave.open(wav, "wb") as fh:
+        fh.setnchannels(1)
+        fh.setsampwidth(2)  # int16
+        fh.setframerate(rate)
+        fh.writeframes(pcm_bytes)
+    return wav
+
+
+def _growing_wav_pcm(path):
+    """PCM payload of a WAV that pw-record is still writing.
+
+    pw-record finalizes the RIFF sizes only on close, so a snapshot read
+    cannot trust the declared lengths — take the data chunk's payload up to
+    what is actually on disk.
+    """
+    try:
+        with open(path, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return None
+    if len(blob) < 12 or blob[:4] != b"RIFF":
+        return None
+    off = 12
+    while off + 8 <= len(blob):
+        fourcc = blob[off:off + 4]
+        size = int.from_bytes(blob[off + 4:off + 8], "little")
+        if fourcc == b"data":
+            payload = blob[off + 8:]
+            # an unfinalized size (0 or 0xFFFFFFFF, depending on the writer)
+            # overstates what's on disk; clip to the real payload either way
+            return payload[:size] if 0 < size <= len(payload) else payload
+        off += 8 + size + (size & 1)
+    return None
 
 
 class PwRecordRecorder:
@@ -52,6 +95,19 @@ class PwRecordRecorder:
         except subprocess.TimeoutExpired:
             proc.kill()
         return wav if wav and os.path.isfile(wav) else None
+
+    def snapshot_wav(self):
+        """A copy of the audio recorded so far, or None when not recording.
+
+        Used by streaming mode (PTT_STREAMING) to transcribe completed blocks
+        while the key is still held. The source file keeps growing meanwhile.
+        """
+        if self._proc is None or self._wav is None:
+            return None
+        pcm = _growing_wav_pcm(self._wav)
+        if not pcm:
+            return None
+        return _write_wav(pcm, TARGET_RATE)
 
 
 class SoundDeviceRecorder:
@@ -93,13 +149,19 @@ class SoundDeviceRecorder:
             return None
         import numpy as np
         pcm = np.concatenate(self._frames)
-        wav = _wav_path()
-        with wave.open(wav, "wb") as fh:
-            fh.setnchannels(1)
-            fh.setsampwidth(2)  # int16
-            fh.setframerate(self._rate)
-            fh.writeframes(pcm.tobytes())
-        return wav
+        return _write_wav(pcm.tobytes(), self._rate)
+
+    def snapshot_wav(self):
+        """A copy of the audio recorded so far, or None when not recording.
+
+        Used by streaming mode (PTT_STREAMING). Frames keep accumulating in
+        the PortAudio callback; the snapshot simply copies what is there.
+        """
+        if self._stream is None or not self._frames:
+            return None
+        import numpy as np
+        pcm = np.concatenate(self._frames)
+        return _write_wav(pcm.tobytes(), self._rate)
 
 
 def pick_recorder():
