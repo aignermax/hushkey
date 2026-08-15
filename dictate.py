@@ -484,7 +484,11 @@ class PynputInjector:
     def check(self):
         return None
 
-    def insert(self, text):
+    def insert(self, text, neutralize_modifier=None):
+        # neutralize_modifier is accepted for WaylandInjector compatibility
+        # and ignored: on X11 a held AltGr would garble typed characters too,
+        # but fixing that means XTEST surgery — streaming with a modifier as
+        # the PTT key is a Wayland-only feature for now.
         if self.controller is None:
             from pynput.keyboard import Controller
             self.controller = Controller()
@@ -512,6 +516,7 @@ class WaylandInjector:
         self.chord = os.environ.get("PTT_PASTE_KEY", "ctrl+v")
         self.keep_clipboard = os.environ.get("PTT_KEEP_CLIPBOARD") == "1"
         self._chord_args = None
+        self._chord_style = None  # ydotool key syntax, probed with the chord
         self._copy_proc = None  # the wl-copy currently owning the clipboard
 
     @staticmethod
@@ -550,6 +555,10 @@ class WaylandInjector:
             if not shutil.which(tool):
                 return f"{tool} not found (install wl-clipboard and ydotool)"
         try:
+            # build (and remember) the key syntax here too: insert() skips
+            # its lazy probe whenever _chord_args is already populated, so a
+            # style cached only there would never be populated in production
+            self._chord_style = self._ydotool_key_style()
             self._chord_args = self._build_chord(self.chord)
         except ValueError as exc:
             return str(exc)
@@ -564,10 +573,10 @@ class WaylandInjector:
         """Detect whether the installed ydotool expects KEYCODE:STATE (1.x)
         or key-name sequences like 'ctrl+v' (0.1.x).
 
-        Runs a probe subprocess on every call — in practice twice per daemon
-        (once in check(), once on the first insert). Deliberately not cached
-        with lru_cache: the tests probe with different monkeypatched runs,
-        and a cache would leak the first result into the later ones.
+        Runs a probe subprocess on every call — in practice twice per daemon,
+        both in check() at startup. Deliberately not cached with lru_cache:
+        the tests probe with different monkeypatched runs, and a cache would
+        leak the first result into the later ones.
         """
         try:
             proc = subprocess.run(["ydotool", "key", "--help"],
@@ -690,16 +699,37 @@ class WaylandInjector:
         if proc is not None:
             proc.poll()  # reap if it already exited; never signal it
 
-    def insert(self, text):
+    def insert(self, text, neutralize_modifier=None):
+        """Paste `text` via the clipboard plus one synthetic chord.
+
+        neutralize_modifier: (ydotool-1.x code, ydotool-0.1.x name) of a
+        modifier that is physically held right now. A held AltGr remaps the
+        chord's keysyms at the compositor (de layout: AltGr+V = „), so the
+        paste shortcut never matches — streaming inserts happen mid-hold, so
+        they neutralize it with a quick tap first. That tap leaves the
+        compositor's AltGr state "up" while the finger is still down, which
+        is harmless: the real release arrives later and is a no-op. Never
+        re-pressing means a stuck modifier is impossible.
+        """
         if self._chord_args is None:
+            # probe once and keep it — the neutralizer branch below must not
+            # re-run a `ydotool key --help` subprocess on every insert
+            self._chord_style = self._ydotool_key_style()
             self._chord_args = self._build_chord(self.chord)
         env = dict(os.environ)
         socket = self._socket_path()
         if socket:
             env["YDOTOOL_SOCKET"] = socket  # keep client and daemon in sync
+        chord = list(self._chord_args)
+        if neutralize_modifier is not None:
+            code, name = neutralize_modifier
+            if self._chord_style == "name":
+                chord = [name] + chord  # separate tap, then the chord
+            else:
+                chord = [f"{code}:0"] + chord  # release only, then the chord
         previous = None if self.keep_clipboard else self._clipboard_read()
         self._clipboard_write(text.encode("utf-8"))
-        subprocess.run(["ydotool", "key"] + self._chord_args,
+        subprocess.run(["ydotool", "key"] + chord,
                        timeout=CMD_TIMEOUT, env=env,
                        stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=True)
@@ -713,6 +743,20 @@ class WaylandInjector:
                 # Only the restore failed — the transcript is already inserted,
                 # so log it and leave the clipboard holding the transcript.
                 log(f"clipboard restore failed: {exc}")
+
+
+def _held_ptt_modifier():
+    """(ydotool-1.x code, ydotool-0.1.x name) of the PTT key when it is a
+    modifier whose held state breaks the paste chord — else None.
+
+    Only AltGr qualifies: Ctrl is part of the chord anyway (and does not
+    remap keysyms), while a held AltGr switches the keymap to level 3 and
+    turns the chord's 'v' into a different keysym at the compositor.
+    """
+    if PTT_KEY == "alt_gr":
+        from evdev import ecodes
+        return ecodes.KEY_RIGHTALT, "alt_r"
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -786,6 +830,12 @@ class EvdevListener:
                 dev = evdev.InputDevice(path)
             except OSError:
                 continue  # not readable for us — expected for some nodes
+            if dev.name == "ydotoold virtual device":
+                # Our own paste chords (and the streaming AltGr neutralizer
+                # tap) come out of this device — listening to it would make
+                # the synthetic events look like real PTT key presses.
+                dev.close()
+                continue
             keys = dev.capabilities().get(ecodes.EV_KEY, ())
             # Letter keys separate keyboards from mice, lid switches and
             # power buttons, which also advertise EV_KEY.
@@ -984,7 +1034,13 @@ class DictationDaemon:
             return
         text = " ".join(s.text.strip() for s in segs).strip()
         with self.busy_lock:
-            self.injector.insert(text + " ")
+            # _held_ptt_modifier needs evdev — only the Wayland injector has
+            # it, so don't even ask when typing via pynput (Windows/macOS).
+            self.injector.insert(
+                text + " ",
+                neutralize_modifier=(_held_ptt_modifier()
+                                     if isinstance(self.injector, WaylandInjector)
+                                     else None))
         session.committed_end += segs[-1].end
         session.inserted = True
         log(f"streamed {len(text)} chars "
