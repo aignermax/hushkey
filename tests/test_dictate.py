@@ -343,6 +343,17 @@ def test_typing_never_speeds_up_beyond_type_delay(monkeypatch):
     assert sleeps == [0.01] * 2
 
 
+def test_typing_ignores_the_chord_override(monkeypatch):
+    """_stream_tick passes chord= unconditionally; typed text has no chord, so
+    dropping the kwarg here would break streaming on X11/Windows/macOS."""
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("ab", chord="shift+insert")
+    assert injector.controller.events == [("down", "a"), ("up", "a"),
+                                          ("down", "b"), ("up", "b")]
+
+
 def _fake_xlib(monkeypatch, wm_class):
     """Install a fake Xlib.display module reporting the given WM_CLASS."""
     import types
@@ -863,41 +874,42 @@ def test_insert_with_ydotool_01x_sends_key_names(wayland, monkeypatch):
     assert paste == [["ydotool", "key", "ctrl+v"]]
 
 
-def test_insert_neutralizes_held_modifier_ydotool_01x(wayland, monkeypatch):
+def test_insert_with_chord_override_ydotool_01x(wayland, monkeypatch):
     monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
                         staticmethod(lambda: "name"))
-    wayland["injector"].insert("hallo", neutralize_modifier=(100, "alt_r"))
+    wayland["injector"].insert("hallo", chord="shift+insert")
     paste = [c for c in wayland["cmds"] if c[0] == "ydotool"]
-    # the tap (down+up) clears the held AltGr before the chord fires
-    assert paste == [["ydotool", "key", "alt_r", "ctrl+v"]]
+    assert paste == [["ydotool", "key", "shift+insert"]]
 
 
-def test_insert_neutralizes_held_modifier_ydotool_1x(wayland):
+def test_insert_with_chord_override_ydotool_1x(wayland):
     pytest.importorskip("evdev")
     from evdev import ecodes
     # the wayland fixture pins the 1.x KEYCODE:STATE style
-    wayland["injector"].insert("hallo",
-                               neutralize_modifier=(ecodes.KEY_RIGHTALT, "alt_r"))
+    wayland["injector"].insert("hallo", chord="shift+insert")
+    shift, ins = ecodes.KEY_LEFTSHIFT, ecodes.KEY_INSERT
     paste = [c for c in wayland["cmds"] if c[0] == "ydotool"]
-    assert paste == [["ydotool", "key", f"{ecodes.KEY_RIGHTALT}:0",
-                      "29:1", "47:1", "47:0", "29:0"]]
+    assert paste == [["ydotool", "key", f"{shift}:1", f"{ins}:1",
+                      f"{ins}:0", f"{shift}:0"]]
 
 
 def test_insert_uses_style_cached_by_check(wayland, monkeypatch):
-    """Production order: check() builds the chord at daemon startup, so the
-    style cache must be populated there — otherwise insert() finds _chord_args
-    set, never probes, and the neutralizer would pick the wrong syntax."""
+    """Production order: check() probes and caches the key style at daemon
+    startup — insert() must never probe again (a stateless fake style would
+    hide that regression, so this one counts)."""
+    probes = []
     monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
-                        staticmethod(lambda: "name"))
+                        staticmethod(lambda: probes.append(1) or "name"))
     monkeypatch.setattr(dictate.shutil, "which", lambda t: f"/usr/bin/{t}")
     monkeypatch.setattr("os.access", lambda p, m: True)
     inj = wayland["injector"]
-    inj._chord_args = None
+    inj._chord_args = {}
     inj._chord_style = None
     assert inj.check() is None
-    inj.insert("hallo", neutralize_modifier=(100, "alt_r"))
+    inj.insert("hallo", chord="shift+insert")
     paste = [c for c in wayland["cmds"] if c[0] == "ydotool"]
-    assert paste == [["ydotool", "key", "alt_r", "ctrl+v"]]
+    assert paste == [["ydotool", "key", "shift+insert"]]
+    assert len(probes) == 1  # probed once, in check(), not again on insert
 
 
 def test_missing_backend_does_not_crash(monkeypatch):
@@ -949,7 +961,7 @@ def test_stream_tick_skips_when_too_little_new_audio(monkeypatch):
 
 def test_stream_tick_commits_only_finished_segments(monkeypatch):
     import numpy as np
-    monkeypatch.setattr(dictate, "PTT_KEY", "f9")  # no modifier neutralization
+    monkeypatch.setattr(dictate, "PTT_KEY", "f9")  # no chord override
     monkeypatch.setattr(dictate, "_decode_wav_16k",
                         lambda p: np.zeros(16000 * 5, dtype=np.float32))  # 5 s
     inserts = []
@@ -958,7 +970,7 @@ def test_stream_tick_commits_only_finished_segments(monkeypatch):
     session = dictate._StreamSession()
     d._stream_tick(session)
     # window is [0, 4.7]; the second segment reaches the edge → left for later
-    assert inserts == [("erster Block ", {"neutralize_modifier": None})]
+    assert inserts == [("erster Block ", {"chord": None})]
     assert session.committed_end == pytest.approx(2.0)
     assert session.inserted is True
 
@@ -1048,7 +1060,7 @@ def test_tail_pass_transcribes_only_after_committed(monkeypatch, tmp_path):
     session.inserted = True
     d._transcribe_and_insert(wav, 10.0, stream=session)
     assert len(seen["audio"]) == 16000 * 4  # only the 4 s tail was transcribed
-    assert inserts == [("Rest ", {})]  # no neutralizer at release time
+    assert inserts == [("Rest ", {})]  # no chord override at release time
 
 
 def test_empty_tail_after_streaming_stays_quiet(monkeypatch, tmp_path):
@@ -1068,52 +1080,42 @@ def test_empty_tail_after_streaming_stays_quiet(monkeypatch, tmp_path):
     assert notes == [("… transcribing", "")]  # no "nothing recognized" noise
 
 
-def test_held_ptt_modifier_only_flags_alt_gr(monkeypatch):
-    pytest.importorskip("evdev")
+def test_streaming_paste_chord_only_for_alt_gr(monkeypatch):
     monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
-    # compare against the listener's own mapping so the two cannot drift
-    assert dictate._held_ptt_modifier() == (dictate.evdev_keycode("alt_gr"),
-                                            "alt_r")
+    assert dictate._streaming_paste_chord() == "shift+insert"
     for key in ("ctrl_r", "f9", "menu"):
         monkeypatch.setattr(dictate, "PTT_KEY", key)
-        assert dictate._held_ptt_modifier() is None
+        assert dictate._streaming_paste_chord() is None
 
 
-def test_stream_tick_neutralizes_held_alt_gr(monkeypatch):
-    """Mid-hold inserts would otherwise never paste: held AltGr remaps the
-    chord's keysyms at the compositor (AltGr+V = „ on a de layout)."""
-    import numpy as np
-    pytest.importorskip("evdev")
-    from evdev import ecodes
-    monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
-    monkeypatch.setattr(dictate, "_decode_wav_16k",
-                        lambda p: np.zeros(16000 * 5, dtype=np.float32))
-    inserts = []
-    d = _stream_daemon(inserts, [([_Seg(0.2, 2.0, " Block")], None)])
-    inj = dictate.WaylandInjector()  # the gate only fires for the Wayland one
-    inj.insert = lambda t, **kw: inserts.append((t, kw))
-    d.injector = inj
-    d._stream_tick(dictate._StreamSession())
-    assert inserts == [("Block ", {"neutralize_modifier":
-                                   (ecodes.KEY_RIGHTALT, "alt_r")})]
-
-
-def test_stream_tick_skips_neutralizer_for_pynput_injector(monkeypatch):
-    """Windows/macOS have no evdev — asking there would raise ImportError."""
+def test_stream_tick_uses_insert_chord_with_alt_gr(monkeypatch):
+    """Mid-hold inserts with a letter chord would never paste: held AltGr
+    remaps its keysyms at the compositor (AltGr+Shift+V = ‚ on a de layout).
+    Insert is level-stable, and Shift+Insert pastes in GTK, Qt and terminals."""
     import numpy as np
     monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
     monkeypatch.setattr(dictate, "_decode_wav_16k",
                         lambda p: np.zeros(16000 * 5, dtype=np.float32))
     inserts = []
     d = _stream_daemon(inserts, [([_Seg(0.2, 2.0, " Block")], None)])
-    # _stream_daemon's injector is not a WaylandInjector → no neutralizer
     d._stream_tick(dictate._StreamSession())
-    assert inserts == [("Block ", {"neutralize_modifier": None})]
+    assert inserts == [("Block ", {"chord": "shift+insert"})]
+
+
+def test_stream_tick_uses_default_chord_for_plain_keys(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(dictate, "PTT_KEY", "f9")
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 5, dtype=np.float32))
+    inserts = []
+    d = _stream_daemon(inserts, [([_Seg(0.2, 2.0, " Block")], None)])
+    d._stream_tick(dictate._StreamSession())
+    assert inserts == [("Block ", {"chord": None})]
 
 
 def test_evdev_listener_ignores_the_ydotoold_device(monkeypatch):
     """The injector's synthetic keyboard must not feed the listener: our own
-    paste chords and the AltGr neutralizer tap would look like PTT events."""
+    paste chords would otherwise look like real PTT key presses."""
     pytest.importorskip("evdev")
     import types
     from evdev import ecodes

@@ -182,12 +182,13 @@ Notes:
   they are close to live.
 - Each block is its own paste/typing burst, so stay in the window you are
   dictating into (sound advice either way, but it matters more here).
-- With **AltGr** as the push-to-talk key the held modifier would normally
-  remap the paste chord's keysyms at the compositor (AltGr+V = „ on a de
-  layout), so the chord would never match; on Wayland the daemon therefore
-  taps AltGr once right before each mid-hold paste. On X11 (pynput typing)
-  a modifier as the PTT key is not supported for streaming — use a plain key
-  (F9, Menu) there.
+- With **AltGr** as the push-to-talk key the held modifier remaps letter
+  keysyms at the compositor (AltGr+Shift+V = ‚ on a de layout), so a letter
+  chord can never match mid-hold — and a synthetic release cannot clear a
+  *physically* held modifier. On Wayland the daemon therefore pastes
+  mid-hold blocks with `Shift+Insert` instead (level-stable in every keymap;
+  works in GTK, Qt and terminals). On X11 (pynput typing) a modifier as the
+  PTT key is not supported for streaming — use a plain key (F9, Menu) there.
 - On Wayland every block is a full clipboard save → paste → restore cycle, so
   a clipboard manager records each block and the clipboard flickers briefly
   mid-hold.
