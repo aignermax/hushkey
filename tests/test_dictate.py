@@ -1219,5 +1219,8 @@ def test_streaming_inserts_blocks_before_release(monkeypatch):
 
     assert before_release >= 2  # streaming really streamed, mid-hold
     assert len(inserts) == before_release + 1  # the release pass adds the tail
-    texts = [t.strip() for t in inserts]
-    assert texts == [f"Block{i}" for i in range(1, len(texts) + 1)]  # ordered, no dups
+    nums = [int(t.strip().removeprefix("Block")) for t in inserts]
+    # strictly increasing, no duplicates: a tick whose insert is dropped by
+    # the stop guard leaves a hole in the numbering (the tail re-covers the
+    # audio), but never a duplicate or a reorder
+    assert nums == sorted(set(nums))
