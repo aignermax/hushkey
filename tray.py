@@ -69,19 +69,18 @@ MODELS = [
 # org.gnome.desktop.input-sources xkb-options) or it toggles capitals on
 # every recording — with it, the key is dead for the desktop but still
 # visible to the daemon's evdev listener.
-# menu and alt_gr are listed for compact laptops that have neither a right
-# Ctrl nor a usable F-row. alt_gr stays a live modifier, so it only suits
-# layouts where AltGr is not typed with (on DE, Ctrl+Alt reaches the same
-# glyphs). Note alt_gr is KEY_RIGHTALT: on keyboards whose AltGr emits
-# Ctrl+Alt as a pair there is no single key to hold, and the daemon cannot
-# use it — pick another key there.
+# menu is listed for compact laptops that have neither a right Ctrl nor a
+# usable F-row. alt_gr is deliberately NOT offered: it stays a live
+# modifier, a held AltGr remaps letter keysyms at the compositor, and
+# terminals only paste via a letter chord — so mid-hold streaming blocks
+# can never reach them (a manually configured alt_gr still works for
+# classic dictation; the daemon keeps its streaming safeguards for that).
 PTT_KEYS = [
     ("ctrl_r", "Right Ctrl"),
     ("f9", "F9"),
     ("f8", "F8"),
     ("caps_lock", "Caps Lock"),
     ("menu", "Menu key"),
-    ("alt_gr", "AltGr"),
 ]
 
 # (config value, display label) in the Language submenu. "auto" maps to
