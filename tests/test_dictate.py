@@ -1277,9 +1277,12 @@ def test_streaming_inserts_blocks_before_release(monkeypatch):
     d.injector = type("I", (), {"insert": lambda _s, t, **kw: inserts.append(t)})()
 
     d.start_recording()
-    for _ in range(20):  # generous margin so a loaded CI runner still streams
+    # Feed until two blocks are in — wall-clock counts flake on loaded CI
+    # runners, a condition does not.
+    deadline = time.time() + 15
+    while len(inserts) < 2 and time.time() < deadline:
         rec.feed(0.5)
-        time.sleep(0.06)
+        time.sleep(0.05)
     d._stream.stop.set()          # freeze streaming; the rest is tail work
     d._stream.thread.join(2)
     rec.feed(1.5)                 # speech the ticks never see
