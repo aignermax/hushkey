@@ -1063,6 +1063,78 @@ def test_tail_pass_transcribes_only_after_committed(monkeypatch, tmp_path):
     assert inserts == [("Rest ", {})]  # no chord override at release time
 
 
+def test_streamed_dictation_leaves_recovery_transcript(monkeypatch, tmp_path):
+    """AltGr + terminal: mid-hold pastes may silently no-op (VTE only takes a
+    letter chord, which the held modifier remaps). The full transcript must
+    land on the clipboard as the recovery copy — after the tail insert,
+    whose internal restore would otherwise clobber it."""
+    import numpy as np
+    monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
+    d, _rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    d.model = type("M", (), {"transcribe":
+                             lambda _s, a, **kw:
+                             ([type("Seg", (), {"text": " Ende "})()], None)})()
+    events = []
+    d.injector = type("I", (), {
+        "insert": lambda _s, t, **kw: events.append(("insert", t)),
+        "leave_in_clipboard": lambda _s, t: events.append(("leave", t))})()
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 10, dtype=np.float32))
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    session = dictate._StreamSession()
+    session.committed_end = 6.0
+    session.inserted = True
+    session.texts = ["Block eins", "Block zwei"]
+    d._transcribe_and_insert(wav, 10.0, stream=session)
+    assert events == [("insert", "Ende "),
+                      ("leave", "Block eins Block zwei Ende")]
+
+
+def test_recovery_transcript_also_when_tail_is_empty(monkeypatch, tmp_path):
+    """The common case: the user stops speaking just before release, so the
+    tail is empty — the streamed blocks still need their recovery copy."""
+    import numpy as np
+    monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
+    d, _rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    d.model = type("M", (), {"transcribe": lambda _s, a, **kw: ([], None)})()
+    events = []
+    d.injector = type("I", (), {
+        "insert": lambda _s, t, **kw: events.append(("insert", t)),
+        "leave_in_clipboard": lambda _s, t: events.append(("leave", t))})()
+    monkeypatch.setattr(dictate, "_decode_wav_16k",
+                        lambda p: np.zeros(16000 * 10, dtype=np.float32))
+    session = dictate._StreamSession()
+    session.committed_end = 9.0
+    session.inserted = True
+    session.texts = ["Block eins", "Block zwei"]
+    d._transcribe_and_insert(wav, 10.0, stream=session)
+    assert events == [("leave", "Block eins Block zwei")]
+
+
+def test_no_recovery_transcript_without_streaming(monkeypatch, tmp_path):
+    """Classic dictation must not clobber the clipboard — with or without a
+    remapping modifier as the PTT key."""
+    import numpy as np
+    d, _rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    d.model = type("M", (), {"transcribe":
+                             lambda _s, a, **kw:
+                             ([type("Seg", (), {"text": " hallo "})()], None)})()
+    events = []
+    d.injector = type("I", (), {
+        "insert": lambda _s, t, **kw: events.append(("insert", t)),
+        "leave_in_clipboard": lambda _s, t: events.append(("leave", t))})()
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    for key in ("f9", "alt_gr"):
+        monkeypatch.setattr(dictate, "PTT_KEY", key)
+        d._transcribe_and_insert(wav, 1.0)  # no stream session at all
+        wav = tmp_path / "clip2.wav"  # the first call consumed the file
+        wav.write_bytes(b"\0" * 2048)
+    assert events == [("insert", "hallo "), ("insert", "hallo ")]
+
+
 def test_empty_tail_after_streaming_stays_quiet(monkeypatch, tmp_path):
     """Blocks already inserted; an empty tail must not cry 'nothing recognized'."""
     import numpy as np
@@ -1091,7 +1163,7 @@ def test_streaming_paste_chord_only_for_alt_gr(monkeypatch):
 def test_stream_tick_uses_insert_chord_with_alt_gr(monkeypatch):
     """Mid-hold inserts with a letter chord would never paste: held AltGr
     remaps its keysyms at the compositor (AltGr+Shift+V = ‚ on a de layout).
-    Insert is level-stable, and Shift+Insert pastes in GTK, Qt and terminals."""
+    Insert is level-stable, and Shift+Insert pastes in GTK and Qt apps."""
     import numpy as np
     monkeypatch.setattr(dictate, "PTT_KEY", "alt_gr")
     monkeypatch.setattr(dictate, "_decode_wav_16k",

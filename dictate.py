@@ -709,7 +709,8 @@ class WaylandInjector:
         streaming mode: with AltGr as the PTT key the held level-3 modifier
         remaps letter keysyms at the compositor (de layout: AltGr+V = „), so
         a letter chord never matches mid-hold — Insert is level-stable and
-        Shift+Insert pastes in GTK, Qt and terminals alike.
+        Shift+Insert pastes in GTK and Qt apps (not in VTE terminals, which
+        only take a letter chord — hence the recovery transcript).
         """
         chord = chord or self.chord
         args = self._chord_args.get(chord)
@@ -741,6 +742,11 @@ class WaylandInjector:
                 # so log it and leave the clipboard holding the transcript.
                 log(f"clipboard restore failed: {exc}")
 
+    def leave_in_clipboard(self, text):
+        """Put text on the clipboard without pasting and without restoring —
+        the recovery copy for blocks a target could not paste mid-hold."""
+        self._clipboard_write(text.encode("utf-8"))
+
 
 def _streaming_paste_chord():
     """Paste chord for mid-hold streaming inserts, or None for the normal one.
@@ -749,8 +755,8 @@ def _streaming_paste_chord():
     at the compositor (de layout: AltGr+V = „), so a letter chord never
     matches while the key is held — and a synthetic release cannot clear a
     *physically* held modifier, whose state unions with ours. Insert is
-    level-stable in every keymap, and Shift+Insert is the classic paste in
-    GTK, Qt and terminals alike.
+    level-stable in every keymap, and Shift+Insert pastes in GTK and Qt apps
+    (VTE terminals are the exception: they only paste via a letter chord).
     """
     if PTT_KEY == "alt_gr":
         return "shift+insert"
@@ -903,12 +909,15 @@ class _StreamSession:
 
     committed_end: seconds of audio already transcribed and inserted by the
     streaming ticks; the release pass only transcribes the tail after it.
+    texts: the inserted block texts, so the release pass can leave a complete
+    transcript on the clipboard for targets that could not paste mid-hold.
     """
     def __init__(self):
         self.stop = threading.Event()
         self.thread = None
         self.committed_end = 0.0
         self.inserted = False
+        self.texts = []
 
 
 class DictationDaemon:
@@ -1035,8 +1044,36 @@ class DictationDaemon:
             self.injector.insert(text + " ", chord=_streaming_paste_chord())
         session.committed_end += segs[-1].end
         session.inserted = True
+        session.texts.append(text)
         log(f"streamed {len(text)} chars "
             f"(audio committed up to {session.committed_end:.1f}s)")
+
+    def _leave_recovery_transcript(self, stream, tail_text):
+        """Park the complete transcript of a streamed dictation on the
+        clipboard when the PTT key is a remapping modifier (AltGr).
+
+        Such mid-hold blocks can never reach terminals: those only paste via
+        a letter chord, which the held modifier remaps. Without this copy the
+        blocks would be silently lost. Runs only for streamed sessions; a
+        failure here must never fail the dictation itself.
+        """
+        if (stream is None or not stream.inserted
+                or _streaming_paste_chord() is None):
+            return
+        parts = stream.texts + ([tail_text] if tail_text else [])
+        full = " ".join(parts).strip()
+        leave = getattr(self.injector, "leave_in_clipboard", None)
+        if not full or leave is None:
+            return
+        try:
+            leave(full)
+        except Exception as exc:  # the dictation itself is already inserted
+            log(f"recovery transcript failed: {exc}")
+            return
+        log("streamed dictation: full transcript left on the clipboard "
+            "(recovery for mid-hold blocks)")
+        notify("transcript on clipboard",
+               "mid-hold blocks may be missing — paste with Ctrl+Shift+V")
 
     def _transcribe_and_insert(self, wav, duration, stream=None):
         with self.busy_lock:
@@ -1063,7 +1100,10 @@ class DictationDaemon:
                     + (f" [tail after {skip:.1f}s streamed]" if skip > 0 else ""))
                 if not text:
                     if stream is not None and stream.inserted:
-                        return  # blocks already went out; an empty tail is fine
+                        # blocks already went out; an empty tail is fine —
+                        # but the recovery copy still applies
+                        self._leave_recovery_transcript(stream, "")
+                        return
                     rms = _audio_rms(wav)
                     if rms is not None and rms < 0.001:
                         # a dead or disconnected input device records digital
@@ -1077,6 +1117,7 @@ class DictationDaemon:
                     return
                 time.sleep(0.15)  # let the modifier release settle
                 self.injector.insert(text + " ")  # space separates dictations
+                self._leave_recovery_transcript(stream, text)
             except Exception as exc:
                 log(f"ERROR: {exc}")
                 notify("dictation error", str(exc)[:80])
