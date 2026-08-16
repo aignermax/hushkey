@@ -192,7 +192,11 @@ Notes:
   mid-hold blocks cannot reach them with AltGr held — the daemon leaves the
   complete transcript on the clipboard after such a dictation, so a single
   manual `Ctrl+Shift+V` recovers everything. If you dictate into terminals
-  a lot, use Right Ctrl or F9 instead: those stream everywhere.
+  a lot, use Right Ctrl, F9 or Caps Lock instead: those stream everywhere
+  (Caps Lock needs the xkb option `caps:none` — on GNOME:
+  `gsettings set org.gnome.desktop.input-sources xkb-options "['caps:none']"`
+  — which disables its toggle at the desktop while the daemon keeps seeing
+  the key).
 - On X11 (pynput typing) a modifier as the PTT key is not supported for
   streaming — use a plain key (F9, Menu) there.
 - On Wayland every block is a full clipboard save → paste → restore cycle, so

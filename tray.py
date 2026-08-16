@@ -64,8 +64,11 @@ MODELS = [
 
 # (config value, display label) shown in the push-to-talk key submenu.
 # Only keys that do nothing when held alone: the daemon observes the key
-# without swallowing it, so caps_lock would toggle capitals on every
-# recording, and ctrl_l is a prefix key for shortcuts.
+# without swallowing it, so ctrl_l is a prefix key for shortcuts, and
+# caps_lock needs the xkb option caps:none (GNOME: gsettings
+# org.gnome.desktop.input-sources xkb-options) or it toggles capitals on
+# every recording — with it, the key is dead for the desktop but still
+# visible to the daemon's evdev listener.
 # menu and alt_gr are listed for compact laptops that have neither a right
 # Ctrl nor a usable F-row. alt_gr stays a live modifier, so it only suits
 # layouts where AltGr is not typed with (on DE, Ctrl+Alt reaches the same
@@ -76,6 +79,7 @@ PTT_KEYS = [
     ("ctrl_r", "Right Ctrl"),
     ("f9", "F9"),
     ("f8", "F8"),
+    ("caps_lock", "Caps Lock"),
     ("menu", "Menu key"),
     ("alt_gr", "AltGr"),
 ]
