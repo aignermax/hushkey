@@ -450,7 +450,13 @@ def _windows_foreground_is_terminal():
 
 
 def _x11_focus_is_terminal():
-    """WM_CLASS heuristic via python-xlib (already pulled in by pynput)."""
+    """WM_CLASS heuristic via python-xlib (already pulled in by pynput).
+
+    The input focus usually sits on a *child* of the real client window —
+    GTK/Qt hand focus to an internal widget window — and only the top-level
+    client window carries WM_CLASS. So walk up the ancestors to the first
+    window that has one and judge by that.
+    """
     try:
         from Xlib import display as xdisplay
     except ImportError:
@@ -458,11 +464,20 @@ def _x11_focus_is_terminal():
     d = None
     try:
         d = xdisplay.Display()
-        focus = d.get_input_focus().focus
-        if not hasattr(focus, "get_wm_class"):
-            return False
-        wm_class = focus.get_wm_class() or ()
-        return any(c.lower() in _TERMINAL_WM_CLASSES for c in wm_class if c)
+        win = d.get_input_focus().focus
+        for _ in range(16):  # way past focus child -> client window -> root
+            if not hasattr(win, "get_wm_class"):
+                # X.NONE / PointerRoot come back as plain ints, not windows
+                return False
+            wm_class = win.get_wm_class() or ()
+            if wm_class:
+                return any(c.lower() in _TERMINAL_WM_CLASSES
+                           for c in wm_class if c)
+            parent = win.query_tree().parent
+            if parent is None or parent is win:
+                return False
+            win = parent  # root's parent is int 0 -> caught by the hasattr guard
+        return False
     except Exception:
         return False
     finally:

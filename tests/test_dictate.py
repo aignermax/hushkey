@@ -406,6 +406,67 @@ def test_terminal_detection_x11_without_xlib(monkeypatch):
     assert dictate.foreground_window_is_terminal() is False
 
 
+class _FakeXWindow:
+    """A window in the X tree; parent=None mimics the root window, whose
+    query_tree().parent comes back as int 0 (X.NONE), not as a window."""
+
+    def __init__(self, wm_class=None, parent=None):
+        self._wm_class = wm_class
+        self._parent = parent
+
+    def get_wm_class(self):
+        return self._wm_class
+
+    def query_tree(self):
+        import types
+        return types.SimpleNamespace(
+            parent=self._parent if self._parent is not None else 0)
+
+
+def _fake_xlib_tree(monkeypatch, focus):
+    """Install a fake Xlib.display module whose input focus is `focus`."""
+    import types
+    disp = types.SimpleNamespace(
+        get_input_focus=lambda: types.SimpleNamespace(focus=focus),
+        close=lambda: None)
+    xlib = types.ModuleType("Xlib")
+    xlib.display = types.SimpleNamespace(Display=lambda: disp)
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+
+
+def _pin_x11(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+
+
+def test_terminal_detection_walks_up_from_a_focus_child(monkeypatch):
+    """GNOME hands the input focus to a *child* window without WM_CLASS
+    (seen live: LibreWolf's focus window has none; its parent carries
+    ('Navigator', 'librewolf')). Terminals must still be recognized,
+    otherwise the console silently falls back to paced typing."""
+    _pin_x11(monkeypatch)
+    terminal = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=terminal))
+    assert dictate.foreground_window_is_terminal() is True
+
+
+def test_terminal_detection_walks_up_to_a_non_terminal(monkeypatch):
+    _pin_x11(monkeypatch)
+    browser = _FakeXWindow(("Navigator", "librewolf"), parent=_FakeXWindow())
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=browser))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_stops_at_the_root_window(monkeypatch):
+    """No WM_CLASS anywhere up the chain: the walk must end at the root
+    window (whose parent is int 0), not chase ints forever."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=_FakeXWindow()))
+    assert dictate.foreground_window_is_terminal() is False
+
+
 def test_typing_maps_control_chars_to_keys(monkeypatch):
     injector = dictate.PynputInjector()
     injector.controller = FakeController()
