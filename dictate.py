@@ -13,7 +13,10 @@ Nothing is submitted automatically; review and hit Enter yourself.
     pynput   X11, Windows and macOS: pynput both reads the key and types the
              text out character by character. No group membership, no root
              daemon. On macOS grant the terminal Accessibility + Input
-             Monitoring.
+             Monitoring. On X11, characters the server cannot map to a key
+             (CJK on a keymap without a single unused keycode row — GNOME
+             fills every row with XF86 keysyms) go in through the clipboard
+             plus a synthetic paste chord instead; typing them is impossible.
     wayland  Wayland gives clients neither a global key grab nor input
              injection, so evdev reads the key from /dev/input (needs the
              'input' group) and the text goes in via the clipboard plus a
@@ -241,8 +244,21 @@ try:
     from pynput.keyboard import Key
     # control chars type as their keys, same as pynput's Controller.type()
     _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
+    # Modifier/special keys for the X11 clipboard fallback's paste chord.
+    # pynput's Key members differ per backend (xorg only aliases ctrl_l ->
+    # ctrl, darwin has no insert key at all), so resolve defensively; the
+    # chord path only ever runs on X11 anyway.
+    _CHORD_KEYS = {name: key for name, key in (
+        ("ctrl", getattr(Key, "ctrl_l", None)),
+        ("control", getattr(Key, "ctrl_l", None)),
+        ("shift", getattr(Key, "shift_l", None)),
+        ("alt", getattr(Key, "alt_l", None)),
+        ("super", getattr(Key, "cmd_l", None)),
+        ("insert", getattr(Key, "insert", None)),
+    ) if key is not None}
 except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
     _CONTROL_KEYS = {}
+    _CHORD_KEYS = {}
 
 
 def log(msg):
@@ -503,36 +519,262 @@ def _x11_focus_is_terminal():
             d.close()
 
 
+def _x11_clipboard_read(timeout=2.0):
+    """Current X11 CLIPBOARD text as bytes, or None.
+
+    None covers: no owner, the owner not offering UTF8_STRING, or no answer
+    within `timeout`. Reading means asking the owner for the selection, so it
+    needs its own short-lived connection and window.
+    """
+    from Xlib import X, display as xdisplay
+    d = xdisplay.Display()
+    try:
+        clipboard = d.get_atom("CLIPBOARD")
+        if d.get_selection_owner(clipboard) == X.NONE:
+            return None
+        utf8 = d.get_atom("UTF8_STRING")
+        prop_atom = d.get_atom("WHISPER_PTT_CLIPBOARD_READ")
+        win = d.screen().root.create_window(
+            0, 0, 1, 1, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent)
+        win.convert_selection(clipboard, utf8, prop_atom, X.CurrentTime)
+        d.flush()
+        end = time.time() + timeout
+        while time.time() < end:
+            # Poll instead of select(): python-xlib reads the socket ahead
+            # into its internal queue, where select() cannot see the data.
+            if d.pending_events() == 0:
+                time.sleep(0.05)
+                continue
+            ev = d.next_event()
+            if ev.type != X.SelectionNotify:
+                continue
+            if ev.property == X.NONE:
+                return None  # the owner does not offer UTF8_STRING
+            prop = win.get_full_property(prop_atom, X.AnyPropertyType)
+            win.delete_property(prop_atom)
+            if prop is None or prop.format != 8:
+                # e.g. an INCR size marker for a huge clipboard: unreadable
+                # here, so restoring it is skipped rather than corrupted
+                return None
+            return bytes(prop.value)
+        return None
+    finally:
+        d.close()
+
+
+def _x11_clipboard_own(data, serve_seconds=None):
+    """Own the X11 CLIPBOARD selection holding `data` (bytes).
+
+    Owning a selection means answering SelectionRequest events for it, which
+    runs on a daemon thread until another client takes the selection over
+    (SelectionClear) or serve_seconds pass — the default None serves
+    indefinitely, mirroring how wl-copy/xclip stay alive: closing the
+    connection would destroy the owner window and the clipboard would revert
+    to no-owner. The thread closes the connection when it ends; the caller
+    must not touch it afterwards. Returns the serving thread.
+    """
+    from Xlib import X, Xatom, display as xdisplay
+    from Xlib.protocol import event as xevent
+    d = xdisplay.Display()
+    clipboard = d.get_atom("CLIPBOARD")
+    utf8 = d.get_atom("UTF8_STRING")
+    targets = d.get_atom("TARGETS")
+    win = d.screen().root.create_window(
+        0, 0, 1, 1, 0, X.CopyFromParent, X.InputOutput, X.CopyFromParent)
+    try:
+        win.set_selection_owner(clipboard, X.CurrentTime)
+        d.sync()
+        if d.get_selection_owner(clipboard).id != win.id:
+            raise RuntimeError("could not take the CLIPBOARD selection")
+    except Exception:
+        d.close()
+        raise
+
+    def serve():
+        try:
+            end = None if serve_seconds is None else time.time() + serve_seconds
+            while end is None or time.time() < end:
+                if d.pending_events() == 0:  # poll: see _x11_clipboard_read
+                    time.sleep(0.1)
+                    continue
+                ev = d.next_event()
+                if ev.type == X.SelectionClear:
+                    break  # another client owns the selection now
+                if ev.type != X.SelectionRequest:
+                    continue
+                try:
+                    # obsolete clients signal "use the target as the property"
+                    prop = ev.property if ev.property != X.NONE else ev.target
+                    ok = True
+                    if ev.target == targets:
+                        ev.requestor.change_property(
+                            prop, Xatom.ATOM, 32,
+                            [targets, utf8, Xatom.STRING])
+                    elif ev.target in (utf8, Xatom.STRING):
+                        ev.requestor.change_property(prop, ev.target, 8, data)
+                    else:
+                        ok = False
+                    ev.requestor.send_event(xevent.SelectionNotify(
+                        time=ev.time, requestor=ev.requestor,
+                        selection=ev.selection, target=ev.target,
+                        property=prop if ok else X.NONE))
+                    d.sync()
+                except Exception as exc:
+                    # e.g. the requestor died mid-request: lose this answer,
+                    # not the whole selection
+                    log(f"X11 clipboard request failed: {exc}")
+        except Exception as exc:
+            # A serving failure loses this paste, never the daemon.
+            log(f"X11 clipboard serving stopped: {exc}")
+        finally:
+            d.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
 class PynputInjector:
     """Type the text out via pynput (XTEST on X11, native APIs elsewhere).
 
     Layout-independent, no extra setup. Characters go one at a time with a
     small delay: heavy apps (Electron editors, browsers) drop or reorder
     keystrokes fired at full speed.
+
+    X11 only: a character the server cannot map to a key cannot be typed at
+    all. pynput works around unmappable characters by borrowing an unused
+    keycode row, but some keymaps have none (GNOME fills every row with XF86
+    keysyms) — and then CJK text fails hard. Such text goes in through the
+    clipboard plus a synthetic paste chord instead, like the Wayland backend.
     """
 
     def __init__(self):
         self.controller = None
+        self._borrowable = None  # X11: does the keymap have an unused row?
 
     def check(self):
         return None
 
     def insert(self, text, chord=None):
-        # The chord override only matters on Wayland (clipboard paste); on
-        # X11/Windows/macOS we type the text out, so there is no chord to
-        # swap. Held-modifier caveats for typed text stay as documented.
+        # The chord override matters only for the clipboard path (Wayland
+        # always pastes; on X11 only text with untypeable characters does).
+        # Typed text has no chord to swap; held-modifier caveats for typed
+        # text stay as documented.
         if self.controller is None:
             from pynput.keyboard import Controller
             self.controller = Controller()
+        if self._needs_clipboard(text) and self._paste_text(text, chord):
+            return
         delay = TYPE_DELAY
         if delay and TERMINAL_TYPE_DELAY < delay and foreground_window_is_terminal():
             delay = TERMINAL_TYPE_DELAY
         for ch in text:
             key = _CONTROL_KEYS.get(ch, ch)
-            self.controller.press(key)
-            self.controller.release(key)
+            try:
+                self.controller.press(key)
+                self.controller.release(key)
+            except Exception as exc:
+                # e.g. pynput's InvalidKeyException: one unmappable character
+                # must not abort the rest of the dictation
+                log(f"skipped untypeable character {ch!r}: {exc}")
             if delay:
                 time.sleep(delay)
+
+    def _needs_clipboard(self, text):
+        """X11 with a character pynput cannot map → paste, don't type."""
+        if not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
+                and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
+            return False
+        try:
+            # keyboard_mapping/_borrows/_display are private pynput attrs;
+            # if a future pynput renames them the AttributeError degrades to
+            # the typed path, which is the safe side
+            mapping = self.controller.keyboard_mapping
+            borrows = self.controller._borrows
+            for ch in text:
+                if ch in _CONTROL_KEYS:
+                    continue
+                ordinal = ord(ch)
+                keysym = ordinal if ordinal < 0x100 else ordinal | 0x01000000
+                if keysym in mapping or keysym in borrows:
+                    continue
+                if self._can_borrow():
+                    continue
+                return True
+        except Exception:
+            return False  # introspection failed: keep the typed path
+        return False
+
+    def _can_borrow(self):
+        """Whether pynput can still remap a keycode row for unmappable
+        characters — a property of the keymap, probed once."""
+        if self._borrowable is None:
+            mapping = self.controller._display.get_keyboard_mapping(8, 255 - 8)
+            self._borrowable = any(not any(row) for row in mapping)
+        return self._borrowable
+
+    def _chord_keys(self, chord):
+        """'ctrl+shift+v' -> keys for controller.press, press order.
+
+        Chord names resolve through the module-level _CHORD_KEYS (real
+        pynput Keys where available); anything else — 'v', and modifier
+        names the backend does not know — passes through as-is, which for
+        single characters is exactly what controller.press expects.
+        """
+        keys = []
+        for part in chord.lower().split("+"):
+            part = part.strip()
+            if not part:
+                continue
+            keys.append(_CHORD_KEYS.get(part, part))
+        return keys
+
+    def _paste_text(self, text, chord=None):
+        """Clipboard fallback for untypeable characters: own CLIPBOARD, one
+        synthetic paste chord (ctrl+shift+v in terminals, ctrl+v elsewhere;
+        the streaming mid-hold override wins), then restore the previous
+        contents. False when the clipboard could not be set up — the caller
+        then types what it can."""
+        try:
+            previous = _x11_clipboard_read()
+            # When a restore follows, the transcript only has to survive until
+            # then; otherwise it stays pasteable (until the next copy), like
+            # wl-copy leaves it on the Wayland backend.
+            _x11_clipboard_own(
+                text.encode("utf-8"),
+                serve_seconds=CLIPBOARD_SETTLE + 2.0 if previous is not None
+                else None)
+        except Exception as exc:
+            log(f"X11 clipboard paste unavailable: {exc}")
+            return False
+        if chord is None:
+            chord = "ctrl+shift+v" if foreground_window_is_terminal() \
+                else "ctrl+v"
+        keys = self._chord_keys(chord)
+        for key in keys:
+            self.controller.press(key)
+        for key in reversed(keys):
+            self.controller.release(key)
+        # The paste is asynchronous: give the focused app time to fetch the
+        # selection before the clipboard is handed back.
+        time.sleep(CLIPBOARD_SETTLE)
+        if previous is not None:
+            try:
+                # served until another client takes the selection over —
+                # a bounded serve would destroy the owner window on exit and
+                # the "restored" clipboard would vanish shortly after
+                _x11_clipboard_own(previous)
+            except Exception as exc:
+                # Only the restore failed — the transcript is already
+                # inserted, so the clipboard simply keeps it.
+                log(f"clipboard restore failed: {exc}")
+        return True
+
+    def leave_in_clipboard(self, text):
+        """Put text on the clipboard without pasting and without restoring —
+        the recovery copy for streamed blocks a target could not paste
+        mid-hold (see _leave_recovery_transcript)."""
+        _x11_clipboard_own(text.encode("utf-8"))
 
 
 class WaylandInjector:
