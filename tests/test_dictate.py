@@ -411,6 +411,7 @@ class _FakeXWindow:
     query_tree().parent comes back as int 0 (X.NONE), not as a window."""
 
     def __init__(self, wm_class=None, parent=None):
+        self.id = id(self)  # python-xlib Window objects have a unique .id
         self._wm_class = wm_class
         self._parent = parent
 
@@ -424,15 +425,20 @@ class _FakeXWindow:
 
 
 def _fake_xlib_tree(monkeypatch, focus):
-    """Install a fake Xlib.display module whose input focus is `focus`."""
+    """Install a fake Xlib.display module whose input focus is `focus`.
+
+    Returns the fake Display so tests can assert it got closed.
+    """
     import types
     disp = types.SimpleNamespace(
         get_input_focus=lambda: types.SimpleNamespace(focus=focus),
-        close=lambda: None)
+        closed=0)
+    disp.close = lambda: setattr(disp, "closed", disp.closed + 1)
     xlib = types.ModuleType("Xlib")
     xlib.display = types.SimpleNamespace(Display=lambda: disp)
     monkeypatch.setitem(sys.modules, "Xlib", xlib)
     monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+    return disp
 
 
 def _pin_x11(monkeypatch):
@@ -465,6 +471,68 @@ def test_terminal_detection_stops_at_the_root_window(monkeypatch):
     _pin_x11(monkeypatch)
     _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=_FakeXWindow()))
     assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_matches_wm_class_case_insensitively(monkeypatch):
+    """Alacritty reports ('Alacritty', 'Alacritty') — capitalized in both
+    slots, so the comparison must fold case, not get lucky on one entry."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(("Alacritty", "Alacritty")))
+    assert dictate.foreground_window_is_terminal() is True
+
+
+def test_terminal_detection_handles_focus_none_and_pointer_root(monkeypatch):
+    """X.NONE (0) and PointerRoot (1, focus-follows-mouse) come back as
+    plain ints — there is no window to judge by."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, 0)
+    assert dictate.foreground_window_is_terminal() is False
+    _fake_xlib_tree(monkeypatch, 1)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_survives_a_self_parenting_window(monkeypatch):
+    """A window listing itself as parent must not spin the walk forever
+    (python-xlib hands out a fresh Window object per query, so the guard
+    compares ids, not object identity)."""
+    _pin_x11(monkeypatch)
+    win = _FakeXWindow()
+    win._parent = win
+    _fake_xlib_tree(monkeypatch, win)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_caps_a_bottomless_chain(monkeypatch):
+    """The walk gives up after 16 hops rather than chasing parents forever
+    — even if a terminal class hides beyond the cap."""
+    _pin_x11(monkeypatch)
+    win = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    for _ in range(40):
+        win = _FakeXWindow(parent=win)
+    _fake_xlib_tree(monkeypatch, win)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_survives_a_window_dying_mid_walk(monkeypatch):
+    """A window destroyed between the focus query and the class read raises;
+    the heuristic must fail safe (paced typing), not crash the dictation."""
+    _pin_x11(monkeypatch)
+
+    class ZombieWindow(_FakeXWindow):
+        def get_wm_class(self):
+            raise RuntimeError("window destroyed")
+
+    terminal = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    _fake_xlib_tree(monkeypatch, ZombieWindow(parent=terminal))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_closes_the_display(monkeypatch):
+    """One X connection per dictation — a leaked one would pile up."""
+    _pin_x11(monkeypatch)
+    disp = _fake_xlib_tree(monkeypatch, _FakeXWindow(("xterm", "XTerm")))
+    dictate.foreground_window_is_terminal()
+    assert disp.closed == 1
 
 
 def test_typing_maps_control_chars_to_keys(monkeypatch):

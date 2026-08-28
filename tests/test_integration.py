@@ -82,6 +82,7 @@ class FakeXWindow:
     query_tree().parent comes back as int 0 (X.NONE), not as a window."""
 
     def __init__(self, wm_class=None, parent=None):
+        self.id = id(self)  # python-xlib Window objects have a unique .id
         self._wm_class = wm_class
         self._parent = parent
 

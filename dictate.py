@@ -467,16 +467,21 @@ def _x11_focus_is_terminal():
         win = d.get_input_focus().focus
         for _ in range(16):  # way past focus child -> client window -> root
             if not hasattr(win, "get_wm_class"):
-                # X.NONE / PointerRoot come back as plain ints, not windows
+                # X.NONE / PointerRoot come back as plain ints, not windows.
+                # PointerRoot means focus-follows-mouse with no focused
+                # window: nothing to judge by, so pacing stays on.
                 return False
             wm_class = win.get_wm_class() or ()
             if wm_class:
                 return any(c.lower() in _TERMINAL_WM_CLASSES
                            for c in wm_class if c)
             parent = win.query_tree().parent
-            if parent is None or parent is win:
+            # The root window's parent comes back as int 0 (X.NONE), not a
+            # window; python-xlib hands out a fresh Window object per query,
+            # so guard the self-parenting case by id, not by identity.
+            if not hasattr(parent, "get_wm_class") or parent.id == win.id:
                 return False
-            win = parent  # root's parent is int 0 -> caught by the hasattr guard
+            win = parent
         return False
     except Exception:
         return False
