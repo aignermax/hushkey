@@ -186,7 +186,8 @@ def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
     seen = {}
 
     class FakeModel:
-        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1,
+                       initial_prompt=None):
             seen["language"] = language
             return [type("Seg", (), {"text": " ciao "})()], None
 
@@ -195,6 +196,82 @@ def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
     monkeypatch.setattr(dictate, "configured_lang", lambda: "it")
     d._transcribe_and_insert(wav, 1.0)
     assert seen["language"] == "it"
+
+
+def test_transcribe_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
+    """Whisper's multilingual models mix Traditional characters into Mandarin
+    output at random. On auto-detect the first pass runs prompt-free (a
+    Chinese prompt would bias every language); only when it reports zh does a
+    second pass with the Simplified prompt follow."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "zh"})()
+            text = "繁體字" if len(calls) == 1 else "简体字"
+            return [type("Seg", (), {"text": text})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["简体字"]  # the second pass wins
+    assert len(calls) == 2
+    assert calls[0]["language"] is None and calls[0]["initial_prompt"] is None
+    assert calls[1]["language"] == "zh"
+    assert calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+
+
+def test_transcribe_applies_the_prompt_directly_when_zh_is_pinned(monkeypatch,
+                                                                  tmp_path):
+    """Pinned zh: the prompt goes into the single pass, no re-decode."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "zh"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, "zh")
+    assert len(calls) == 1
+    assert calls[0]["initial_prompt"] == dictate.ZH_PROMPT
+
+
+def test_transcribe_passes_no_prompt_for_other_languages(monkeypatch, tmp_path):
+    """German/English must never see the Chinese prompt — one pass, no bias."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "de"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, None)
+    assert len(calls) == 1
+    assert calls[0]["initial_prompt"] is None
+
+
+def test_transcribe_zh_prompt_can_be_disabled(monkeypatch, tmp_path):
+    """WHISPER_ZH_PROMPT='' (Traditional-Chinese users): no prompt, and no
+    re-decode for auto-detected Chinese either."""
+    monkeypatch.setattr(dictate, "ZH_PROMPT", "")
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "zh"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, None)
+    d._transcribe(wav, "zh")
+    assert len(calls) == 2
+    assert all(c["initial_prompt"] is None for c in calls)
 
 
 def _write_wav(path, amplitude):
@@ -254,7 +331,8 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     d, rec, wav = make_daemon(monkeypatch, tmp_path)
 
     class FakeModel:
-        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1,
+                       initial_prompt=None):
             return [type("Seg", (), {"text": " hallo "})()], None
 
     d.model = FakeModel()

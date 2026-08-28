@@ -196,3 +196,34 @@ def test_dictation_cycle_passes_the_language_through(monkeypatch, tmp_path,
     assert len(d.model.calls) == 1
     assert d.model.calls[0]["language"] == expected
     assert "task" not in d.model.calls[0]
+    # the Simplified-script prompt goes into the pass only when zh is pinned
+    assert d.model.calls[0]["initial_prompt"] == (
+        dictate.ZH_PROMPT if configured == "zh" else None)
+
+
+def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
+    """Auto-detect reporting zh triggers one prompt-free pass plus one with
+    the Simplified prompt (whisper otherwise mixes Traditional characters
+    into Mandarin output at random) — and the second pass is what lands in
+    the focused window. Only Chinese dictations pay for the extra decode."""
+    class ZhModel:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, wav, **kwargs):
+            self.calls.append(kwargs)
+            text = "繁體字" if len(self.calls) == 1 else "简体字"
+            info = types.SimpleNamespace(language="zh")
+            return [types.SimpleNamespace(text=text, start=0.0, end=1.0)], info
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"lang": "auto"}', encoding="utf-8")
+    focus = FakeXWindow(parent=FakeXWindow(("Navigator", "librewolf")))
+    d, rec, idle, _ = make_daemon(monkeypatch, tmp_path, focus, model=ZhModel())
+    dictate_one_cycle(d, idle)
+    assert len(d.model.calls) == 2
+    assert d.model.calls[0]["language"] is None
+    assert d.model.calls[0]["initial_prompt"] is None
+    assert d.model.calls[1]["language"] == "zh"
+    assert d.model.calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+    assert typed_text(d) == "简体字 "
