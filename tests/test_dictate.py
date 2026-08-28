@@ -656,11 +656,12 @@ class FakeMappingController(FakeController):
 
 
 def _pin_clipboard(monkeypatch, previous=b"OLD"):
-    """Fake the X11 clipboard helpers; returns the list of owned payloads."""
+    """Fake the X11 clipboard helpers; returns the owned (data, TTL) pairs."""
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: previous)
-    monkeypatch.setattr(dictate, "_x11_clipboard_own",
-                        lambda data, serve_seconds: owned.append(data))
+    monkeypatch.setattr(
+        dictate, "_x11_clipboard_own",
+        lambda data, serve_seconds=None: owned.append((data, serve_seconds)))
     return owned
 
 
@@ -676,7 +677,10 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好 a")
-    assert owned == ["你好 a".encode(), b"OLD"]  # transcript, then restore
+    # transcript until the restore, then the old contents served indefinitely
+    # (a bounded restore would destroy the owner window and lose it again)
+    assert owned == [("你好 a".encode(), dictate.CLIPBOARD_SETTLE + 2.0),
+                     (b"OLD", None)]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == [dictate.Key.ctrl_l, "v"]  # chord only, no per-char typing
 
@@ -692,7 +696,22 @@ def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
     injector.insert("你好")
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == [dictate.Key.ctrl_l, dictate.Key.shift_l, "v"]
-    assert owned == ["你好".encode()]  # nothing to restore
+    # nothing to restore: the transcript stays pasteable
+    assert owned == [("你好".encode(), None)]
+
+
+def test_paste_honours_the_streaming_chord_override(monkeypatch):
+    """Mid-hold streaming inserts pass chord=shift+insert (a held AltGr
+    remaps letter chords); the clipboard path must use it, not ctrl+v."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set(),
+                                                has_empty_row=False)
+    _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("你好", chord="shift+insert")
+    keys = [k for event, k in injector.controller.events if event == "down"]
+    assert keys == [dictate.Key.shift_l, dictate.Key.insert]
 
 
 def test_typeable_text_is_typed_not_pasted(monkeypatch):
@@ -752,11 +771,152 @@ def test_clipboard_fallback_never_triggers_off_x11(monkeypatch):
     injector = dictate.PynputInjector()
     injector.controller = FakeController()  # no mapping introspection at all
     owned = _pin_clipboard(monkeypatch)
+    reads = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read",
+                        lambda: reads.append("read"))
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     injector.insert("你好")
-    assert owned == []
+    assert owned == [] and reads == []  # the platform guard fired, not a fallback
     assert [k for event, k in injector.controller.events
             if event == "down"] == ["你", "好"]
+
+
+class _FakeSelectionWindow:
+    """The 1x1 window the clipboard helpers create; records property writes."""
+
+    def __init__(self, prop_format=8, prop_value=b""):
+        self.id = 1234
+        self.properties = []  # change_property calls
+        self.notifications = []  # send_event calls
+        self.owner_of = []
+        self._prop = (prop_format, prop_value)
+        self.converted = []
+
+    def set_selection_owner(self, selection, time):
+        self.owner_of.append(selection)
+
+    def change_property(self, prop, target, fmt, data):
+        self.properties.append((prop, target, fmt, data))
+
+    def send_event(self, ev):
+        self.notifications.append(ev)
+
+    def convert_selection(self, selection, target, prop, time):
+        self.converted.append((selection, target, prop))
+
+    def get_full_property(self, prop, type):
+        import types
+        fmt, value = self._prop
+        return types.SimpleNamespace(format=fmt, value=value)
+
+    def delete_property(self, prop):
+        pass
+
+
+class _FakeSelectionDisplay:
+    """A python-xlib Display stand-in: atoms are their names, events are
+    scripted, every method the helpers call is recorded or answered."""
+
+    def __init__(self, window, events=()):
+        import types
+        self.window = window
+        self._events = list(events)
+        self.closed = 0
+        self._root = types.SimpleNamespace(create_window=lambda *a: window)
+
+    def get_atom(self, name):
+        return name
+
+    def screen(self):
+        import types
+        return types.SimpleNamespace(root=self._root)
+
+    def get_selection_owner(self, selection):
+        return self.window  # ownership check compares .id — it matches
+
+    def flush(self):
+        pass
+
+    def sync(self):
+        pass
+
+    def pending_events(self):
+        return len(self._events)
+
+    def next_event(self):
+        return self._events.pop(0)
+
+    def close(self):
+        self.closed += 1
+
+
+def _fake_selection_xlib(monkeypatch, disp):
+    """Install a fake Xlib tree whose Display() returns `disp`."""
+    import types
+    X = types.SimpleNamespace(
+        CopyFromParent=0, InputOutput=1, CurrentTime=0, NONE=0,
+        AnyPropertyType=0, SelectionClear=29, SelectionRequest=30,
+        SelectionNotify=31)
+    Xatom = types.SimpleNamespace(ATOM=4, STRING=31)
+    xevent = types.SimpleNamespace(
+        SelectionNotify=lambda **kw: ("SelectionNotify", kw))
+    xlib = types.ModuleType("Xlib")
+    xlib.X = X
+    xlib.Xatom = Xatom
+    xlib.display = types.SimpleNamespace(Display=lambda: disp)
+    protocol = types.ModuleType("Xlib.protocol")
+    protocol.event = xevent
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.protocol", protocol)
+    return X
+
+
+def _request(target, requestor, X):
+    import types
+    return types.SimpleNamespace(type=X.SelectionRequest, target=target,
+                                 property=555, requestor=requestor, time=0,
+                                 selection="CLIPBOARD")
+
+
+def test_clipboard_own_serves_text_targets_and_refusals(monkeypatch):
+    """The serve loop answers TARGETS and UTF8_STRING, refuses targets it
+    does not offer (property=None per ICCCM), and exits on SelectionClear —
+    closing its connection, which releases the selection."""
+    import types
+    window = _FakeSelectionWindow()
+    requestor = _FakeSelectionWindow()
+    disp = _FakeSelectionDisplay(window)
+    X = _fake_selection_xlib(monkeypatch, disp)
+    disp._events.extend([
+        _request("TARGETS", requestor, X),
+        _request("UTF8_STRING", requestor, X),
+        _request("TIMESTAMP", requestor, X),  # not offered -> refuse
+        types.SimpleNamespace(type=X.SelectionClear),
+    ])
+    thread = dictate._x11_clipboard_own("你好".encode())
+    thread.join(5)
+    assert not thread.is_alive()
+    assert disp.closed == 1
+    assert window.owner_of == ["CLIPBOARD"]
+    answers = [n[1]["property"] for n in requestor.notifications]
+    assert answers == [555, 555, 0]  # X.NONE on the unsupported target
+    texts = [p for p in requestor.properties if p[1] == "UTF8_STRING"]
+    assert texts == [(555, "UTF8_STRING", 8, "你好".encode())]
+
+
+def test_clipboard_read_returns_text_and_rejects_incr(monkeypatch):
+    """A property with format != 8 is an INCR size marker, not text — the
+    read must refuse it instead of restoring garbage bytes later."""
+    import types
+    X = None
+    for fmt, value, expected in ((8, b"hello", b"hello"), (32, b"\x00", None)):
+        window = _FakeSelectionWindow(prop_format=fmt, prop_value=value)
+        disp = _FakeSelectionDisplay(window)
+        X = _fake_selection_xlib(monkeypatch, disp)
+        disp._events.append(types.SimpleNamespace(
+            type=X.SelectionNotify, property="WHISPER_PTT_CLIPBOARD_READ"))
+        assert dictate._x11_clipboard_read(timeout=1.0) == expected
+        assert disp.closed == 1
 
 
 def test_daemon_inserts_via_the_selected_injector(monkeypatch, tmp_path):

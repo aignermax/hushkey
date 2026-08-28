@@ -263,11 +263,14 @@ def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
                                            has_empty_row=False)
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: b"OLD")
-    monkeypatch.setattr(dictate, "_x11_clipboard_own",
-                        lambda data, serve_seconds: owned.append(data))
+    monkeypatch.setattr(
+        dictate, "_x11_clipboard_own",
+        lambda data, serve_seconds=None: owned.append((data, serve_seconds)))
     dictate_one_cycle(d, idle)
     # the transcript was owned for the paste, then the old clipboard restored
-    assert owned == ["你好，世界 ".encode(), b"OLD"]
+    # (served indefinitely — a bounded restore would lose it right after)
+    assert owned == [("你好，世界 ".encode(), dictate.CLIPBOARD_SETTLE + 2.0),
+                     (b"OLD", None)]
     # and the chord went to the window instead of per-character typing
     keys = [k for event, k in d.injector.controller.events if event == "down"]
     assert keys == [dictate.Key.ctrl_l, "v"]
