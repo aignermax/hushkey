@@ -29,7 +29,9 @@ Nothing is submitted automatically; review and hit Enter yourself.
 
 Config via environment:
   PTT_KEY          key name (default: ctrl_r; e.g. f9, caps_lock, or a raw
-                   evdev name like KEY_RIGHTCTRL)
+                   evdev name like KEY_RIGHTCTRL). With caps_lock a short tap
+                   keeps toggling capitals while a hold dictates; the caps
+                   state is restored on release
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
   WHISPER_ZH_PROMPT  initial prompt for Chinese dictation (default: a
@@ -244,10 +246,10 @@ try:
     from pynput.keyboard import Key
     # control chars type as their keys, same as pynput's Controller.type()
     _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
-    # Modifier/special keys for the X11 clipboard fallback's paste chord.
-    # pynput's Key members differ per backend (xorg only aliases ctrl_l ->
-    # ctrl, darwin has no insert key at all), so resolve defensively; the
-    # chord path only ever runs on X11 anyway.
+    # Modifier/special keys for the X11 clipboard fallback's paste chord and
+    # for the caps lock restore tap. pynput's Key members differ per backend
+    # (xorg only aliases ctrl_l -> ctrl, darwin has no insert key at all),
+    # so resolve defensively.
     _CHORD_KEYS = {name: key for name, key in (
         ("ctrl", getattr(Key, "ctrl_l", None)),
         ("control", getattr(Key, "ctrl_l", None)),
@@ -255,6 +257,7 @@ try:
         ("alt", getattr(Key, "alt_l", None)),
         ("super", getattr(Key, "cmd_l", None)),
         ("insert", getattr(Key, "insert", None)),
+        ("caps_lock", getattr(Key, "caps_lock", None)),
     ) if key is not None}
 except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
     _CONTROL_KEYS = {}
@@ -776,6 +779,24 @@ class PynputInjector:
         mid-hold (see _leave_recovery_transcript)."""
         _x11_clipboard_own(text.encode("utf-8"))
 
+    def tap_caps_lock(self):
+        """Toggle the caps lock state once.
+
+        The daemon calls this after a dictation on the Caps Lock key: the
+        hold also flipped the system caps state on press, and the flip-back
+        restores it. A short tap never reaches here and keeps its normal
+        caps meaning."""
+        if self.controller is None:
+            from pynput.keyboard import Controller
+            self.controller = Controller()
+        key = _CHORD_KEYS.get("caps_lock")
+        if key is None:
+            log("caps lock restore unavailable: pynput has no caps_lock key")
+            return
+        self.controller.press(key)
+        time.sleep(0.05)  # too-brief taps can be debounced away (macOS)
+        self.controller.release(key)
+
 
 class WaylandInjector:
     """Put the text on the clipboard, then synthesize one paste chord.
@@ -1022,6 +1043,31 @@ class WaylandInjector:
         the recovery copy for blocks a target could not paste mid-hold."""
         self._clipboard_write(text.encode("utf-8"))
 
+    def tap_caps_lock(self):
+        """Toggle the caps lock state once through ydotool.
+
+        The daemon calls this after a dictation on the Caps Lock key: the
+        hold also flipped the system caps state on press, and the flip-back
+        restores it. The synthetic press comes out of the ydotoold device,
+        which the evdev listener ignores — it cannot look like a dictation.
+        """
+        args = self._chord_args.get("caps_lock")
+        if args is None:
+            if self._chord_style is None:
+                self._chord_style = self._ydotool_key_style()
+            # the evdev name: _build_chord's pynput spelling would produce
+            # the nonexistent KEY_CAPS_LOCK
+            args = self._build_chord("KEY_CAPSLOCK", self._chord_style)
+            self._chord_args["caps_lock"] = args
+        env = dict(os.environ)
+        socket = self._socket_path()
+        if socket:
+            env["YDOTOOL_SOCKET"] = socket  # keep client and daemon in sync
+        subprocess.run(["ydotool", "key"] + args,
+                       timeout=CMD_TIMEOUT, env=env,
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True)
+
 
 def _streaming_paste_chord():
     """Paste chord for mid-hold streaming inserts, or None for the normal one.
@@ -1202,6 +1248,8 @@ class DictationDaemon:
         self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
         self._stream = None  # _StreamSession while a streaming dictation runs
+        self._caps_restore_until = 0.0  # time backstop for the tap suppression
+        self._caps_restore_pending = 0  # synthetic caps taps still in flight
         self.listener, self.injector = make_backends(PTT_KEY)
 
     def load_model(self):
@@ -1224,6 +1272,12 @@ class DictationDaemon:
     def start_recording(self):
         if self.recording is not None:
             return  # ignore key auto-repeat
+        if (self._caps_restore_pending
+                and time.time() < self._caps_restore_until):
+            # exactly one press per restore: the synthetic caps tap. A real
+            # re-press right after must still work — and must not be eaten.
+            self._caps_restore_pending -= 1
+            return
         if self.recorder is None:
             notify("dictation error",
                    "no recorder (install pipewire/pw-record or sounddevice)")
@@ -1256,6 +1310,21 @@ class DictationDaemon:
             # insert ordered before the tail pass below.
             session.stop.set()
             session.thread.join(timeout=30)
+        if duration >= MIN_SECONDS and PTT_KEY == "caps_lock":
+            # A hold long enough to dictate also toggled caps lock on the
+            # press — flip it back, or every dictation leaves capitals on.
+            # Duration alone decides: even a recording that fails below has
+            # already flipped the state. A short tap never reaches here and
+            # keeps its caps meaning. The synthetic tap looks like a fresh
+            # PTT press to the pynput listener, so swallow exactly that one
+            # (the evdev listener ignores the ydotoold device anyway).
+            if backend_name() != "wayland":
+                self._caps_restore_until = time.time() + 1.0
+                self._caps_restore_pending = 1
+            try:
+                self.injector.tap_caps_lock()
+            except Exception as exc:
+                log(f"caps lock restore failed: {exc}")
         try:
             wav = self.recorder.stop()
         except Exception as exc:
@@ -1263,7 +1332,8 @@ class DictationDaemon:
             notify("dictation error", str(exc)[:80])
             write_state("idle")
             return
-        if duration < MIN_SECONDS or not wav or os.path.getsize(wav) < 1000:
+        if duration < MIN_SECONDS or not wav or not os.path.isfile(wav) \
+                or os.path.getsize(wav) < 1000:
             log(f"ignored short/empty recording ({duration:.2f}s)")
             if wav and os.path.exists(wav):
                 os.remove(wav)

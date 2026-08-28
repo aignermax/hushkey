@@ -65,11 +65,9 @@ MODELS = [
 
 # (config value, display label) shown in the push-to-talk key submenu.
 # Only keys that do nothing when held alone: the daemon observes the key
-# without swallowing it, so ctrl_l is a prefix key for shortcuts, and
-# caps_lock needs the xkb option caps:none (GNOME: gsettings
-# org.gnome.desktop.input-sources xkb-options) or it toggles capitals on
-# every recording — with it, the key is dead for the desktop but still
-# visible to the daemon's evdev listener.
+# without swallowing it, so ctrl_l is a prefix key for shortcuts. caps_lock
+# still toggles capitals on a short tap — that is the caps function — but a
+# hold dictates, and the daemon flips the caps state back on release.
 # menu is listed for compact laptops that have neither a right Ctrl nor a
 # usable F-row. alt_gr is deliberately NOT offered: it stays a live
 # modifier, a held AltGr remaps letter keysyms at the compositor, and

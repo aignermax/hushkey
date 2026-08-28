@@ -28,9 +28,12 @@ def pinned_backend(monkeypatch):
     Without this, DictationDaemon() picks evdev+ydotool when the suite happens
     to run inside a Wayland session, and the pynput assertions below would be
     testing a backend that isn't in use. The backend choice itself is covered
-    by the dedicated tests further down.
+    by the dedicated tests further down. PTT_KEY is pinned too: the module
+    resolves it from the developer's real tray config at import, and a
+    caps_lock there would fire the caps restore in every daemon test.
     """
     monkeypatch.setenv("PTT_BACKEND", "pynput")
+    monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")
 
 
 def test_state_dir_linux(monkeypatch):
@@ -129,6 +132,100 @@ def test_valid_recording_is_transcribed(monkeypatch, tmp_path):
     d.stop_recording()
     assert done.wait(2)
     assert seen["wav"] == wav
+
+
+def _caps_daemon(monkeypatch, tmp_path, taps):
+    """A daemon with a fake model and an injector recording caps taps."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    monkeypatch.setattr(dictate, "notify", lambda *a: None)
+    d.model = type("M", (), {"transcribe": lambda _s, *a, **k:
+                             ([type("S", (), {"text": " x "})()], None)})()
+    d.injector = type("I", (), {"insert": lambda _s, t: None,
+                                "tap_caps_lock": lambda _s: taps.append(1)})()
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    return d, rec, wav
+
+
+def test_caps_lock_hold_restores_the_caps_state(monkeypatch, tmp_path):
+    """Caps Lock as the PTT key: a hold long enough to dictate also toggled
+    capitals on the press — the release must flip them back off."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d.start_recording()
+    d.recording = time.time() - 1.0  # held long enough to dictate
+    d.stop_recording()
+    assert taps == [1]
+    assert d._caps_restore_until > time.time()  # synthetic tap is suppressed
+
+
+def test_caps_lock_short_tap_keeps_its_caps_function(monkeypatch, tmp_path):
+    """A short tap is 'caps lock', not a dictation: the toggle stays."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d.start_recording()
+    d.stop_recording()  # ~0 s: below MIN_SECONDS, dropped as accidental
+    assert taps == []
+
+
+def test_caps_restore_press_is_not_a_new_dictation(monkeypatch, tmp_path):
+    """The synthetic restore tap must not look like a fresh PTT press."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d._caps_restore_until = time.time() + 1.0
+    d._caps_restore_pending = 1
+    d.start_recording()
+    assert rec.started == 0
+    assert d._caps_restore_pending == 0  # consumed by the synthetic tap
+
+
+def test_press_right_after_the_restore_tap_still_works(monkeypatch, tmp_path):
+    """Only the synthetic tap is swallowed: a real re-press within the
+    suppression window starts a dictation (and its own restore at release)."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d._caps_restore_until = time.time() + 1.0
+    d._caps_restore_pending = 1
+    d.start_recording()  # the synthetic tap: swallowed
+    assert rec.started == 0
+    d.start_recording()  # a real press right after: must work
+    assert rec.started == 1
+
+
+def test_caps_restore_also_fires_when_the_recording_is_bad(monkeypatch,
+                                                           tmp_path):
+    """The hold already flipped caps on the press — the restore must not
+    depend on the audio being usable."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d.start_recording()
+    d.recording = time.time() - 1.0
+    os.remove(wav)  # recorder produced nothing usable
+    d.stop_recording()
+    assert taps == [1]
+
+
+def test_no_caps_restore_for_other_ptt_keys(monkeypatch, tmp_path):
+    monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d.start_recording()
+    d.recording = time.time() - 1.0
+    d.stop_recording()
+    assert taps == []
+
+
+def test_pynput_tap_caps_lock_toggles_once(monkeypatch):
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"caps_lock": "<caps>"})
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.tap_caps_lock()
+    assert injector.controller.events == [("down", "<caps>"), ("up", "<caps>")]
 
 
 def test_write_state_publishes_json(monkeypatch, tmp_path):
@@ -1396,6 +1493,28 @@ def test_insert_with_chord_override_ydotool_1x(wayland):
     paste = [c for c in wayland["cmds"] if c[0] == "ydotool"]
     assert paste == [["ydotool", "key", f"{shift}:1", f"{ins}:1",
                       f"{ins}:0", f"{shift}:0"]]
+
+
+def test_tap_caps_lock_ydotool_1x(wayland):
+    """The caps restore tap goes through ydotool as one press+release; the
+    evdev listener ignores the ydotoold device, so it cannot retrigger."""
+    pytest.importorskip("evdev")
+    from evdev import ecodes
+    wayland["injector"].tap_caps_lock()
+    caps = ecodes.KEY_CAPSLOCK
+    taps = [c for c in wayland["cmds"] if c[0] == "ydotool"]
+    assert taps == [["ydotool", "key", f"{caps}:1", f"{caps}:0"]]
+
+
+def test_tap_caps_lock_ydotool_01x(wayland, monkeypatch):
+    """ydotool 0.1.x takes the key-name spelling — 'capslock' is the evdev
+    name its key table knows."""
+    pytest.importorskip("evdev")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    wayland["injector"].tap_caps_lock()
+    taps = [c for c in wayland["cmds"] if c[0] == "ydotool"]
+    assert taps == [["ydotool", "key", "capslock"]]
 
 
 def test_insert_uses_style_cached_by_check(wayland, monkeypatch):
