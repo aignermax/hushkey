@@ -125,6 +125,7 @@ key* (no config file or env var needed).
 | `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect. Easiest via the tray menu (**Language**: Auto/De/En/It/Es/Fr/Kn/Zh) — applies to the next dictation, no restart; an env var set inside a service unit still wins |
+| `WHISPER_ZH_PROMPT` | a Simplified-Chinese sentence | Initial prompt for Chinese dictation: whisper otherwise mixes Traditional characters into Mandarin output at random, and the prompt pins the script. Applied directly when `zh` is pinned; on auto-detect, dictations recognized as Chinese are decoded a second time with it (only those pay for the extra pass). `''` disables it; Traditional-Chinese users can set a Traditional prompt instead |
 | `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
 | `PTT_TYPE_DELAY_TERMINAL` | `0` | Windows + Linux/X11: delay used instead of `PTT_TYPE_DELAY` when the focused window is a terminal — consoles keep up with full-speed keystrokes, so dictation lands instantly there (Wayland pastes instead of typing, so no pacing applies) |
@@ -347,7 +348,10 @@ daemon probes both locations rather than trusting one.
   modifier, or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may
   not exist on laptop keyboards; try `f9` or `cmd_r`.)
 - Transcription quality of names/jargon can be improved by switching to a
-  larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`.
+  larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`;
+  `large-v3-turbo` (~same size as `medium`, much faster) is the middle option —
+  both are in the tray's **Model** menu. For Chinese, `large-v3-turbo` also
+  recognizes noticeably more accurately than `medium`.
 - First run performs an unauthenticated Hugging Face model download (rate
   limits apply); after that it's fully offline.
 

@@ -186,7 +186,8 @@ def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
     seen = {}
 
     class FakeModel:
-        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1,
+                       initial_prompt=None):
             seen["language"] = language
             return [type("Seg", (), {"text": " ciao "})()], None
 
@@ -195,6 +196,82 @@ def test_transcribe_passes_configured_lang_through(monkeypatch, tmp_path):
     monkeypatch.setattr(dictate, "configured_lang", lambda: "it")
     d._transcribe_and_insert(wav, 1.0)
     assert seen["language"] == "it"
+
+
+def test_transcribe_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
+    """Whisper's multilingual models mix Traditional characters into Mandarin
+    output at random. On auto-detect the first pass runs prompt-free (a
+    Chinese prompt would bias every language); only when it reports zh does a
+    second pass with the Simplified prompt follow."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "zh"})()
+            text = "繁體字" if len(calls) == 1 else "简体字"
+            return [type("Seg", (), {"text": text})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["简体字"]  # the second pass wins
+    assert len(calls) == 2
+    assert calls[0]["language"] is None and calls[0]["initial_prompt"] is None
+    assert calls[1]["language"] == "zh"
+    assert calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+
+
+def test_transcribe_applies_the_prompt_directly_when_zh_is_pinned(monkeypatch,
+                                                                  tmp_path):
+    """Pinned zh: the prompt goes into the single pass, no re-decode."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "zh"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, "zh")
+    assert len(calls) == 1
+    assert calls[0]["initial_prompt"] == dictate.ZH_PROMPT
+
+
+def test_transcribe_passes_no_prompt_for_other_languages(monkeypatch, tmp_path):
+    """German/English must never see the Chinese prompt — one pass, no bias."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "de"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, None)
+    assert len(calls) == 1
+    assert calls[0]["initial_prompt"] is None
+
+
+def test_transcribe_zh_prompt_can_be_disabled(monkeypatch, tmp_path):
+    """WHISPER_ZH_PROMPT='' (Traditional-Chinese users): no prompt, and no
+    re-decode for auto-detected Chinese either."""
+    monkeypatch.setattr(dictate, "ZH_PROMPT", "")
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            return [], type("Info", (), {"language": "zh"})()
+
+    d.model = FakeModel()
+    d._transcribe(wav, None)
+    d._transcribe(wav, "zh")
+    assert len(calls) == 2
+    assert all(c["initial_prompt"] is None for c in calls)
 
 
 def _write_wav(path, amplitude):
@@ -254,7 +331,8 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     d, rec, wav = make_daemon(monkeypatch, tmp_path)
 
     class FakeModel:
-        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1):
+        def transcribe(self, wav, language=None, vad_filter=False, beam_size=1,
+                       initial_prompt=None):
             return [type("Seg", (), {"text": " hallo "})()], None
 
     d.model = FakeModel()
@@ -404,6 +482,135 @@ def test_terminal_detection_x11_without_xlib(monkeypatch):
     monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
     monkeypatch.setitem(sys.modules, "Xlib", None)  # import raises ImportError
     assert dictate.foreground_window_is_terminal() is False
+
+
+class _FakeXWindow:
+    """A window in the X tree; parent=None mimics the root window, whose
+    query_tree().parent comes back as int 0 (X.NONE), not as a window."""
+
+    def __init__(self, wm_class=None, parent=None):
+        self.id = id(self)  # python-xlib Window objects have a unique .id
+        self._wm_class = wm_class
+        self._parent = parent
+
+    def get_wm_class(self):
+        return self._wm_class
+
+    def query_tree(self):
+        import types
+        return types.SimpleNamespace(
+            parent=self._parent if self._parent is not None else 0)
+
+
+def _fake_xlib_tree(monkeypatch, focus):
+    """Install a fake Xlib.display module whose input focus is `focus`.
+
+    Returns the fake Display so tests can assert it got closed.
+    """
+    import types
+    disp = types.SimpleNamespace(
+        get_input_focus=lambda: types.SimpleNamespace(focus=focus),
+        closed=0)
+    disp.close = lambda: setattr(disp, "closed", disp.closed + 1)
+    xlib = types.ModuleType("Xlib")
+    xlib.display = types.SimpleNamespace(Display=lambda: disp)
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.display", xlib.display)
+    return disp
+
+
+def _pin_x11(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+
+
+def test_terminal_detection_walks_up_from_a_focus_child(monkeypatch):
+    """GNOME hands the input focus to a *child* window without WM_CLASS
+    (seen live: LibreWolf's focus window has none; its parent carries
+    ('Navigator', 'librewolf')). Terminals must still be recognized,
+    otherwise the console silently falls back to paced typing."""
+    _pin_x11(monkeypatch)
+    terminal = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=terminal))
+    assert dictate.foreground_window_is_terminal() is True
+
+
+def test_terminal_detection_walks_up_to_a_non_terminal(monkeypatch):
+    _pin_x11(monkeypatch)
+    browser = _FakeXWindow(("Navigator", "librewolf"), parent=_FakeXWindow())
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=browser))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_stops_at_the_root_window(monkeypatch):
+    """No WM_CLASS anywhere up the chain: the walk must end at the root
+    window (whose parent is int 0), not chase ints forever."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(parent=_FakeXWindow()))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_matches_wm_class_case_insensitively(monkeypatch):
+    """Alacritty reports ('Alacritty', 'Alacritty') — capitalized in both
+    slots, so the comparison must fold case, not get lucky on one entry."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, _FakeXWindow(("Alacritty", "Alacritty")))
+    assert dictate.foreground_window_is_terminal() is True
+
+
+def test_terminal_detection_handles_focus_none_and_pointer_root(monkeypatch):
+    """X.NONE (0) and PointerRoot (1, focus-follows-mouse) come back as
+    plain ints — there is no window to judge by."""
+    _pin_x11(monkeypatch)
+    _fake_xlib_tree(monkeypatch, 0)
+    assert dictate.foreground_window_is_terminal() is False
+    _fake_xlib_tree(monkeypatch, 1)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_survives_a_self_parenting_window(monkeypatch):
+    """A window listing itself as parent must not spin the walk forever
+    (python-xlib hands out a fresh Window object per query, so the guard
+    compares ids, not object identity)."""
+    _pin_x11(monkeypatch)
+    win = _FakeXWindow()
+    win._parent = win
+    _fake_xlib_tree(monkeypatch, win)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_caps_a_bottomless_chain(monkeypatch):
+    """The walk gives up after 16 hops rather than chasing parents forever
+    — even if a terminal class hides beyond the cap."""
+    _pin_x11(monkeypatch)
+    win = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    for _ in range(40):
+        win = _FakeXWindow(parent=win)
+    _fake_xlib_tree(monkeypatch, win)
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_survives_a_window_dying_mid_walk(monkeypatch):
+    """A window destroyed between the focus query and the class read raises;
+    the heuristic must fail safe (paced typing), not crash the dictation."""
+    _pin_x11(monkeypatch)
+
+    class ZombieWindow(_FakeXWindow):
+        def get_wm_class(self):
+            raise RuntimeError("window destroyed")
+
+    terminal = _FakeXWindow(("gnome-terminal-server", "Gnome-terminal"))
+    _fake_xlib_tree(monkeypatch, ZombieWindow(parent=terminal))
+    assert dictate.foreground_window_is_terminal() is False
+
+
+def test_terminal_detection_closes_the_display(monkeypatch):
+    """One X connection per dictation — a leaked one would pile up."""
+    _pin_x11(monkeypatch)
+    disp = _fake_xlib_tree(monkeypatch, _FakeXWindow(("xterm", "XTerm")))
+    dictate.foreground_window_is_terminal()
+    assert disp.closed == 1
 
 
 def test_typing_maps_control_chars_to_keys(monkeypatch):

@@ -29,6 +29,14 @@ Config via environment:
                    evdev name like KEY_RIGHTCTRL)
   WHISPER_MODEL    model size (default: medium on GPU, small on CPU)
   WHISPER_LANG     language code (default: de; empty string = auto-detect)
+  WHISPER_ZH_PROMPT  initial prompt for Chinese dictation (default: a
+                   Simplified-Chinese sentence). Whisper's multilingual
+                   models otherwise mix Traditional characters into Mandarin
+                   output at random; the prompt pins the script. Applied
+                   directly when zh is pinned; on auto-detect, dictations
+                   recognized as Chinese are decoded a second time with it —
+                   only those pay for the extra pass. '' disables it;
+                   Traditional-Chinese users can set a Traditional prompt
   PTT_BACKEND      force 'pynput' (alias: 'x11') or 'wayland'
                    (default: from XDG_SESSION_TYPE)
   PTT_TYPE_DELAY   pynput backend only: seconds between typed characters
@@ -197,6 +205,11 @@ def _env_float(name, default):
 
 TYPE_DELAY = _env_float("PTT_TYPE_DELAY", 0.01)
 TERMINAL_TYPE_DELAY = _env_float("PTT_TYPE_DELAY_TERMINAL", 0.0)
+# Mandarin script fix: whisper's multilingual models mix Traditional
+# characters into Mandarin output at random; a Simplified initial_prompt
+# pins the script (see DictationDaemon._transcribe). '' disables it;
+# Traditional-Chinese users can set a Traditional prompt instead.
+ZH_PROMPT = os.environ.get("WHISPER_ZH_PROMPT", "以下是简体中文的句子。")
 MIN_SECONDS = 0.5  # shorter recordings count as accidental taps
 # Let the focused app fetch the selection before the clipboard is handed back.
 # Configurable because the right value depends on how fast that app reacts.
@@ -450,7 +463,13 @@ def _windows_foreground_is_terminal():
 
 
 def _x11_focus_is_terminal():
-    """WM_CLASS heuristic via python-xlib (already pulled in by pynput)."""
+    """WM_CLASS heuristic via python-xlib (already pulled in by pynput).
+
+    The input focus usually sits on a *child* of the real client window —
+    GTK/Qt hand focus to an internal widget window — and only the top-level
+    client window carries WM_CLASS. So walk up the ancestors to the first
+    window that has one and judge by that.
+    """
     try:
         from Xlib import display as xdisplay
     except ImportError:
@@ -458,11 +477,25 @@ def _x11_focus_is_terminal():
     d = None
     try:
         d = xdisplay.Display()
-        focus = d.get_input_focus().focus
-        if not hasattr(focus, "get_wm_class"):
-            return False
-        wm_class = focus.get_wm_class() or ()
-        return any(c.lower() in _TERMINAL_WM_CLASSES for c in wm_class if c)
+        win = d.get_input_focus().focus
+        for _ in range(16):  # way past focus child -> client window -> root
+            if not hasattr(win, "get_wm_class"):
+                # X.NONE / PointerRoot come back as plain ints, not windows.
+                # PointerRoot means focus-follows-mouse with no focused
+                # window: nothing to judge by, so pacing stays on.
+                return False
+            wm_class = win.get_wm_class() or ()
+            if wm_class:
+                return any(c.lower() in _TERMINAL_WM_CLASSES
+                           for c in wm_class if c)
+            parent = win.query_tree().parent
+            # The root window's parent comes back as int 0 (X.NONE), not a
+            # window; python-xlib hands out a fresh Window object per query,
+            # so guard the self-parenting case by id, not by identity.
+            if not hasattr(parent, "get_wm_class") or parent.id == win.id:
+                return False
+            win = parent
+        return False
     except Exception:
         return False
     finally:
@@ -1005,6 +1038,28 @@ class DictationDaemon:
             except Exception as exc:  # a tick must never kill the dictation
                 log(f"streaming tick failed: {exc}")
 
+    def _transcribe(self, source, lang):
+        """model.transcribe with the Chinese script fix applied.
+
+        Whisper's multilingual models mix Traditional characters into
+        Mandarin output at random; a Simplified initial_prompt pins the
+        script. A Chinese prompt would bias decoding for *every* language,
+        though, so it goes into the single pass only when zh is pinned — on
+        auto-detect it enters a second pass, and only when the first pass
+        just detected Chinese. Other languages never pay for it.
+        """
+        prompt = ZH_PROMPT or None
+        segments, info = self.model.transcribe(
+            source, language=lang, vad_filter=True, beam_size=5,
+            initial_prompt=prompt if lang == "zh" else None)
+        if (lang is None and prompt
+                and getattr(info, "language", None) == "zh"):
+            log("auto-detected zh — re-decoding with the Simplified prompt")
+            segments, _info = self.model.transcribe(
+                source, language="zh", vad_filter=True, beam_size=5,
+                initial_prompt=prompt)
+        return segments
+
     def _stream_tick(self, session):
         wav = self.recorder.snapshot_wav()
         if not wav:
@@ -1023,8 +1078,7 @@ class DictationDaemon:
         window = audio[int(session.committed_end * 16000):int(end * 16000)]
         # Runs outside busy_lock: the previous dictation's tail pass may be
         # transcribing concurrently — ctranslate2 is thread-safe per call.
-        segments, _info = self.model.transcribe(
-            window, language=configured_lang(), vad_filter=True, beam_size=5)
+        segments = self._transcribe(window, configured_lang())
         segs = [s for s in segments if s.text.strip()]
         if not segs:
             return
@@ -1088,11 +1142,9 @@ class DictationDaemon:
                     # here — only the tail since then is left.
                     audio = _decode_wav_16k(wav)
                     audio = audio[int(skip * 16000):]
-                    segments, _info = self.model.transcribe(
-                        audio, language=lang, vad_filter=True, beam_size=5)
+                    segments = self._transcribe(audio, lang)
                 else:
-                    segments, _info = self.model.transcribe(
-                        wav, language=lang, vad_filter=True, beam_size=5)
+                    segments = self._transcribe(wav, lang)
                 text = " ".join(s.text.strip() for s in segments).strip()
                 model = CURRENT_MODEL or "?"
                 log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
