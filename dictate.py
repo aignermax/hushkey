@@ -244,8 +244,21 @@ try:
     from pynput.keyboard import Key
     # control chars type as their keys, same as pynput's Controller.type()
     _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
+    # Modifier/special keys for the X11 clipboard fallback's paste chord.
+    # pynput's Key members differ per backend (xorg only aliases ctrl_l ->
+    # ctrl, darwin has no insert key at all), so resolve defensively; the
+    # chord path only ever runs on X11 anyway.
+    _CHORD_KEYS = {name: key for name, key in (
+        ("ctrl", getattr(Key, "ctrl_l", None)),
+        ("control", getattr(Key, "ctrl_l", None)),
+        ("shift", getattr(Key, "shift_l", None)),
+        ("alt", getattr(Key, "alt_l", None)),
+        ("super", getattr(Key, "cmd_l", None)),
+        ("insert", getattr(Key, "insert", None)),
+    ) if key is not None}
 except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
     _CONTROL_KEYS = {}
+    _CHORD_KEYS = {}
 
 
 def log(msg):
@@ -700,20 +713,20 @@ class PynputInjector:
             self._borrowable = any(not any(row) for row in mapping)
         return self._borrowable
 
-    # pynput key names for the paste chords (see WaylandInjector._build_chord
-    # for the ydotool spelling of the same chords)
-    _CHORD_KEYS = {"ctrl": "ctrl_l", "control": "ctrl_l", "shift": "shift_l",
-                   "alt": "alt_l", "super": "cmd_l", "insert": "insert"}
-
     def _chord_keys(self, chord):
-        """'ctrl+shift+v' -> pynput keys, press order."""
+        """'ctrl+shift+v' -> keys for controller.press, press order.
+
+        Chord names resolve through the module-level _CHORD_KEYS (real
+        pynput Keys where available); anything else — 'v', and modifier
+        names the backend does not know — passes through as-is, which for
+        single characters is exactly what controller.press expects.
+        """
         keys = []
         for part in chord.lower().split("+"):
             part = part.strip()
             if not part:
                 continue
-            name = self._CHORD_KEYS.get(part)
-            keys.append(getattr(Key, name) if name else part)
+            keys.append(_CHORD_KEYS.get(part, part))
         return keys
 
     def _paste_text(self, text, chord=None):

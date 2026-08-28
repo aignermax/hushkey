@@ -674,6 +674,7 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     injector.controller = FakeMappingController(
         mapped={ord("a"), ord(" ")}, has_empty_row=False)
     owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好 a")
@@ -682,7 +683,7 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     assert owned == [("你好 a".encode(), dictate.CLIPBOARD_SETTLE + 2.0),
                      (b"OLD", None)]
     keys = [k for event, k in injector.controller.events if event == "down"]
-    assert keys == [dictate.Key.ctrl_l, "v"]  # chord only, no per-char typing
+    assert keys == ["<ctrl>", "v"]  # chord only, no per-char typing
 
 
 def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
@@ -691,11 +692,13 @@ def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
     injector.controller = FakeMappingController(mapped=set(),
                                                 has_empty_row=False)
     owned = _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS",
+                        {"ctrl": "<ctrl>", "shift": "<shift>"})
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: True)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好")
     keys = [k for event, k in injector.controller.events if event == "down"]
-    assert keys == [dictate.Key.ctrl_l, dictate.Key.shift_l, "v"]
+    assert keys == ["<ctrl>", "<shift>", "v"]
     # nothing to restore: the transcript stays pasteable
     assert owned == [("你好".encode(), None)]
 
@@ -708,10 +711,12 @@ def test_paste_honours_the_streaming_chord_override(monkeypatch):
     injector.controller = FakeMappingController(mapped=set(),
                                                 has_empty_row=False)
     _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS",
+                        {"shift": "<shift>", "insert": "<insert>"})
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好", chord="shift+insert")
     keys = [k for event, k in injector.controller.events if event == "down"]
-    assert keys == [dictate.Key.shift_l, dictate.Key.insert]
+    assert keys == ["<shift>", "<insert>"]
 
 
 def test_typeable_text_is_typed_not_pasted(monkeypatch):
