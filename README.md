@@ -193,11 +193,7 @@ Notes:
   mid-hold blocks cannot reach them with AltGr held — the daemon leaves the
   complete transcript on the clipboard after such a dictation, so a single
   manual `Ctrl+Shift+V` recovers everything. If you dictate into terminals
-  a lot, use Right Ctrl, F9 or Caps Lock instead: those stream everywhere
-  (Caps Lock needs the xkb option `caps:none` — on GNOME:
-  `gsettings set org.gnome.desktop.input-sources xkb-options "['caps:none']"`
-  — which disables its toggle at the desktop while the daemon keeps seeing
-  the key).
+  a lot, use Right Ctrl, F9 or Caps Lock instead: those stream everywhere.
 - On X11 (pynput typing) a modifier as the PTT key is not supported for
   streaming — use a plain key (F9, Menu) there.
 - On Wayland every block is a full clipboard save → paste → restore cycle, so
@@ -350,9 +346,12 @@ daemon probes both locations rather than trusting one.
   taking the key exclusively would mean grabbing the whole keyboard. With the
   default `ctrl_r` that is unnoticeable (a lone modifier does nothing), but a
   key that *acts* on its own will do both jobs: `f9` still triggers whatever
-  `f9` does in the focused app, and `caps_lock` still toggles capitals. Prefer a
-  modifier, or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may
-  not exist on laptop keyboards; try `f9` or `cmd_r`.)
+  `f9` does in the focused app. `caps_lock` is the deliberate exception: a
+  short tap still toggles capitals (that is the caps function), a hold
+  dictates, and the daemon flips the caps state back on release, so dictation
+  never leaves capitals on. Prefer a modifier, or a key the apps you dictate
+  into ignore. (On macOS, `ctrl_r` may not exist on laptop keyboards; try `f9`
+  or `cmd_r`.)
 - Transcription quality of names/jargon can be improved by switching to a
   larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`;
   `large-v3-turbo` (~same size as `medium`, much faster) is the middle option —

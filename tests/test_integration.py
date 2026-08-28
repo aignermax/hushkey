@@ -31,9 +31,11 @@ def isolated_state(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def pinned_setup(monkeypatch):
-    """Deterministic pynput backend and pacing, regardless of the dev box."""
+    """Deterministic pynput backend, key and pacing, regardless of the dev box
+    (PTT_KEY comes from the developer's real tray config at import)."""
     monkeypatch.setenv("PTT_BACKEND", "pynput")
     monkeypatch.delenv("WHISPER_LANG", raising=False)
+    monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0.01)
     monkeypatch.setattr(dictate, "TERMINAL_TYPE_DELAY", 0.0)
 
@@ -215,6 +217,24 @@ def test_dictation_cycle_passes_the_language_through(monkeypatch, tmp_path,
     # the Simplified-script prompt goes into the pass only when zh is pinned
     assert d.model.calls[0]["initial_prompt"] == (
         dictate.ZH_PROMPT if configured == "zh" else None)
+
+
+def test_dictation_cycle_on_caps_lock_restores_the_caps_state(monkeypatch,
+                                                              tmp_path):
+    """Caps Lock as the PTT key: a dictation-length hold flips capitals on
+    the press, so the release must flip them back — once, without the
+    synthetic tap looking like a new dictation (short taps keep the normal
+    caps function, tested in test_dictate.py)."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"caps_lock": "<caps>"})
+    focus = FakeXWindow(parent=FakeXWindow(("Navigator", "librewolf")))
+    d, rec, idle, _ = make_daemon(monkeypatch, tmp_path, focus)
+    dictate_one_cycle(d, idle)
+    assert rec.started == 1  # the restore tap did not start a new recording
+    events = d.injector.controller.events
+    assert events[0] == ("down", "<caps>") and events[1] == ("up", "<caps>")
+    assert "".join(ch for ev, ch in events[2:]
+                   if ev == "down") == "hallo welt "
 
 
 def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
