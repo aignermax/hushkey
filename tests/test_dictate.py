@@ -626,6 +626,139 @@ def test_typing_maps_control_chars_to_keys(monkeypatch):
                                           ("down", "<tab>"), ("up", "<tab>")]
 
 
+class FakeMappingController(FakeController):
+    """A pynput Controller stand-in that also models what the typeability
+    introspection in PynputInjector reads: the keyboard mapping, the already
+    borrowed keysyms, and whether the keymap still has an unused keycode row
+    (GNOME has none — every row carries XF86 keysyms)."""
+
+    def __init__(self, mapped=(), borrowed=(), has_empty_row=True, skip=()):
+        super().__init__()
+        import types
+        self.keyboard_mapping = {k: (1, 0) for k in mapped}
+        self._borrows = {k: (1, 0, 0) for k in borrowed}
+        rows = [[1, 0, 0, 0, 0, 0, 0] for _ in range(247)]
+        if has_empty_row:
+            rows[-1] = [0] * 7
+        self._display = types.SimpleNamespace(
+            get_keyboard_mapping=lambda first, count: rows)
+        self.skip = skip  # chars whose press/release raises InvalidKeyException
+
+    def press(self, ch):
+        if ch in self.skip:
+            raise Exception(f"InvalidKeyException: {ch!r}")
+        super().press(ch)
+
+    def release(self, ch):
+        if ch in self.skip:
+            raise Exception(f"InvalidKeyException: {ch!r}")
+        super().release(ch)
+
+
+def _pin_clipboard(monkeypatch, previous=b"OLD"):
+    """Fake the X11 clipboard helpers; returns the list of owned payloads."""
+    owned = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: previous)
+    monkeypatch.setattr(dictate, "_x11_clipboard_own",
+                        lambda data, serve_seconds: owned.append(data))
+    return owned
+
+
+def test_untypeable_text_is_pasted_not_typed(monkeypatch):
+    """GNOME's keymap has no unused keycode row, so CJK cannot be typed at
+    all (pynput's borrow trick has nowhere to go) — the text must go in
+    through the clipboard plus one paste chord."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(
+        mapped={ord("a"), ord(" ")}, has_empty_row=False)
+    owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("你好 a")
+    assert owned == ["你好 a".encode(), b"OLD"]  # transcript, then restore
+    keys = [k for event, k in injector.controller.events if event == "down"]
+    assert keys == [dictate.Key.ctrl_l, "v"]  # chord only, no per-char typing
+
+
+def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set(),
+                                                has_empty_row=False)
+    owned = _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: True)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("你好")
+    keys = [k for event, k in injector.controller.events if event == "down"]
+    assert keys == [dictate.Key.ctrl_l, dictate.Key.shift_l, "v"]
+    assert owned == ["你好".encode()]  # nothing to restore
+
+
+def test_typeable_text_is_typed_not_pasted(monkeypatch):
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(
+        mapped={ord(c) for c in "abc"}, has_empty_row=False)
+    owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("abc")
+    assert owned == []
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == list("abc")
+
+
+def test_cjk_is_typed_natively_when_a_keycode_row_is_free(monkeypatch):
+    """Servers with an unused row let pynput borrow it — no clipboard detour
+    and no clipboard clobbering there."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set(), has_empty_row=True)
+    owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("你a")
+    assert owned == []
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["你", "a"]
+
+
+def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
+                                                            tmp_path):
+    """If the clipboard cannot be set up, unmappable characters are skipped
+    (and logged) instead of aborting the whole dictation."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(
+        mapped={ord("a")}, has_empty_row=False, skip={"你"})
+
+    def broken_read():
+        raise OSError("no X connection")
+
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", broken_read)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("你a")
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["a"]
+    log_text = (tmp_path / "dictate.log").read_text(encoding="utf-8")
+    assert "skipped untypeable character '你'" in log_text
+
+
+def test_clipboard_fallback_never_triggers_off_x11(monkeypatch):
+    """Windows/macOS type Unicode natively — no clipboard detour there."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    injector = dictate.PynputInjector()
+    injector.controller = FakeController()  # no mapping introspection at all
+    owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("你好")
+    assert owned == []
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["你", "好"]
+
+
 def test_daemon_inserts_via_the_selected_injector(monkeypatch, tmp_path):
     """The daemon must delegate insertion, not type directly.
 

@@ -65,10 +65,26 @@ class FakeModel:
 
 
 class FakeController:
-    """Stands in for pynput's Controller: what the focused window receives."""
+    """Stands in for pynput's Controller: what the focused window receives.
 
-    def __init__(self):
+    Also models what PynputInjector's typeability introspection reads; by
+    default every character is typeable (a keymap with free rows).
+    """
+
+    class _AllKeysyms(dict):
+        def __contains__(self, k):
+            return True
+
+    def __init__(self, keyboard_mapping=None, has_empty_row=True):
         self.events = []
+        self.keyboard_mapping = (self._AllKeysyms() if keyboard_mapping is None
+                                 else {k: (1, 0) for k in keyboard_mapping})
+        self._borrows = {}
+        rows = [[1, 0, 0, 0, 0, 0, 0] for _ in range(247)]
+        if has_empty_row:
+            rows[-1] = [0] * 7
+        self._display = types.SimpleNamespace(
+            get_keyboard_mapping=lambda first, count: rows)
 
     def press(self, ch):
         self.events.append(("down", ch))
@@ -227,3 +243,31 @@ def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     assert d.model.calls[1]["language"] == "zh"
     assert d.model.calls[1]["initial_prompt"] == dictate.ZH_PROMPT
     assert typed_text(d) == "简体字 "
+
+
+def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
+    """Regression for the 'one character, then dictation error' bug: on a
+    keymap without a single unused keycode row (GNOME fills them all with
+    XF86 keysyms) pynput cannot type CJK at all — press() silently swallows
+    InvalidKeyException and release() raises it, killing the insert. The
+    dictation must go in through the clipboard paste fallback instead."""
+    class ZhModel:
+        def transcribe(self, wav, **kwargs):
+            seg = types.SimpleNamespace(text="你好，世界", start=0.0, end=1.0)
+            return [seg], types.SimpleNamespace(language="zh")
+
+    focus = FakeXWindow(parent=FakeXWindow(("Navigator", "librewolf")))
+    d, rec, idle, _ = make_daemon(monkeypatch, tmp_path, focus, model=ZhModel())
+    # a keymap with no free rows and nothing mapped: nothing is typeable
+    d.injector.controller = FakeController(keyboard_mapping=set(),
+                                           has_empty_row=False)
+    owned = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: b"OLD")
+    monkeypatch.setattr(dictate, "_x11_clipboard_own",
+                        lambda data, serve_seconds: owned.append(data))
+    dictate_one_cycle(d, idle)
+    # the transcript was owned for the paste, then the old clipboard restored
+    assert owned == ["你好，世界 ".encode(), b"OLD"]
+    # and the chord went to the window instead of per-character typing
+    keys = [k for event, k in d.injector.controller.events if event == "down"]
+    assert keys == [dictate.Key.ctrl_l, "v"]
