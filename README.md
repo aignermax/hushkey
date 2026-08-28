@@ -348,7 +348,10 @@ daemon probes both locations rather than trusting one.
   modifier, or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may
   not exist on laptop keyboards; try `f9` or `cmd_r`.)
 - Transcription quality of names/jargon can be improved by switching to a
-  larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`.
+  larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`;
+  `large-v3-turbo` (~same size as `medium`, much faster) is the middle option —
+  both are in the tray's **Model** menu. For Chinese, `large-v3-turbo` also
+  recognizes noticeably more accurately than `medium`.
 - First run performs an unauthenticated Hugging Face model download (rate
   limits apply); after that it's fully offline.
 

@@ -59,6 +59,7 @@ MODELS = [
     ("base", "~150 MB"),
     ("small", "~500 MB"),
     ("medium", "~1.5 GB"),
+    ("large-v3-turbo", "~1.6 GB"),
     ("large-v3", "~3 GB"),
 ]
 
