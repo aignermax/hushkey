@@ -175,8 +175,38 @@ def test_caps_restore_press_is_not_a_new_dictation(monkeypatch, tmp_path):
     taps = []
     d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
     d._caps_restore_until = time.time() + 1.0
+    d._caps_restore_pending = 1
     d.start_recording()
     assert rec.started == 0
+    assert d._caps_restore_pending == 0  # consumed by the synthetic tap
+
+
+def test_press_right_after_the_restore_tap_still_works(monkeypatch, tmp_path):
+    """Only the synthetic tap is swallowed: a real re-press within the
+    suppression window starts a dictation (and its own restore at release)."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d._caps_restore_until = time.time() + 1.0
+    d._caps_restore_pending = 1
+    d.start_recording()  # the synthetic tap: swallowed
+    assert rec.started == 0
+    d.start_recording()  # a real press right after: must work
+    assert rec.started == 1
+
+
+def test_caps_restore_also_fires_when_the_recording_is_bad(monkeypatch,
+                                                           tmp_path):
+    """The hold already flipped caps on the press — the restore must not
+    depend on the audio being usable."""
+    monkeypatch.setattr(dictate, "PTT_KEY", "caps_lock")
+    taps = []
+    d, rec, wav = _caps_daemon(monkeypatch, tmp_path, taps)
+    d.start_recording()
+    d.recording = time.time() - 1.0
+    os.remove(wav)  # recorder produced nothing usable
+    d.stop_recording()
+    assert taps == [1]
 
 
 def test_no_caps_restore_for_other_ptt_keys(monkeypatch, tmp_path):
@@ -1474,6 +1504,17 @@ def test_tap_caps_lock_ydotool_1x(wayland):
     caps = ecodes.KEY_CAPSLOCK
     taps = [c for c in wayland["cmds"] if c[0] == "ydotool"]
     assert taps == [["ydotool", "key", f"{caps}:1", f"{caps}:0"]]
+
+
+def test_tap_caps_lock_ydotool_01x(wayland, monkeypatch):
+    """ydotool 0.1.x takes the key-name spelling — 'capslock' is the evdev
+    name its key table knows."""
+    pytest.importorskip("evdev")
+    monkeypatch.setattr(dictate.WaylandInjector, "_ydotool_key_style",
+                        staticmethod(lambda: "name"))
+    wayland["injector"].tap_caps_lock()
+    taps = [c for c in wayland["cmds"] if c[0] == "ydotool"]
+    assert taps == [["ydotool", "key", "capslock"]]
 
 
 def test_insert_uses_style_cached_by_check(wayland, monkeypatch):

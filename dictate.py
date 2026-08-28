@@ -246,10 +246,10 @@ try:
     from pynput.keyboard import Key
     # control chars type as their keys, same as pynput's Controller.type()
     _CONTROL_KEYS = {"\n": Key.enter, "\r": Key.enter, "\t": Key.tab}
-    # Modifier/special keys for the X11 clipboard fallback's paste chord.
-    # pynput's Key members differ per backend (xorg only aliases ctrl_l ->
-    # ctrl, darwin has no insert key at all), so resolve defensively; the
-    # chord path only ever runs on X11 anyway.
+    # Modifier/special keys for the X11 clipboard fallback's paste chord and
+    # for the caps lock restore tap. pynput's Key members differ per backend
+    # (xorg only aliases ctrl_l -> ctrl, darwin has no insert key at all),
+    # so resolve defensively.
     _CHORD_KEYS = {name: key for name, key in (
         ("ctrl", getattr(Key, "ctrl_l", None)),
         ("control", getattr(Key, "ctrl_l", None)),
@@ -1248,7 +1248,8 @@ class DictationDaemon:
         self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
         self._stream = None  # _StreamSession while a streaming dictation runs
-        self._caps_restore_until = 0.0  # suppress our own caps-restore tap
+        self._caps_restore_until = 0.0  # time backstop for the tap suppression
+        self._caps_restore_pending = 0  # synthetic caps taps still in flight
         self.listener, self.injector = make_backends(PTT_KEY)
 
     def load_model(self):
@@ -1271,8 +1272,12 @@ class DictationDaemon:
     def start_recording(self):
         if self.recording is not None:
             return  # ignore key auto-repeat
-        if time.time() < self._caps_restore_until:
-            return  # our own caps-state restore tap, not a dictation
+        if (self._caps_restore_pending
+                and time.time() < self._caps_restore_until):
+            # exactly one press per restore: the synthetic caps tap. A real
+            # re-press right after must still work — and must not be eaten.
+            self._caps_restore_pending -= 1
+            return
         if self.recorder is None:
             notify("dictation error",
                    "no recorder (install pipewire/pw-record or sounddevice)")
@@ -1305,6 +1310,21 @@ class DictationDaemon:
             # insert ordered before the tail pass below.
             session.stop.set()
             session.thread.join(timeout=30)
+        if duration >= MIN_SECONDS and PTT_KEY == "caps_lock":
+            # A hold long enough to dictate also toggled caps lock on the
+            # press — flip it back, or every dictation leaves capitals on.
+            # Duration alone decides: even a recording that fails below has
+            # already flipped the state. A short tap never reaches here and
+            # keeps its caps meaning. The synthetic tap looks like a fresh
+            # PTT press to the pynput listener, so swallow exactly that one
+            # (the evdev listener ignores the ydotoold device anyway).
+            if backend_name() != "wayland":
+                self._caps_restore_until = time.time() + 1.0
+                self._caps_restore_pending = 1
+            try:
+                self.injector.tap_caps_lock()
+            except Exception as exc:
+                log(f"caps lock restore failed: {exc}")
         try:
             wav = self.recorder.stop()
         except Exception as exc:
@@ -1312,24 +1332,13 @@ class DictationDaemon:
             notify("dictation error", str(exc)[:80])
             write_state("idle")
             return
-        if duration < MIN_SECONDS or not wav or os.path.getsize(wav) < 1000:
+        if duration < MIN_SECONDS or not wav or not os.path.isfile(wav) \
+                or os.path.getsize(wav) < 1000:
             log(f"ignored short/empty recording ({duration:.2f}s)")
             if wav and os.path.exists(wav):
                 os.remove(wav)
             write_state("idle")
             return
-        if PTT_KEY == "caps_lock":
-            # A hold long enough to dictate also toggled caps lock on the
-            # press — flip it back, or every dictation leaves capitals on.
-            # A short tap never reaches here and keeps its caps meaning.
-            # The synthetic tap looks like a fresh PTT press to the pynput
-            # listener, so suppress it for a moment (the evdev listener
-            # ignores the ydotoold device anyway).
-            self._caps_restore_until = time.time() + 1.0
-            try:
-                self.injector.tap_caps_lock()
-            except Exception as exc:
-                log(f"caps lock restore failed: {exc}")
         threading.Thread(target=self._transcribe_and_insert,
                          args=(wav, duration, session), daemon=True).start()
 

@@ -195,7 +195,10 @@ Notes:
   manual `Ctrl+Shift+V` recovers everything. If you dictate into terminals
   a lot, use Right Ctrl, F9 or Caps Lock instead: those stream everywhere.
 - On X11 (pynput typing) a modifier as the PTT key is not supported for
-  streaming — use a plain key (F9, Menu) there.
+  streaming — use a plain key (F9, Menu) there. With Caps Lock as the PTT
+  key, mid-hold blocks land in ALL CAPS there too: capitals are engaged for
+  the whole hold and only restored on release (the tail block is fine).
+  Wayland pastes blocks and is unaffected.
 - On Wayland every block is a full clipboard save → paste → restore cycle, so
   a clipboard manager records each block and the clipboard flickers briefly
   mid-hold.
@@ -349,9 +352,12 @@ daemon probes both locations rather than trusting one.
   `f9` does in the focused app. `caps_lock` is the deliberate exception: a
   short tap still toggles capitals (that is the caps function), a hold
   dictates, and the daemon flips the caps state back on release, so dictation
-  never leaves capitals on. Prefer a modifier, or a key the apps you dictate
-  into ignore. (On macOS, `ctrl_r` may not exist on laptop keyboards; try `f9`
-  or `cmd_r`.)
+  never leaves capitals on. Custom xkb remappings of the key (e.g.
+  `caps:escape`) are replayed by that restore tap — make the key dead for the
+  desktop instead (`gsettings set org.gnome.desktop.input-sources
+  xkb-options "['caps:none']"`); the daemon still sees it. Prefer a modifier,
+  or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may not
+  exist on laptop keyboards; try `f9` or `cmd_r`.)
 - Transcription quality of names/jargon can be improved by switching to a
   larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`;
   `large-v3-turbo` (~same size as `medium`, much faster) is the middle option —
