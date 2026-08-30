@@ -277,6 +277,15 @@ except ImportError:  # headless Linux: pynput needs X11; run() fails there anywa
     _CONTROL_KEYS = {}
     _CHORD_KEYS = {}
 
+try:
+    # pynput's char -> legacy keysym tables (Cyrillic_de, EuroSign, ...):
+    # xkb keymaps carry the legacy keysyms, so characters with one are
+    # typeable natively — see PynputInjector._typeable
+    from pynput._util.xorg_keysyms import (
+        CHARS as _XORG_CHARS, SYMBOLS as _XORG_SYMBOLS)
+except ImportError:  # no python-xlib (Windows/macOS): only consulted on X11
+    _XORG_CHARS, _XORG_SYMBOLS = {}, {}
+
 
 def log(msg):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -659,15 +668,15 @@ class PynputInjector:
     keystrokes fired at full speed.
 
     X11 only: typing a character that is not already in the keymap means
-    remapping a keycode at the server and immediately sending keystrokes for
-    it — and that races the client's keymap refresh (MappingNotify): the
-    client translates with the previous mapping and every second syllable
-    comes out as a copy of the first (measured live: 名字→名名 typed into a
-    Tk widget, while the clipboard path delivered the identical text
-    byte-exactly). pynput offers no settle between remap and keystroke, so
-    borrowing is unusable for us. Text with unmapped characters goes in
-    through the clipboard plus a synthetic paste chord instead, like the
-    Wayland backend.
+    remapping a keycode at the server — and a borrowed slot does not
+    round-trip through the client's XLookupString: it resolves the
+    keystroke to the neighbouring slot (or, mid-remap, to the previous
+    mapping), so every second syllable comes out as a copy of the first
+    (measured live: 名字→名名 typed into a Tk widget, while the clipboard
+    path delivered the identical text byte-exactly). Unicode-remap-space
+    keysyms (0x01000000+) only ever exist via such borrowing, so they are
+    never typed — text containing them goes in through the clipboard plus a
+    synthetic paste chord instead, like the Wayland backend.
     """
 
     def __init__(self):
@@ -690,16 +699,58 @@ class PynputInjector:
         if delay and TERMINAL_TYPE_DELAY < delay and foreground_window_is_terminal():
             delay = TERMINAL_TYPE_DELAY
         for ch in text:
+            if not self._typeable(ch):
+                # Never hand unmapped characters to pynput: it would
+                # borrow-remap a keycode and race the client's keymap
+                # refresh — the bug this class exists to avoid.
+                log(f"skipped untypeable character {ch!r}: not in the keymap")
+                continue
             key = _CONTROL_KEYS.get(ch, ch)
             try:
                 self.controller.press(key)
                 self.controller.release(key)
             except Exception as exc:
-                # e.g. pynput's InvalidKeyException: one unmappable character
-                # must not abort the rest of the dictation
-                log(f"skipped untypeable character {ch!r}: {exc}")
+                # one failing character must not abort the rest of the
+                # dictation
+                log(f"skipped character {ch!r}: {exc}")
             if delay:
                 time.sleep(delay)
+
+    def _typeable(self, ch):
+        """X11: True if the character can be typed without any remapping;
+        non-X11 types Unicode natively.
+
+        Mirrors pynput's own resolution: characters with a legacy keysym
+        (Cyrillic, Greek, EuroSign, ...) are looked up by that keysym, since
+        xkb keymaps carry those. Keysyms in the Unicode remap space
+        (0x01000000+) are never trusted, even when present in the keymap:
+        they only get there by runtime borrowing, and a borrowed slot does
+        not round-trip through the client's XLookupString — the client
+        resolves the keystroke to the *neighbouring* slot, so every second
+        syllable comes out as a copy of the first (measured live).
+        """
+        if not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
+                and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
+            return True
+        if ch in _CONTROL_KEYS:
+            return True
+        try:
+            symbol = _XORG_CHARS.get(ch)
+            if symbol is not None and symbol in _XORG_SYMBOLS:
+                keysym = _XORG_SYMBOLS[symbol][0]
+            else:
+                ordinal = ord(ch)
+                keysym = ordinal if ordinal < 0x100 else ordinal | 0x01000000
+            if keysym >= 0x01000000:
+                return False
+            # keyboard_mapping/_borrows are private pynput attrs; if a future
+            # pynput renames them the AttributeError degrades to typeable,
+            # which keeps plain typing working (mapped characters are the
+            # common case)
+            return (keysym in self.controller.keyboard_mapping
+                    or keysym in self.controller._borrows)
+        except Exception:
+            return True
 
     def _needs_clipboard(self, text):
         """X11 with a character that is not in the keymap → paste, don't
@@ -708,22 +759,7 @@ class PynputInjector:
         if not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
                 and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
             return False
-        try:
-            # keyboard_mapping/_borrows are private pynput attrs; if a future
-            # pynput renames them the AttributeError degrades to the typed
-            # path, which is the safe side
-            mapping = self.controller.keyboard_mapping
-            borrows = self.controller._borrows
-            for ch in text:
-                if ch in _CONTROL_KEYS:
-                    continue
-                ordinal = ord(ch)
-                keysym = ordinal if ordinal < 0x100 else ordinal | 0x01000000
-                if keysym not in mapping and keysym not in borrows:
-                    return True
-        except Exception:
-            return False  # introspection failed: keep the typed path
-        return False
+        return any(not self._typeable(ch) for ch in text)
 
     def _chord_keys(self, chord):
         """'ctrl+shift+v' -> keys for controller.press, press order.

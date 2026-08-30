@@ -818,20 +818,13 @@ def test_typing_maps_control_chars_to_keys(monkeypatch):
 
 class FakeMappingController(FakeController):
     """A pynput Controller stand-in that also models what the typeability
-    introspection in PynputInjector reads: the keyboard mapping, the already
-    borrowed keysyms, and whether the keymap still has an unused keycode row
-    (GNOME has none — every row carries XF86 keysyms)."""
+    introspection in PynputInjector reads: the keyboard mapping and the
+    already borrowed keysyms."""
 
-    def __init__(self, mapped=(), borrowed=(), has_empty_row=True, skip=()):
+    def __init__(self, mapped=(), borrowed=(), skip=()):
         super().__init__()
-        import types
         self.keyboard_mapping = {k: (1, 0) for k in mapped}
         self._borrows = {k: (1, 0, 0) for k in borrowed}
-        rows = [[1, 0, 0, 0, 0, 0, 0] for _ in range(247)]
-        if has_empty_row:
-            rows[-1] = [0] * 7
-        self._display = types.SimpleNamespace(
-            get_keyboard_mapping=lambda first, count: rows)
         self.skip = skip  # chars whose press/release raises InvalidKeyException
 
     def press(self, ch):
@@ -861,8 +854,7 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     through the clipboard plus one paste chord."""
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
-    injector.controller = FakeMappingController(
-        mapped={ord("a"), ord(" ")}, has_empty_row=False)
+    injector.controller = FakeMappingController(mapped={ord("a"), ord(" ")})
     owned = _pin_clipboard(monkeypatch)
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
@@ -879,8 +871,7 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
 def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
-    injector.controller = FakeMappingController(mapped=set(),
-                                                has_empty_row=False)
+    injector.controller = FakeMappingController(mapped=set())
     owned = _pin_clipboard(monkeypatch, previous=None)
     monkeypatch.setattr(dictate, "_CHORD_KEYS",
                         {"ctrl": "<ctrl>", "shift": "<shift>"})
@@ -898,8 +889,7 @@ def test_paste_honours_the_streaming_chord_override(monkeypatch):
     remaps letter chords); the clipboard path must use it, not ctrl+v."""
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
-    injector.controller = FakeMappingController(mapped=set(),
-                                                has_empty_row=False)
+    injector.controller = FakeMappingController(mapped=set())
     _pin_clipboard(monkeypatch, previous=None)
     monkeypatch.setattr(dictate, "_CHORD_KEYS",
                         {"shift": "<shift>", "insert": "<insert>"})
@@ -913,7 +903,7 @@ def test_typeable_text_is_typed_not_pasted(monkeypatch):
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
     injector.controller = FakeMappingController(
-        mapped={ord(c) for c in "abc"}, has_empty_row=False)
+        mapped={ord(c) for c in "abc"})
     owned = _pin_clipboard(monkeypatch)
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
@@ -930,7 +920,7 @@ def test_cjk_uses_the_clipboard_even_when_a_keycode_row_is_free(monkeypatch):
     characters must always go through the clipboard."""
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
-    injector.controller = FakeMappingController(mapped=set(), has_empty_row=True)
+    injector.controller = FakeMappingController(mapped=set())
     owned = _pin_clipboard(monkeypatch, previous=None)
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
@@ -942,14 +932,48 @@ def test_cjk_uses_the_clipboard_even_when_a_keycode_row_is_free(monkeypatch):
     assert keys == ["<ctrl>", "v"]
 
 
+def test_legacy_keysym_characters_are_typed_natively(monkeypatch):
+    """Characters with a legacy keysym (Cyrillic_de, EuroSign, ...) are in
+    xkb keymaps under *that* keysym, so pynput types them natively without
+    any remapping — they must not take the clipboard detour."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped={0x6c4, 0x20ac})
+    monkeypatch.setattr(dictate, "_XORG_CHARS",
+                        {"д": "Cyrillic_de", "€": "EuroSign"})
+    monkeypatch.setattr(dictate, "_XORG_SYMBOLS",
+                        {"Cyrillic_de": (0x6c4,), "EuroSign": (0x20ac,)})
+    owned = _pin_clipboard(monkeypatch)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("д€")
+    assert owned == []  # typed natively, clipboard untouched
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["д", "€"]
+
+
+def test_legacy_keysym_character_unmapped_uses_the_clipboard(monkeypatch):
+    """The legacy keysym only helps when it is actually in the keymap."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set())
+    monkeypatch.setattr(dictate, "_XORG_CHARS", {"€": "EuroSign"})
+    monkeypatch.setattr(dictate, "_XORG_SYMBOLS", {"EuroSign": (0x20ac,)})
+    owned = _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    injector.insert("€")
+    assert owned == [("€".encode(), None)]
+
+
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
                                                             tmp_path):
     """If the clipboard cannot be set up, unmappable characters are skipped
     (and logged) instead of aborting the whole dictation."""
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
-    injector.controller = FakeMappingController(
-        mapped={ord("a")}, has_empty_row=False, skip={"你"})
+    injector.controller = FakeMappingController(mapped={ord("a")})
 
     def broken_read():
         raise OSError("no X connection")
