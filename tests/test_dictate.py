@@ -981,6 +981,7 @@ def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("名")
     # only the paste chord, no per-character typing
     assert [k for event, k in injector.controller.events
