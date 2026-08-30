@@ -299,7 +299,8 @@ def test_transcribe_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     """Whisper's multilingual models mix Traditional characters into Mandarin
     output at random. On auto-detect the first pass runs prompt-free (a
     Chinese prompt would bias every language); only when it reports zh does a
-    second pass with the Simplified prompt follow."""
+    second pass with the Simplified prompt follow — pinned to temperature 0,
+    the fallback chain's higher temperatures repeat syllables."""
     d, rec, wav = make_daemon(monkeypatch, tmp_path)
     calls = []
 
@@ -314,9 +315,60 @@ def test_transcribe_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     segs = d._transcribe(wav, None)
     assert [s.text for s in segs] == ["简体字"]  # the second pass wins
     assert len(calls) == 2
-    assert calls[0]["language"] is None and calls[0]["initial_prompt"] is None
+    assert "initial_prompt" not in calls[0] and "temperature" not in calls[0]
     assert calls[1]["language"] == "zh"
     assert calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+    assert calls[1]["temperature"] == 0.0
+
+
+def test_transcribe_redecodes_when_chinese_heard_despite_wrong_guess(
+        monkeypatch, tmp_path):
+    """Whisper's language guess on real Mandarin is a coin flip (seen live:
+    'en' at p~0.5), and the unprompted decode under the wrong guess repeats
+    syllables. If the first pass still produced CJK characters, the pinned
+    zh decode must follow anyway."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "en"})()
+            text = "名名" if len(calls) == 1 else "名字"
+            return [type("Seg", (), {"text": text})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["名字"]  # the zh pass wins
+    assert len(calls) == 2
+    assert calls[1]["language"] == "zh"
+    assert calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+    assert calls[1]["temperature"] == 0.0
+
+
+def test_transcribe_does_not_redecode_japanese(monkeypatch, tmp_path):
+    """Japanese shares the CJK characters — re-decoding it with a Chinese
+    prompt would corrupt it. ja is exempt from the character-based trigger."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "ja"})()
+            return [type("Seg", (), {"text": "日本語"})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["日本語"]
+    assert len(calls) == 1
+
+
+def test_contains_cjk():
+    assert dictate._contains_cjk("名字")
+    assert dictate._contains_cjk("mix 中文 here")
+    assert not dictate._contains_cjk("hallo welt")
+    assert not dictate._contains_cjk("カタカナ")  # kana alone is not CJK
 
 
 def test_transcribe_applies_the_prompt_directly_when_zh_is_pinned(monkeypatch,
@@ -334,6 +386,7 @@ def test_transcribe_applies_the_prompt_directly_when_zh_is_pinned(monkeypatch,
     d._transcribe(wav, "zh")
     assert len(calls) == 1
     assert calls[0]["initial_prompt"] == dictate.ZH_PROMPT
+    assert calls[0]["temperature"] == 0.0
 
 
 def test_transcribe_passes_no_prompt_for_other_languages(monkeypatch, tmp_path):
@@ -349,7 +402,7 @@ def test_transcribe_passes_no_prompt_for_other_languages(monkeypatch, tmp_path):
     d.model = FakeModel()
     d._transcribe(wav, None)
     assert len(calls) == 1
-    assert calls[0]["initial_prompt"] is None
+    assert "initial_prompt" not in calls[0]
 
 
 def test_transcribe_zh_prompt_can_be_disabled(monkeypatch, tmp_path):
@@ -368,7 +421,7 @@ def test_transcribe_zh_prompt_can_be_disabled(monkeypatch, tmp_path):
     d._transcribe(wav, None)
     d._transcribe(wav, "zh")
     assert len(calls) == 2
-    assert all(c["initial_prompt"] is None for c in calls)
+    assert all(c.get("initial_prompt") is None for c in calls)
 
 
 def _write_wav(path, amplitude):
