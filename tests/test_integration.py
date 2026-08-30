@@ -214,9 +214,12 @@ def test_dictation_cycle_passes_the_language_through(monkeypatch, tmp_path,
     assert len(d.model.calls) == 1
     assert d.model.calls[0]["language"] == expected
     assert "task" not in d.model.calls[0]
-    # the Simplified-script prompt goes into the pass only when zh is pinned
-    assert d.model.calls[0]["initial_prompt"] == (
+    # the Simplified-script prompt and the fixed temperature go into the
+    # pass only when zh is pinned
+    assert d.model.calls[0].get("initial_prompt") == (
         dictate.ZH_PROMPT if configured == "zh" else None)
+    assert d.model.calls[0].get("temperature") == (
+        0.0 if configured == "zh" else None)
 
 
 def test_dictation_cycle_on_caps_lock_restores_the_caps_state(monkeypatch,
@@ -259,9 +262,10 @@ def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     dictate_one_cycle(d, idle)
     assert len(d.model.calls) == 2
     assert d.model.calls[0]["language"] is None
-    assert d.model.calls[0]["initial_prompt"] is None
+    assert "initial_prompt" not in d.model.calls[0]
     assert d.model.calls[1]["language"] == "zh"
     assert d.model.calls[1]["initial_prompt"] == dictate.ZH_PROMPT
+    assert d.model.calls[1]["temperature"] == 0.0
     assert typed_text(d) == "简体字 "
 
 

@@ -39,8 +39,13 @@ Config via environment:
                    models otherwise mix Traditional characters into Mandarin
                    output at random; the prompt pins the script. Applied
                    directly when zh is pinned; on auto-detect, dictations
-                   recognized as Chinese are decoded a second time with it —
-                   only those pay for the extra pass. '' disables it;
+                   that produced Chinese characters are decoded a second
+                   time with it — whisper's language guess on Mandarin is
+                   too flaky to gate on (Japanese and Cantonese are exempt;
+                   they share the characters). The Chinese decode runs at
+                   fixed temperature 0 — the fallback chain's higher
+                   temperatures repeat syllables on borderline audio.
+                   '' disables the prompt (the temperature-0 decode stays);
                    Traditional-Chinese users can set a Traditional prompt
   PTT_BACKEND      force 'pynput' (alias: 'x11') or 'wayland'
                    (default: from XDG_SESSION_TYPE)
@@ -139,6 +144,14 @@ def configured_ptt_key():
         return "ctrl_r"
     name = data.get("ptt_key") if isinstance(data, dict) else None
     return name if isinstance(name, str) and name else "ctrl_r"
+
+
+def _contains_cjk(text):
+    """True if the text contains CJK ideographs — the script Chinese and
+    Japanese share. Used to route Chinese-sounding audio into the pinned
+    zh decode even when whisper's language guess flips (see _transcribe)."""
+    return any("一" <= ch <= "鿿" or "㐀" <= ch <= "䶿"
+               for ch in text)
 
 
 def configured_lang():
@@ -1358,18 +1371,46 @@ class DictationDaemon:
         script. A Chinese prompt would bias decoding for *every* language,
         though, so it goes into the single pass only when zh is pinned — on
         auto-detect it enters a second pass, and only when the first pass
-        just detected Chinese. Other languages never pay for it.
+        heard Chinese. Other languages never pay for it.
+
+        "Heard Chinese" cannot rely on whisper's language guess alone: on
+        real Mandarin dictations that guess is a coin flip (observed 'en' at
+        p~0.5), and the unprompted decode under the wrong guess is the
+        unstable one (repeated syllables). So the re-decode also fires when
+        the first pass produced CJK characters under a non-Chinese guess —
+        which means a dictation mixing German and Mandarin is decoded as
+        Chinese, the accepted trade-off. Japanese and Cantonese are exempt:
+        they share the characters and must not be re-decoded with a Chinese
+        prompt. The Chinese decode itself runs at fixed temperature 0: the
+        fallback chain's higher temperatures are what produce repetitive
+        hallucinations on borderline audio.
         """
         prompt = ZH_PROMPT or None
-        segments, info = self.model.transcribe(
-            source, language=lang, vad_filter=True, beam_size=5,
-            initial_prompt=prompt if lang == "zh" else None)
-        if (lang is None and prompt
-                and getattr(info, "language", None) == "zh"):
-            log("auto-detected zh — re-decoding with the Simplified prompt")
+        if lang is not None:
+            kwargs = {"initial_prompt": prompt, "temperature": 0.0} \
+                if lang == "zh" else {}
             segments, _info = self.model.transcribe(
-                source, language="zh", vad_filter=True, beam_size=5,
-                initial_prompt=prompt)
+                source, language=lang, vad_filter=True, beam_size=5, **kwargs)
+            return segments
+        segments, info = self.model.transcribe(
+            source, language=None, vad_filter=True, beam_size=5)
+        if not prompt:
+            return segments
+        detected = getattr(info, "language", None)
+        if detected in ("ja", "yue"):
+            return segments  # shares the characters with Mandarin
+        if detected != "zh":
+            # The guess on Mandarin is a coin flip, so only the text tells
+            # whether Chinese was actually heard. When the guess already is
+            # zh, the pass-1 text is irrelevant — don't pay for decoding it.
+            segs = list(segments)
+            if not _contains_cjk("".join(s.text for s in segs)):
+                return segs
+        log(f"re-decoding with the Simplified prompt "
+            f"(pass-1 guess: {detected!r})")
+        segments, _info = self.model.transcribe(
+            source, language="zh", vad_filter=True, beam_size=5,
+            initial_prompt=prompt, temperature=0.0)
         return segments
 
     def _stream_tick(self, session):
