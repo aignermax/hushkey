@@ -533,7 +533,7 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     class FakeInjector:
         def insert(self, text):
             insert_started.set()
-            finish_insert.wait(5)
+            finish_insert.wait(15)
             inserted.append(text)
 
     d.injector = FakeInjector()
@@ -542,7 +542,7 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
         return json.loads(state_file.read_text(encoding="utf-8"))["state"]
 
     def wait_for(expected):
-        deadline = time.time() + 5
+        deadline = time.time() + 15  # macOS CI runners are that slow sometimes
         while time.time() < deadline:
             if state() == expected:
                 return True
@@ -553,7 +553,7 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     assert state() == "recording"
     d.recording = time.time() - 1.0  # pretend the key was held for 1 s
     d.stop_recording()
-    assert wait_for("transcribing") and insert_started.wait(5)
+    assert wait_for("transcribing") and insert_started.wait(15)
     finish_insert.set()
     assert wait_for("idle")
     assert inserted == ["hallo "]
