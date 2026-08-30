@@ -923,19 +923,23 @@ def test_typeable_text_is_typed_not_pasted(monkeypatch):
             if event == "down"] == list("abc")
 
 
-def test_cjk_is_typed_natively_when_a_keycode_row_is_free(monkeypatch):
-    """Servers with an unused row let pynput borrow it — no clipboard detour
-    and no clipboard clobbering there."""
+def test_cjk_uses_the_clipboard_even_when_a_keycode_row_is_free(monkeypatch):
+    """A free keycode row does not make CJK typeable: borrow-remapping the
+    row races the client's keymap refresh and permutes the output (measured
+    live: every second syllable becomes a copy of the first). Unmapped
+    characters must always go through the clipboard."""
     _pin_x11(monkeypatch)
     injector = dictate.PynputInjector()
     injector.controller = FakeMappingController(mapped=set(), has_empty_row=True)
-    owned = _pin_clipboard(monkeypatch)
+    owned = _pin_clipboard(monkeypatch, previous=None)
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("你a")
-    assert owned == []
-    assert [k for event, k in injector.controller.events
-            if event == "down"] == ["你", "a"]
+    # the whole text goes through the clipboard as one paste, no typing
+    assert owned == [("你a".encode(), None)]
+    keys = [k for event, k in injector.controller.events if event == "down"]
+    assert keys == ["<ctrl>", "v"]
 
 
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
