@@ -533,7 +533,7 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     class FakeInjector:
         def insert(self, text):
             insert_started.set()
-            finish_insert.wait(5)
+            finish_insert.wait(15)
             inserted.append(text)
 
     d.injector = FakeInjector()
@@ -542,7 +542,7 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
         return json.loads(state_file.read_text(encoding="utf-8"))["state"]
 
     def wait_for(expected):
-        deadline = time.time() + 5
+        deadline = time.time() + 15  # macOS CI runners are that slow sometimes
         while time.time() < deadline:
             if state() == expected:
                 return True
@@ -553,7 +553,12 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     assert state() == "recording"
     d.recording = time.time() - 1.0  # pretend the key was held for 1 s
     d.stop_recording()
-    assert wait_for("transcribing") and insert_started.wait(5)
+    # Wait on the event first: it blocks without churning the GIL, unlike a
+    # tight state-file polling loop, which starves the worker thread exactly
+    # on loaded CI runners (the macOS flakes). While insert() is blocked on
+    # finish_insert, the daemon is by definition still "transcribing".
+    assert insert_started.wait(15)
+    assert state() == "transcribing"
     finish_insert.set()
     assert wait_for("idle")
     assert inserted == ["hallo "]
@@ -965,6 +970,28 @@ def test_legacy_keysym_character_unmapped_uses_the_clipboard(monkeypatch):
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("€")
     assert owned == [("€".encode(), None)]
+
+
+def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
+    """A Unicode-remap-space keysym (0x01000000+) is untypeable *even when
+    present in the keymap*: it can only have arrived there by runtime
+    borrowing, and a borrowed slot resolves to its neighbour in the client's
+    XLookupString — the exact permutation this guards against (seen live:
+    pynput borrows from earlier runs persisted in the server keymap)."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    # 名's Unicode keysym sits in the mapping, as if borrowed earlier
+    injector.controller = FakeMappingController(mapped={0x100540D})
+    owned = _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    injector.insert("名")
+    # only the paste chord, no per-character typing
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["<ctrl>", "v"]
+    assert owned == [("名".encode(), None)]  # clipboard instead
 
 
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
