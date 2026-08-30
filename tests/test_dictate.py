@@ -364,6 +364,44 @@ def test_transcribe_does_not_redecode_japanese(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+def test_transcribe_does_not_redecode_cantonese(monkeypatch, tmp_path):
+    """Cantonese (yue) shares the characters too — same exemption as ja."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "yue"})()
+            return [type("Seg", (), {"text": "廣東話"})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["廣東話"]
+    assert len(calls) == 1
+
+
+def test_transcribe_redecodes_on_zh_guess_even_without_cjk_text(monkeypatch,
+                                                                tmp_path):
+    """When the guess already is zh, the re-decode fires without any CJK
+    text in pass 1 (e.g. Chinese names in Latin transcription) — and pass 1
+    is not even decoded for the check."""
+    d, rec, wav = make_daemon(monkeypatch, tmp_path)
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, source, **kw):
+            calls.append(kw)
+            info = type("Info", (), {"language": "zh"})()
+            text = "ni hao" if len(calls) == 1 else "你好"
+            return [type("Seg", (), {"text": text})()], info
+
+    d.model = FakeModel()
+    segs = d._transcribe(wav, None)
+    assert [s.text for s in segs] == ["你好"]
+    assert len(calls) == 2
+
+
 def test_contains_cjk():
     assert dictate._contains_cjk("名字")
     assert dictate._contains_cjk("mix 中文 here")
@@ -422,6 +460,8 @@ def test_transcribe_zh_prompt_can_be_disabled(monkeypatch, tmp_path):
     d._transcribe(wav, "zh")
     assert len(calls) == 2
     assert all(c.get("initial_prompt") is None for c in calls)
+    # the temperature-0 decode stays even with the prompt disabled
+    assert calls[1]["temperature"] == 0.0
 
 
 def _write_wav(path, amplitude):
