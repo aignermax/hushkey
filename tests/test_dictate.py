@@ -967,6 +967,27 @@ def test_legacy_keysym_character_unmapped_uses_the_clipboard(monkeypatch):
     assert owned == [("€".encode(), None)]
 
 
+def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
+    """A Unicode-remap-space keysym (0x01000000+) is untypeable *even when
+    present in the keymap*: it can only have arrived there by runtime
+    borrowing, and a borrowed slot resolves to its neighbour in the client's
+    XLookupString — the exact permutation this guards against (seen live:
+    pynput borrows from earlier runs persisted in the server keymap)."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    # 名's Unicode keysym sits in the mapping, as if borrowed earlier
+    injector.controller = FakeMappingController(mapped={0x100540D})
+    owned = _pin_clipboard(monkeypatch, previous=None)
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    injector.insert("名")
+    # only the paste chord, no per-character typing
+    assert [k for event, k in injector.controller.events
+            if event == "down"] == ["<ctrl>", "v"]
+    assert owned == [("名".encode(), None)]  # clipboard instead
+
+
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
                                                             tmp_path):
     """If the clipboard cannot be set up, unmappable characters are skipped
