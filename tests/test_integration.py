@@ -70,23 +70,18 @@ class FakeController:
     """Stands in for pynput's Controller: what the focused window receives.
 
     Also models what PynputInjector's typeability introspection reads; by
-    default every character is typeable (a keymap with free rows).
+    default every character is typeable (everything in the keymap).
     """
 
     class _AllKeysyms(dict):
         def __contains__(self, k):
             return True
 
-    def __init__(self, keyboard_mapping=None, has_empty_row=True):
+    def __init__(self, keyboard_mapping=None):
         self.events = []
         self.keyboard_mapping = (self._AllKeysyms() if keyboard_mapping is None
                                  else {k: (1, 0) for k in keyboard_mapping})
         self._borrows = {}
-        rows = [[1, 0, 0, 0, 0, 0, 0] for _ in range(247)]
-        if has_empty_row:
-            rows[-1] = [0] * 7
-        self._display = types.SimpleNamespace(
-            get_keyboard_mapping=lambda first, count: rows)
 
     def press(self, ch):
         self.events.append(("down", ch))
@@ -259,6 +254,11 @@ def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     cfg.write_text('{"lang": "auto"}', encoding="utf-8")
     focus = FakeXWindow(parent=FakeXWindow(("Navigator", "librewolf")))
     d, rec, idle, _ = make_daemon(monkeypatch, tmp_path, focus, model=ZhModel())
+    owned = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: None)
+    monkeypatch.setattr(
+        dictate, "_x11_clipboard_own",
+        lambda data, serve_seconds=None: owned.append((data, serve_seconds)))
     dictate_one_cycle(d, idle)
     assert len(d.model.calls) == 2
     assert d.model.calls[0]["language"] is None
@@ -266,7 +266,8 @@ def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     assert d.model.calls[1]["language"] == "zh"
     assert d.model.calls[1]["initial_prompt"] == dictate.ZH_PROMPT
     assert d.model.calls[1]["temperature"] == 0.0
-    assert typed_text(d) == "简体字 "
+    # CJK is never typed (borrow-remap race): it lands via the clipboard
+    assert owned == [("简体字 ".encode(), None)]
 
 
 def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
@@ -282,9 +283,8 @@ def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
 
     focus = FakeXWindow(parent=FakeXWindow(("Navigator", "librewolf")))
     d, rec, idle, _ = make_daemon(monkeypatch, tmp_path, focus, model=ZhModel())
-    # a keymap with no free rows and nothing mapped: nothing is typeable
-    d.injector.controller = FakeController(keyboard_mapping=set(),
-                                           has_empty_row=False)
+    # a keymap with nothing mapped: nothing is typeable
+    d.injector.controller = FakeController(keyboard_mapping=set())
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: b"OLD")
     monkeypatch.setattr(

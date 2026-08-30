@@ -13,10 +13,11 @@ Nothing is submitted automatically; review and hit Enter yourself.
     pynput   X11, Windows and macOS: pynput both reads the key and types the
              text out character by character. No group membership, no root
              daemon. On macOS grant the terminal Accessibility + Input
-             Monitoring. On X11, characters the server cannot map to a key
-             (CJK on a keymap without a single unused keycode row — GNOME
-             fills every row with XF86 keysyms) go in through the clipboard
-             plus a synthetic paste chord instead; typing them is impossible.
+             Monitoring. On X11, characters that are not already in the
+             keymap go in through the clipboard plus a synthetic paste chord
+             instead: borrow-remapping a keycode at the server races the
+             client's keymap refresh and permutes the output (measured:
+             名字→名名), so typing them is not an option.
     wayland  Wayland gives clients neither a global key grab nor input
              injection, so evdev reads the key from /dev/input (needs the
              'input' group) and the text goes in via the clipboard plus a
@@ -275,6 +276,15 @@ try:
 except ImportError:  # headless Linux: pynput needs X11; run() fails there anyway
     _CONTROL_KEYS = {}
     _CHORD_KEYS = {}
+
+try:
+    # pynput's char -> legacy keysym tables (Cyrillic_de, EuroSign, ...):
+    # xkb keymaps carry the legacy keysyms, so characters with one are
+    # typeable natively — see PynputInjector._typeable
+    from pynput._util.xorg_keysyms import (
+        CHARS as _XORG_CHARS, SYMBOLS as _XORG_SYMBOLS)
+except ImportError:  # no python-xlib (Windows/macOS): only consulted on X11
+    _XORG_CHARS, _XORG_SYMBOLS = {}, {}
 
 
 def log(msg):
@@ -657,16 +667,20 @@ class PynputInjector:
     small delay: heavy apps (Electron editors, browsers) drop or reorder
     keystrokes fired at full speed.
 
-    X11 only: a character the server cannot map to a key cannot be typed at
-    all. pynput works around unmappable characters by borrowing an unused
-    keycode row, but some keymaps have none (GNOME fills every row with XF86
-    keysyms) — and then CJK text fails hard. Such text goes in through the
-    clipboard plus a synthetic paste chord instead, like the Wayland backend.
+    X11 only: typing a character that is not already in the keymap means
+    remapping a keycode at the server — and a borrowed slot does not
+    round-trip through the client's XLookupString: it resolves the
+    keystroke to the neighbouring slot (or, mid-remap, to the previous
+    mapping), so every second syllable comes out as a copy of the first
+    (measured live: 名字→名名 typed into a Tk widget, while the clipboard
+    path delivered the identical text byte-exactly). Unicode-remap-space
+    keysyms (0x01000000+) only ever exist via such borrowing, so they are
+    never typed — text containing them goes in through the clipboard plus a
+    synthetic paste chord instead, like the Wayland backend.
     """
 
     def __init__(self):
         self.controller = None
-        self._borrowable = None  # X11: does the keymap have an unused row?
 
     def check(self):
         return None
@@ -685,49 +699,67 @@ class PynputInjector:
         if delay and TERMINAL_TYPE_DELAY < delay and foreground_window_is_terminal():
             delay = TERMINAL_TYPE_DELAY
         for ch in text:
+            if not self._typeable(ch):
+                # Never hand unmapped characters to pynput: it would
+                # borrow-remap a keycode and race the client's keymap
+                # refresh — the bug this class exists to avoid.
+                log(f"skipped untypeable character {ch!r}: not in the keymap")
+                continue
             key = _CONTROL_KEYS.get(ch, ch)
             try:
                 self.controller.press(key)
                 self.controller.release(key)
             except Exception as exc:
-                # e.g. pynput's InvalidKeyException: one unmappable character
-                # must not abort the rest of the dictation
-                log(f"skipped untypeable character {ch!r}: {exc}")
+                # one failing character must not abort the rest of the
+                # dictation
+                log(f"skipped character {ch!r}: {exc}")
             if delay:
                 time.sleep(delay)
 
+    def _typeable(self, ch):
+        """X11: True if the character can be typed without any remapping;
+        non-X11 types Unicode natively.
+
+        Mirrors pynput's own resolution: characters with a legacy keysym
+        (Cyrillic, Greek, EuroSign, ...) are looked up by that keysym, since
+        xkb keymaps carry those. Keysyms in the Unicode remap space
+        (0x01000000+) are never trusted, even when present in the keymap:
+        they only get there by runtime borrowing, and a borrowed slot does
+        not round-trip through the client's XLookupString — the client
+        resolves the keystroke to the *neighbouring* slot, so every second
+        syllable comes out as a copy of the first (measured live).
+        """
+        if not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
+                and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
+            return True
+        if ch in _CONTROL_KEYS:
+            return True
+        try:
+            symbol = _XORG_CHARS.get(ch)
+            if symbol is not None and symbol in _XORG_SYMBOLS:
+                keysym = _XORG_SYMBOLS[symbol][0]
+            else:
+                ordinal = ord(ch)
+                keysym = ordinal if ordinal < 0x100 else ordinal | 0x01000000
+            if keysym >= 0x01000000:
+                return False
+            # keyboard_mapping/_borrows are private pynput attrs; if a future
+            # pynput renames them the AttributeError degrades to typeable,
+            # which keeps plain typing working (mapped characters are the
+            # common case)
+            return (keysym in self.controller.keyboard_mapping
+                    or keysym in self.controller._borrows)
+        except Exception:
+            return True
+
     def _needs_clipboard(self, text):
-        """X11 with a character pynput cannot map → paste, don't type."""
+        """X11 with a character that is not in the keymap → paste, don't
+        type. Borrow-remapping is *not* an alternative (see class docstring).
+        """
         if not (sys.platform.startswith("linux") and os.environ.get("DISPLAY")
                 and os.environ.get("XDG_SESSION_TYPE") != "wayland"):
             return False
-        try:
-            # keyboard_mapping/_borrows/_display are private pynput attrs;
-            # if a future pynput renames them the AttributeError degrades to
-            # the typed path, which is the safe side
-            mapping = self.controller.keyboard_mapping
-            borrows = self.controller._borrows
-            for ch in text:
-                if ch in _CONTROL_KEYS:
-                    continue
-                ordinal = ord(ch)
-                keysym = ordinal if ordinal < 0x100 else ordinal | 0x01000000
-                if keysym in mapping or keysym in borrows:
-                    continue
-                if self._can_borrow():
-                    continue
-                return True
-        except Exception:
-            return False  # introspection failed: keep the typed path
-        return False
-
-    def _can_borrow(self):
-        """Whether pynput can still remap a keycode row for unmappable
-        characters — a property of the keymap, probed once."""
-        if self._borrowable is None:
-            mapping = self.controller._display.get_keyboard_mapping(8, 255 - 8)
-            self._borrowable = any(not any(row) for row in mapping)
-        return self._borrowable
+        return any(not self._typeable(ch) for ch in text)
 
     def _chord_keys(self, chord):
         """'ctrl+shift+v' -> keys for controller.press, press order.

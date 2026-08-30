@@ -334,12 +334,12 @@ daemon probes both locations rather than trusting one.
   if you had an image copied, the transcript stays and the image is not put
   back, because rewriting arbitrary bytes as `text/plain` would corrupt it.
   `PTT_KEEP_CLIPBOARD=1` disables the restore entirely.
-- **X11: characters the keymap cannot map go through the clipboard.** Typing
-  synthesizes key presses, which needs an unused keycode row to remap — and
-  some keymaps have none (GNOME fills every row with XF86 keysyms), so e.g.
-  Chinese text cannot be typed at all there. Such dictations are pasted
-  instead: previous clipboard restored after ~0.4 s, `Ctrl+Shift+V` in
-  terminals, `Ctrl+V` elsewhere.
+- **X11: characters that are not already in the keymap go through the
+  clipboard.** Typing anything else would mean remapping a keycode at the
+  server, which races the client's keymap refresh and permutes the output
+  (every second syllable becomes a copy of the first — measured: 名字→名名).
+  Such dictations are pasted instead: previous clipboard restored after
+  ~0.4 s, `Ctrl+Shift+V` in terminals, `Ctrl+V` elsewhere.
 - Windows: synthetic typing cannot reach apps running **elevated**
   (as Administrator) unless the daemon itself runs elevated.
 - macOS: no CUDA — CPU transcription only; the daemon needs the privacy
