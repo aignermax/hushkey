@@ -553,7 +553,12 @@ def test_daemon_publishes_state_transitions(monkeypatch, tmp_path):
     assert state() == "recording"
     d.recording = time.time() - 1.0  # pretend the key was held for 1 s
     d.stop_recording()
-    assert wait_for("transcribing") and insert_started.wait(15)
+    # Wait on the event first: it blocks without churning the GIL, unlike a
+    # tight state-file polling loop, which starves the worker thread exactly
+    # on loaded CI runners (the macOS flakes). While insert() is blocked on
+    # finish_insert, the daemon is by definition still "transcribing".
+    assert insert_started.wait(15)
+    assert state() == "transcribing"
     finish_insert.set()
     assert wait_for("idle")
     assert inserted == ["hallo "]
