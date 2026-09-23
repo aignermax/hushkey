@@ -308,22 +308,22 @@ else
     exit 0
   fi
 
-  if systemctl --user is-active --quiet whisper-ptt.service 2>/dev/null; then
-    WAS_ACTIVE=1
-  else
-    WAS_ACTIVE=0
+  # restart, not enable --now: an already-running daemon would otherwise keep
+  # serving the old code (and, after a move, the old path) — and the .deb runs
+  # this from postinst, where a "please restart" note goes unread.
+  # Skipped when we run inside the service itself (the tray's in-app update):
+  # that tray is already the new code, and a restart would kill this script
+  # mid-run along with the rest of the unit's cgroup. Checked via the cgroup,
+  # not INVOCATION_ID — that is set in every unit, packagekit's included.
+  systemctl --user enable whisper-ptt.service
+  if ! grep -q '/whisper-ptt\.service$' /proc/self/cgroup 2>/dev/null; then
+    systemctl --user restart whisper-ptt.service
   fi
-  systemctl --user enable --now whisper-ptt.service
 
   echo
   echo "Done. Hold Right Ctrl in any window, speak, release — text gets inserted."
   echo "First dictation downloads the whisper model (~0.5-1.5 GB), then it's offline."
   echo "Logs: journalctl --user -u whisper-ptt.service -f"
-  if [ "$WAS_ACTIVE" -eq 1 ]; then
-    # enable --now does not restart an already-running service
-    echo "Note: the old process is still running — apply the update with:"
-    echo "  systemctl --user restart whisper-ptt.service"
-  fi
   if [ "$SESSION" = "wayland" ]; then
     echo "Wayland note: terminals paste with Ctrl+Shift+V — for those set"
     echo "  PTT_PASTE_KEY=ctrl+shift+v (see README 'Configuration')."
