@@ -311,8 +311,14 @@ else
   # restart, not enable --now: an already-running daemon would otherwise keep
   # serving the old code (and, after a move, the old path) — and the .deb runs
   # this from postinst, where a "please restart" note goes unread.
+  # Skipped when we run inside the service itself (the tray's in-app update):
+  # that tray is already the new code, and a restart would kill this script
+  # mid-run along with the rest of the unit's cgroup. Checked via the cgroup,
+  # not INVOCATION_ID — that is set in every unit, packagekit's included.
   systemctl --user enable whisper-ptt.service
-  systemctl --user restart whisper-ptt.service
+  if ! grep -q '/whisper-ptt\.service$' /proc/self/cgroup 2>/dev/null; then
+    systemctl --user restart whisper-ptt.service
+  fi
 
   echo
   echo "Done. Hold Right Ctrl in any window, speak, release — text gets inserted."
