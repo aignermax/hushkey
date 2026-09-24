@@ -293,3 +293,60 @@ def test_macos_installs_a_launchd_agent_and_no_wayland_bits(sandbox):
     assert "launchctl bootstrap" in log
     assert not (sandbox["units"] / "ydotoold.service").exists()
     assert "usermod" not in log and "udevadm" not in log
+
+
+# A venv pip that installs pip itself but cannot resolve requirements.txt — the
+# shape of a Mac whose python3 has no onnxruntime wheel (ResolutionImpossible).
+UNRESOLVABLE_PIP = """#!/usr/bin/env bash
+printf 'pip' >> "$SHIM_LOG"
+for a in "$@"; do printf ' %s' "$a" >> "$SHIM_LOG"; done
+printf '\n' >> "$SHIM_LOG"
+for a in "$@"; do [ "$a" = "-r" ] && exit 1; done
+exit 0
+"""
+
+# An older interpreter whose `-m venv DIR` yields a venv where pip succeeds.
+OLDER_PYTHON = """#!/usr/bin/env bash
+printf '%s' "$(basename "$0")" >> "$SHIM_LOG"
+for a in "$@"; do printf ' %s' "$a" >> "$SHIM_LOG"; done
+printf '\n' >> "$SHIM_LOG"
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/bin"
+  for n in python pip; do cp "$(dirname "$0")/sudo" "$3/bin/$n"; done
+fi
+exit 0
+"""
+
+
+def test_macos_unresolvable_deps_retry_on_an_older_python(sandbox):
+    """The bug this exists for: on a Mac whose python3 has no onnxruntime wheel
+    the installer took the Linux path and demanded a C compiler — which cannot
+    help. It must rebuild the venv on an older interpreter instead."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(sandbox["repo"] / ".venv/bin/pip", UNRESOLVABLE_PIP)
+    _write_exec(shims / "python3.13", OLDER_PYTHON)
+
+    proc, log = run_installer(sandbox, "", uname="Darwin")
+
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "C compiler" not in out
+    assert f"python3.13 -m venv {sandbox['repo']}/.venv" in log
+    assert "launchctl bootstrap" in log  # and the install carried on
+
+
+@pytest.mark.skipif(
+    any(os.path.exists(os.path.join(d, f"python3.{m}"))
+        for d in ("/usr/bin", "/bin") for m in (10, 11, 12, 13)),
+    reason="host ships an older python3.x, and the sandbox PATH cannot hide it")
+def test_macos_without_an_older_python_asks_brew_for_one(sandbox):
+    _write_exec(sandbox["repo"] / ".venv/bin/pip", UNRESOLVABLE_PIP)
+
+    proc, log = run_installer(sandbox, "", uname="Darwin")
+
+    out = proc.stdout + proc.stderr
+    assert "brew install python@3.12" in log
+    # the brew shim installs nothing, so this ends in a clear error
+    assert proc.returncode != 0
+    assert "Install Python 3.12" in out and "C compiler" not in out
+    assert "launchctl" not in log

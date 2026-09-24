@@ -89,25 +89,80 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 "$VENV/bin/pip" -q install --upgrade pip
 
+pyver_of() {
+  "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true
+}
+
+# Rebuild the venv on the given interpreter and install into it.
+reinstall_venv_with() {
+  rm -rf "$VENV"
+  "$1" -m venv "$VENV" || return 1
+  "$VENV/bin/pip" -q install --upgrade pip || return 1
+  "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
+}
+
+# macOS: a failed resolve is not a missing compiler — it means faster-whisper's
+# binary deps publish no wheel for this Python/arch/OS combination, and pip
+# reports that as ResolutionImpossible. onnxruntime is the usual culprit: since
+# 1.24 it ships Apple Silicon wheels for macOS 14+ only, and its last Intel
+# wheels (1.23.x) stop at Python 3.13. Homebrew's current python3 is newer than
+# that, so fall back to an older interpreter — one already present, else
+# brew's python@3.12 (the version the Windows bundle ships, too).
+retry_on_older_python() {
+  local have v py
+  have="$(pyver_of "$VENV/bin/python")"
+  echo "    no compatible wheels for Python ${have:-?} on this Mac" \
+       "($(uname -m), macOS $(sw_vers -productVersion 2>/dev/null || echo '?')) — trying an older Python"
+  for v in 3.13 3.12 3.11 3.10; do
+    [ "$v" = "$have" ] && continue
+    py="$(command -v "python$v" || true)"
+    [ -n "$py" ] || continue
+    echo "    retrying with $py"
+    reinstall_venv_with "$py" && return 0
+  done
+  if command -v brew >/dev/null && [ "$have" != 3.12 ]; then
+    echo "==> installing python@3.12 via Homebrew"
+    brew install python@3.12 || true
+    py="$(command -v python3.12 || true)"
+    if [ -z "$py" ]; then
+      # brew does not always link a versioned python onto PATH
+      py="$(brew --prefix python@3.12 2>/dev/null || true)"
+      py="${py:+$py/bin/python3.12}"
+    fi
+    if [ -n "$py" ] && [ -x "$py" ]; then
+      echo "    retrying with $py"
+      reinstall_venv_with "$py" && return 0
+    fi
+  fi
+  echo "ERROR: could not install the Python dependencies on this Mac." >&2
+  echo "       Install Python 3.12 (brew install python@3.12 or python.org) and re-run;" >&2
+  echo "       for pip's full reason run: $VENV/bin/pip install -r $DIR/requirements.txt" >&2
+  exit 1
+}
+
 echo "==> installing python dependencies"
 # On Linux, evdev is a C extension and has no wheels, so a machine without a
 # compiler fails here with a wall of gcc output. Retry once with build deps
 # rather than installing ~200 MB of toolchain up front on machines that don't
-# need it.
+# need it. (macOS has no such dependency; see retry_on_older_python.)
 if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"; then
-  echo "    dependency build failed — installing compiler and Python headers"
-  pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  if command -v apt-get >/dev/null; then
-    install_pkg build-essential "python${pyver}-dev"
-  elif command -v dnf >/dev/null; then
-    install_pkg gcc "python3-devel"
-  elif command -v pacman >/dev/null; then
-    install_pkg base-devel
+  if [ "$OS" = "Darwin" ]; then
+    retry_on_older_python
   else
-    echo "ERROR: install a C compiler and Python headers, then re-run" >&2
-    exit 1
+    echo "    dependency build failed — installing compiler and Python headers"
+    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if command -v apt-get >/dev/null; then
+      install_pkg build-essential "python${pyver}-dev"
+    elif command -v dnf >/dev/null; then
+      install_pkg gcc "python3-devel"
+    elif command -v pacman >/dev/null; then
+      install_pkg base-devel
+    else
+      echo "ERROR: install a C compiler and Python headers, then re-run" >&2
+      exit 1
+    fi
+    "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
   fi
-  "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
 fi
 if command -v nvidia-smi >/dev/null; then
   echo "==> NVIDIA GPU detected — installing CUDA libraries"
