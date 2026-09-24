@@ -328,17 +328,23 @@ exit 0
 def test_macos_unresolvable_deps_retry_on_an_older_python(sandbox):
     """The bug this exists for: on a Mac whose python3 has no onnxruntime wheel
     the installer took the Linux path and demanded a C compiler — which cannot
-    help. It must rebuild the venv on an older interpreter instead."""
+    help. It must rebuild the venv on an older interpreter instead.
+
+    3.12 must win over 3.13: on an Intel Mac before macOS 13 only 3.12 and
+    below resolve, so 3.12 is the one version that works on every Mac."""
     shims = sandbox["repo"].parent / "shims"
     _write_exec(sandbox["repo"] / ".venv/bin/pip", UNRESOLVABLE_PIP)
     _write_exec(shims / "python3.13", OLDER_PYTHON)
+    _write_exec(shims / "python3.12", OLDER_PYTHON)
 
     proc, log = run_installer(sandbox, "", uname="Darwin")
 
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     assert "C compiler" not in out
-    assert f"python3.13 -m venv {sandbox['repo']}/.venv" in log
+    assert "too new for onnxruntime" in out  # not "you need Python 3.x"
+    assert f"python3.12 -m venv {sandbox['repo']}/.venv" in log
+    assert "python3.13" not in log
     assert "launchctl bootstrap" in log  # and the install carried on
 
 
@@ -365,11 +371,11 @@ def test_macos_unrelated_pip_failure_keeps_the_venv(sandbox):
     that launchd then fails to start on every login."""
     shims = sandbox["repo"].parent / "shims"
     _write_exec(sandbox["repo"] / ".venv/bin/pip", OFFLINE_PIP)
-    _write_exec(shims / "python3.13", OLDER_PYTHON)
+    _write_exec(shims / "python3.12", OLDER_PYTHON)
 
     proc, log = run_installer(sandbox, "", uname="Darwin")
 
     assert proc.returncode != 0
-    assert "python3.13" not in log and "brew" not in log
+    assert "python3.12" not in log and "brew" not in log
     assert (sandbox["repo"] / ".venv/bin/pip").read_text() == OFFLINE_PIP
     assert "Connection reset" in proc.stderr
