@@ -301,9 +301,16 @@ UNRESOLVABLE_PIP = """#!/usr/bin/env bash
 printf 'pip' >> "$SHIM_LOG"
 for a in "$@"; do printf ' %s' "$a" >> "$SHIM_LOG"; done
 printf '\n' >> "$SHIM_LOG"
-for a in "$@"; do [ "$a" = "-r" ] && exit 1; done
+for a in "$@"; do
+  [ "$a" = "-r" ] && { echo "ERROR: ResolutionImpossible: for help visit ..." >&2; exit 1; }
+done
 exit 0
 """
+
+# Same, but failing for an unrelated reason (offline).
+OFFLINE_PIP = UNRESOLVABLE_PIP.replace(
+    "ERROR: ResolutionImpossible: for help visit ...",
+    "ERROR: Could not install packages due to an OSError: Connection reset")
 
 # An older interpreter whose `-m venv DIR` yields a venv where pip succeeds.
 OLDER_PYTHON = """#!/usr/bin/env bash
@@ -350,3 +357,19 @@ def test_macos_without_an_older_python_asks_brew_for_one(sandbox):
     assert proc.returncode != 0
     assert "Install Python 3.12" in out and "C compiler" not in out
     assert "launchctl" not in log
+
+
+def test_macos_unrelated_pip_failure_keeps_the_venv(sandbox):
+    """A network drop (e.g. during the tray's in-app update) is not a missing
+    wheel: swapping interpreters would replace a working venv with an empty one
+    that launchd then fails to start on every login."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(sandbox["repo"] / ".venv/bin/pip", OFFLINE_PIP)
+    _write_exec(shims / "python3.13", OLDER_PYTHON)
+
+    proc, log = run_installer(sandbox, "", uname="Darwin")
+
+    assert proc.returncode != 0
+    assert "python3.13" not in log and "brew" not in log
+    assert (sandbox["repo"] / ".venv/bin/pip").read_text() == OFFLINE_PIP
+    assert "Connection reset" in proc.stderr

@@ -93,8 +93,11 @@ pyver_of() {
   "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true
 }
 
-# Rebuild the venv on the given interpreter and install into it.
+# Rebuild the venv on the given interpreter and install into it. Probe first:
+# a candidate that cannot make a venv (e.g. an inactive pyenv shim) must not
+# cost us the one we have.
 reinstall_venv_with() {
+  "$1" -c 'import venv, ensurepip' 2>/dev/null || return 1
   rm -rf "$VENV"
   "$1" -m venv "$VENV" || return 1
   "$VENV/bin/pip" -q install --upgrade pip || return 1
@@ -109,7 +112,7 @@ reinstall_venv_with() {
 # that, so fall back to an older interpreter — one already present, else
 # brew's python@3.12 (the version the Windows bundle ships, too).
 retry_on_older_python() {
-  local have v py
+  local have v py tried=""
   have="$(pyver_of "$VENV/bin/python")"
   echo "    no compatible wheels for Python ${have:-?} on this Mac" \
        "($(uname -m), macOS $(sw_vers -productVersion 2>/dev/null || echo '?')) — trying an older Python"
@@ -117,10 +120,12 @@ retry_on_older_python() {
     [ "$v" = "$have" ] && continue
     py="$(command -v "python$v" || true)"
     [ -n "$py" ] || continue
+    tried="$tried $v"
     echo "    retrying with $py"
     reinstall_venv_with "$py" && return 0
   done
-  if command -v brew >/dev/null && [ "$have" != 3.12 ]; then
+  if command -v brew >/dev/null && [ "$have" != 3.12 ] \
+      && ! printf '%s' "$tried" | grep -qw 3.12; then
     echo "==> installing python@3.12 via Homebrew"
     brew install python@3.12 || true
     py="$(command -v python3.12 || true)"
@@ -145,9 +150,19 @@ echo "==> installing python dependencies"
 # compiler fails here with a wall of gcc output. Retry once with build deps
 # rather than installing ~200 MB of toolchain up front on machines that don't
 # need it. (macOS has no such dependency; see retry_on_older_python.)
-if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"; then
+PIP_ERR="$(mktemp)"
+if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt" 2>"$PIP_ERR"; then
+  cat "$PIP_ERR" >&2
   if [ "$OS" = "Darwin" ]; then
-    retry_on_older_python
+    # Only a missing wheel is worth a new interpreter. Anything else — a network
+    # drop during the tray's in-app update, say — would otherwise replace a
+    # working venv with an empty one that launchd then fails to start.
+    if grep -qE 'ResolutionImpossible|No matching distribution' "$PIP_ERR"; then
+      retry_on_older_python
+    else
+      echo "ERROR: installing the Python dependencies failed (see above); re-run when fixed" >&2
+      exit 1
+    fi
   else
     echo "    dependency build failed — installing compiler and Python headers"
     pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
@@ -164,6 +179,7 @@ if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"; then
     "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
   fi
 fi
+rm -f "$PIP_ERR"
 if command -v nvidia-smi >/dev/null; then
   echo "==> NVIDIA GPU detected — installing CUDA libraries"
   "$VENV/bin/pip" -q install -r "$DIR/requirements-gpu.txt"
