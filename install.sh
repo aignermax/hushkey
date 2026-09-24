@@ -108,15 +108,20 @@ reinstall_venv_with() {
 # binary deps publish no wheel for this Python/arch/OS combination, and pip
 # reports that as ResolutionImpossible. onnxruntime is the usual culprit: since
 # 1.24 it ships Apple Silicon wheels for macOS 14+ only, and its last Intel
-# wheels (1.23.x) stop at Python 3.13. Homebrew's current python3 is newer than
-# that, so fall back to an older interpreter — one already present, else
-# brew's python@3.12 (the version the Windows bundle ships, too).
+# wheels (1.23.x) stop at Python 3.13 and need macOS 13 — on an older Intel Mac
+# only 3.12 and below resolve. Homebrew's current python3 is newer than all of
+# that, so fall back to an older interpreter, 3.12 first since it resolves on
+# every Mac: one already present, else brew's python@3.12 (the version the
+# Windows bundle ships, too).
 retry_on_older_python() {
   local have v py tried=""
   have="$(pyver_of "$VENV/bin/python")"
-  echo "    no compatible wheels for Python ${have:-?} on this Mac" \
-       "($(uname -m), macOS $(sw_vers -productVersion 2>/dev/null || echo '?')) — trying an older Python"
-  for v in 3.13 3.12 3.11 3.10; do
+  # Worded so it cannot be read as "you need Python $have" — that version is
+  # the problem, not the requirement.
+  echo "    Python ${have:-?} is too new for onnxruntime on this Mac" \
+       "($(uname -m), macOS $(sw_vers -productVersion 2>/dev/null || echo '?'))" \
+       "— switching to an older Python for whisper-ptt's own venv (your python3 stays as it is)"
+  for v in 3.12 3.13 3.11 3.10; do
     [ "$v" = "$have" ] && continue
     py="$(command -v "python$v" || true)"
     [ -n "$py" ] || continue
