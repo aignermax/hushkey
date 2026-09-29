@@ -192,24 +192,46 @@ _WHISPER_LANGS = frozenset(
     "yi yo yue zh".split())
 
 
+# The key listener ('recording') and the transcribe worker ('idle') publish
+# concurrently. Unserialized, one open(..., "w") truncated the other's
+# half-written temp file (the published JSON carried both), and whichever
+# replace() landed last won even when it was the older state.
+_STATE_LOCK = threading.Lock()
+
+
 def write_state(state):
     """Publish the daemon state ('idle'/'recording'/'transcribing') for tray.py.
 
-    Best effort and atomic (temp file + replace): the tray tolerates a missing
-    file, but a half-written one would be noise. Never let state reporting
-    break dictation itself.
+    Best effort and atomic (temp file + replace, serialized by _STATE_LOCK):
+    the tray tolerates a missing file, but a half-written one would be noise.
+    Never let state reporting break dictation itself.
     """
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
+    with _STATE_LOCK:
         tmp = STATE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"state": state, "pid": os.getpid(),
-                       "version": VERSION, "model": CURRENT_MODEL,
-                       "ptt_key": PTT_KEY,
-                       "ts": time.time()}, fh)
-        os.replace(tmp, STATE_PATH)
-    except OSError:
-        pass
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"state": state, "pid": os.getpid(),
+                           "version": VERSION, "model": CURRENT_MODEL,
+                           "ptt_key": PTT_KEY,
+                           "ts": time.time()}, fh)
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, STATE_PATH)
+                    break
+                except PermissionError:
+                    # Windows: the tray's read_state() holding state.json
+                    # open for a moment blocks the replace — retry briefly.
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = configured_ptt_key()
 
@@ -1563,7 +1585,10 @@ class DictationDaemon:
                     os.remove(wav)
                 except OSError:
                     pass
-                write_state("idle")
+                # A new hold may have started while this one transcribed —
+                # "idle" would then hide that recording from the tray.
+                write_state("recording" if self.recording is not None
+                            else "idle")
 
     def run(self):
         which = backend_name()
