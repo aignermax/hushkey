@@ -18,10 +18,19 @@ for f in dictate.py tray.py update_helper.py recorder.py transcribe.py install.s
          requirements.txt requirements-gpu.txt README.md; do
   cp "$ROOT/$f" "$DEST/opt/hushkey/"
 done
-mkdir -p "$DEST/opt/hushkey/assets" "$DEST/opt/hushkey/systemd" "$DEST/opt/hushkey/udev"
+mkdir -p "$DEST/opt/hushkey/assets" "$DEST/opt/hushkey/systemd" "$DEST/opt/hushkey/udev" \
+         "$DEST/opt/hushkey/desktop"
 cp "$ROOT/assets/logo.png" "$DEST/opt/hushkey/assets/"
 cp "$ROOT/systemd/"*.service.in "$DEST/opt/hushkey/systemd/"
 cp "$ROOT/udev/"*.rules "$DEST/opt/hushkey/udev/"
+cp "$ROOT/desktop/"*.desktop.in "$DEST/opt/hushkey/desktop/"
+# The app-search entry is dpkg's to own: every remove/purge path — including
+# GNOME Software, where the maintainer scripts cannot tell who the user is —
+# then takes it along. install.sh sees it and skips its per-user copy.
+mkdir -p "$DEST/usr/share/applications"
+sed "s|@DIR@|/opt/hushkey|g" "$ROOT/desktop/hushkey.desktop.in" \
+  > "$DEST/usr/share/applications/hushkey.desktop"
+chmod 0644 "$DEST/usr/share/applications/hushkey.desktop"
 
 # --- metadata ---------------------------------------------------------------
 sed "s|@VERSION@|$VER|" "$ROOT/packaging/linux/control.in" > "$DEST/DEBIAN/control"

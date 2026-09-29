@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=hushkey
+GenericName=Push-to-talk dictation
+GenericName[de]=Push-to-Talk-Diktat
+Comment=Local, offline dictation: hold a key, speak, release
+Comment[de]=Lokales Offline-Diktat: Taste halten, sprechen, loslassen
+Keywords=dictation;speech;voice;whisper;whisper-ptt;transcribe;push-to-talk;Diktat;Sprache;Spracheingabe;
+Exec=systemctl --user restart whisper-ptt.service
+Icon=@DIR@/assets/logo.png
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false

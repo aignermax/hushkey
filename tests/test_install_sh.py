@@ -103,6 +103,9 @@ def sandbox(tmp_path):
         XDG_RUNTIME_DIR=str(tmp_path / "run"),
     )
     env.pop("SUDO_USER", None)
+    # install.sh honours XDG_DATA_HOME for the launcher — a developer's own
+    # value would send it into their real app menu instead of the fake HOME
+    env.pop("XDG_DATA_HOME", None)
     return {"repo": repo, "home": home, "env": env, "log": log,
             "units": home / ".config/systemd/user"}
 
@@ -379,3 +382,60 @@ def test_macos_unrelated_pip_failure_keeps_the_venv(sandbox):
     assert "python3.12" not in log and "brew" not in log
     assert (sandbox["repo"] / ".venv/bin/pip").read_text() == OFFLINE_PIP
     assert "Connection reset" in proc.stderr
+
+def test_linux_installs_a_launcher_for_the_app_search(sandbox):
+    """Without a .desktop file the app never shows up in GNOME/KDE search."""
+    for session in ("x11", "wayland"):
+        proc, _ = run_installer(sandbox, session, packaged_ydotool="1")
+        assert proc.returncode == 0, proc.stderr
+        entry = sandbox["home"] / ".local/share/applications/hushkey.desktop"
+        text = entry.read_text()
+        assert "@DIR@" not in text
+        assert f"Icon={sandbox['repo']}/assets/logo.png" in text
+        assert "Exec=systemctl --user restart whisper-ptt.service" in text
+
+
+def test_launcher_is_written_even_when_a_logout_is_pending(sandbox):
+    """The early exit after the 'input' group grant must not skip the launcher."""
+    # An id that reports no 'input' group forces NEEDS_LOGOUT=1 on Wayland,
+    # whatever groups the machine running the tests has.
+    _write_exec(sandbox["repo"].parent / "shims/id", """#!/usr/bin/env bash
+if [ "$1" = "-nG" ]; then echo users; else exec /usr/bin/id "$@"; fi
+""")
+    proc, log = run_installer(sandbox, "wayland", packaged_ydotool="1")
+    assert proc.returncode == 0, proc.stderr
+    assert "usermod -aG input" in log and "Log out" in proc.stdout
+    assert (sandbox["home"] / ".local/share/applications/hushkey.desktop").exists()
+
+
+def test_macos_gets_no_desktop_entry(sandbox):
+    proc, _ = run_installer(sandbox, "", uname="Darwin")
+    assert proc.returncode == 0, proc.stderr
+    assert not (sandbox["home"] / ".local/share/applications").exists()
+
+
+def test_an_unwritable_app_menu_does_not_cost_the_service(sandbox):
+    """The launcher is optional: a root-owned applications dir (left by some
+    earlier sudo) must not abort the install before the service is set up."""
+    apps = sandbox["home"] / ".local/share/applications"
+    apps.parent.mkdir(parents=True)
+    apps.write_text("")  # a file where the directory should be: mkdir fails
+    proc, log = run_installer(sandbox, "x11")
+    assert proc.returncode == 0, proc.stderr
+    assert "could not write" in proc.stdout
+    assert "systemctl --user restart whisper-ptt.service" in log
+
+
+def test_sed_metacharacters_in_the_install_path_survive(sandbox, tmp_path):
+    """'&' and '|' in $DIR are sed syntax in a replacement — escaped, the unit
+    and the launcher must carry the path verbatim."""
+    odd = tmp_path / "R&D|x" / "whisper-ptt"
+    odd.parent.mkdir()
+    shutil.move(str(sandbox["repo"]), str(odd))
+    sandbox["repo"] = odd
+    proc, _ = run_installer(sandbox, "x11")
+    assert proc.returncode == 0, proc.stderr
+    unit = (sandbox["units"] / "whisper-ptt.service").read_text()
+    assert f"{odd}/tray.py" in unit
+    entry = (sandbox["home"] / ".local/share/applications/hushkey.desktop").read_text()
+    assert f"Icon={odd}/assets/logo.png" in entry
