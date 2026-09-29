@@ -217,7 +217,7 @@ you switch the whisper model, restart the daemon, open the log folder, check
 for updates and install a new release with one click. If the icon cannot be
 shown (e.g. GNOME without an AppIndicator extension), the daemon keeps running
 regardless — use the commands below then. On Linux, *hushkey* in the app
-search (GNOME, KDE, …) starts the service again after it was stopped:
+search (GNOME, KDE, …) (re)starts the service — also after it was stopped:
 
 ```bash
 # Linux

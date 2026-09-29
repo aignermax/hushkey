@@ -16,8 +16,10 @@ else
     systemctl --user disable --now "$unit" 2>/dev/null || true
     rm -f "$UNIT_DIR/$unit"
   done
-  systemctl --user daemon-reload
+  # before daemon-reload: without a user bus (ssh, su) that fails and set -e
+  # would end the script with the launcher still in the app search
   rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/hushkey.desktop"
+  systemctl --user daemon-reload
   echo "services and app launcher removed"
 fi
 

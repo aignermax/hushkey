@@ -57,8 +57,20 @@ def test_desktop_entry_is_valid_and_cleaned_up():
     assert d["Type"] == "Application" and d["Name"] == "hushkey"
     assert d["Exec"] and d["Icon"] == "@DIR@/assets/logo.png"
     assert d["Categories"].endswith(";") and d["Keywords"].endswith(";")
-    for script in (ROOT / "uninstall.sh", DEB / "prerm", DEB / "postrm"):
-        assert "applications/hushkey.desktop" in script.read_text(encoding="utf-8"), script
+    assert "restart" in d["Exec"]  # also revives a daemon the tray gave up on
+    assert "applications/hushkey.desktop" in (ROOT / "uninstall.sh").read_text(
+        encoding="utf-8")
+
+
+def test_deb_owns_the_launcher_and_install_sh_defers_to_it():
+    """dpkg removes a file it owns on every path (GNOME Software included,
+    where the maintainer scripts cannot resolve the user); install.sh must
+    not add a second, per-user entry next to it."""
+    build = (DEB / "build-deb.sh").read_text(encoding="utf-8")
+    assert "usr/share/applications/hushkey.desktop" in build
+    assert "s|@DIR@|/opt/hushkey|g" in build
+    install = (ROOT / "install.sh").read_text(encoding="utf-8")
+    assert "/usr/share/applications/hushkey.desktop" in install
 
 
 def test_deb_control_has_mandatory_fields():

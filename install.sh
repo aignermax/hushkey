@@ -24,6 +24,9 @@ else
   fi
 fi
 VENV="$DIR/.venv"
+# $DIR as a sed replacement: '&', '|' and '\' would otherwise be read as sed
+# syntax (a clone under ~/src/R&D/ must not yield a broken unit or icon path).
+DIR_SED="$(printf '%s' "$DIR" | sed 's/[&|\\]/\\&/g')"
 UNIT_DIR="$HOME/.config/systemd/user"
 OS="$(uname -s)"
 # Only meaningful on Linux; stays empty elsewhere so the Wayland paths are skipped.
@@ -340,7 +343,7 @@ if [ "$SESSION" = "wayland" ]; then
       exit 1
     fi
     echo "    installing our own ydotoold.service ($YDOTOOLD)"
-    sed -e "s|@DIR@|$DIR|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
+    sed -e "s|@DIR@|$DIR_SED|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
       "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
   fi
 fi
@@ -349,7 +352,7 @@ if [ "$OS" = "Darwin" ]; then
   echo "==> installing launchd agent"
   PLIST="$HOME/Library/LaunchAgents/com.whisper-ptt.plist"
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/whisper-ptt"
-  sed -e "s|@DIR@|$DIR|g" -e "s|@HOME@|$HOME|g" \
+  sed -e "s|@DIR@|$DIR_SED|g" -e "s|@HOME@|$HOME|g" \
     "$DIR/macos/com.whisper-ptt.plist.in" > "$PLIST"
   launchctl bootout "gui/$(id -u)/com.whisper-ptt" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -362,17 +365,25 @@ if [ "$OS" = "Darwin" ]; then
 else
   echo "==> installing systemd user service"
   mkdir -p "$UNIT_DIR"
-  sed "s|@DIR@|$DIR|g" "$DIR/systemd/whisper-ptt.service.in" \
+  sed "s|@DIR@|$DIR_SED|g" "$DIR/systemd/whisper-ptt.service.in" \
     > "$UNIT_DIR/whisper-ptt.service"
   systemctl --user daemon-reload
 
   # A launcher, so the app shows up in the desktop's app search (GNOME,
-  # KDE, ...). The daemon itself is the service above, so "launching" it
-  # starts the service — a no-op when it already runs, and the way back after
-  # "systemctl --user stop" without a terminal.
+  # KDE, ...). The daemon itself is the service above, so launching restarts
+  # it — which also revives a daemon the tray gave up on. The .deb ships its
+  # own dpkg-owned entry in /usr/share/applications; a per-user copy next to
+  # it would list the app twice. Best effort: a missing launcher must never
+  # cost the service setup below.
   APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-  mkdir -p "$APPS_DIR"
-  sed "s|@DIR@|$DIR|g" "$DIR/desktop/hushkey.desktop.in" > "$APPS_DIR/hushkey.desktop"
+  if [ -f /usr/share/applications/hushkey.desktop ]; then
+    rm -f "$APPS_DIR/hushkey.desktop" 2>/dev/null || true
+  elif ! { mkdir -p "$APPS_DIR" \
+      && sed "s|@DIR@|$DIR_SED|g" "$DIR/desktop/hushkey.desktop.in" \
+        > "$APPS_DIR/hushkey.desktop"; } 2>/dev/null; then
+    echo "    WARNING: could not write $APPS_DIR/hushkey.desktop — hushkey"
+    echo "             will not show up in the app search (dictation is unaffected)"
+  fi
 
   if [ "$SESSION" = "wayland" ]; then
     systemctl --user enable "$YDOTOOLD_UNIT"
