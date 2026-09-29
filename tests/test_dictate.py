@@ -247,6 +247,7 @@ def test_concurrent_state_writes_never_publish_mixed_json(monkeypatch, tmp_path)
     """The key listener and the transcribe worker publish concurrently; a
     shared temp file let one writer truncate the other's (JSON 'Extra data')."""
     state_file = tmp_path / "state.json"
+    monkeypatch.setattr(dictate, "STATE_DIR", str(tmp_path))
     monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
     errors = []
 
@@ -267,7 +268,30 @@ def test_concurrent_state_writes_never_publish_mixed_json(monkeypatch, tmp_path)
     for t in threads:
         t.join()
     assert not errors
-    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob("*.tmp"))  # a failed replace cleans up too
+
+
+def test_worker_reports_a_recording_that_started_during_transcription(
+        monkeypatch, tmp_path):
+    """Pressing PTT again while the previous hold transcribes: the worker's
+    final publish must not paint the new recording 'idle'."""
+    states = []
+    monkeypatch.setattr(dictate, "write_state", states.append)
+    monkeypatch.setattr(dictate, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(dictate, "log", lambda *a, **k: None)
+    d = dictate.DictationDaemon.__new__(dictate.DictationDaemon)
+    d.busy_lock = threading.Lock()
+    d.recording = time.time()  # the next hold is already running
+    d._transcribe = lambda source, lang: []
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"")
+    monkeypatch.setattr(dictate, "_audio_rms", lambda w: 0.5)
+    d._transcribe_and_insert(str(wav), 1.0)
+    assert states[-1] == "recording"
+    d.recording = None
+    wav.write_bytes(b"")
+    d._transcribe_and_insert(str(wav), 1.0)
+    assert states[-1] == "idle"
 
 
 def test_configured_ptt_key_precedence(monkeypatch, tmp_path):
