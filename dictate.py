@@ -201,7 +201,11 @@ def write_state(state):
     """
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        tmp = STATE_PATH + ".tmp"
+        # One temp file per thread: the key listener ('recording') and the
+        # transcribe worker ('idle') can publish at the same moment, and with
+        # a shared temp name one open(..., "w") truncates the other's
+        # half-written file — the published JSON then carries both.
+        tmp = f"{STATE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"state": state, "pid": os.getpid(),
                        "version": VERSION, "model": CURRENT_MODEL,

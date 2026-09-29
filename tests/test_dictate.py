@@ -243,6 +243,33 @@ def test_write_state_publishes_json(monkeypatch, tmp_path):
     assert data["ts"] > 0
 
 
+def test_concurrent_state_writes_never_publish_mixed_json(monkeypatch, tmp_path):
+    """The key listener and the transcribe worker publish concurrently; a
+    shared temp file let one writer truncate the other's (JSON 'Extra data')."""
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(dictate, "STATE_PATH", str(state_file))
+    errors = []
+
+    def hammer(state):
+        for _ in range(200):
+            dictate.write_state(state)
+            try:
+                json.loads(state_file.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                errors.append(exc)
+            except OSError:
+                pass  # Windows: replace() racing a read
+
+    threads = [threading.Thread(target=hammer, args=(s,))
+               for s in ("recording", "idle", "transcribing")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_configured_ptt_key_precedence(monkeypatch, tmp_path):
     monkeypatch.delenv("PTT_KEY", raising=False)
     cfg = tmp_path / "config.json"
