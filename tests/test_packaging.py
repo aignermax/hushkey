@@ -43,6 +43,22 @@ def test_deb_payload_matches_install_sh_expectations():
     assert "systemd/" in script and "udev/" in script
     assert "assets/logo.png" in script
     assert "install.sh" in script and "uninstall.sh" in script
+    assert "desktop/" in script  # install.sh renders desktop/hushkey.desktop.in
+
+
+def test_desktop_entry_is_valid_and_cleaned_up():
+    """The launcher template must parse as a desktop entry, and every way of
+    uninstalling must take it along — a stale one keeps the app in search."""
+    import configparser
+    entry = configparser.ConfigParser(interpolation=None)
+    entry.optionxform = str
+    entry.read(ROOT / "desktop" / "hushkey.desktop.in", encoding="utf-8")
+    d = entry["Desktop Entry"]
+    assert d["Type"] == "Application" and d["Name"] == "hushkey"
+    assert d["Exec"] and d["Icon"] == "@DIR@/assets/logo.png"
+    assert d["Categories"].endswith(";") and d["Keywords"].endswith(";")
+    for script in (ROOT / "uninstall.sh", DEB / "prerm", DEB / "postrm"):
+        assert "applications/hushkey.desktop" in script.read_text(encoding="utf-8"), script
 
 
 def test_deb_control_has_mandatory_fields():

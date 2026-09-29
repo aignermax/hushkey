@@ -17,7 +17,8 @@ else
     rm -f "$UNIT_DIR/$unit"
   done
   systemctl --user daemon-reload
-  echo "services removed"
+  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/hushkey.desktop"
+  echo "services and app launcher removed"
 fi
 
 for arg in "$@"; do

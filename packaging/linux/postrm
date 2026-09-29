@@ -14,7 +14,8 @@ if [ "$1" = "purge" ]; then
         USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6 || true)"
         if [ -n "$USER_HOME" ]; then
             rm -f "$USER_HOME/.config/systemd/user/whisper-ptt.service" \
-                  "$USER_HOME/.config/systemd/user/ydotoold.service"
+                  "$USER_HOME/.config/systemd/user/ydotoold.service" \
+                  "$USER_HOME/.local/share/applications/hushkey.desktop"
             rm -rf "$USER_HOME/.local/share/whisper-ptt" \
                   "$USER_HOME/.local/share/hushkey" \
                   "$USER_HOME/.local/state/whisper-ptt"

@@ -23,7 +23,8 @@ Grab the installer from the
   `%LOCALAPPDATA%\whisper-ptt` in place).
 - **Linux (Debian/Ubuntu):** `hushkey_…_all.deb` — `sudo apt install ./hushkey_…_all.deb`
   resolves the dependencies and sets up everything (venv, systemd user
-  service); `apt purge hushkey` removes it again, including the udev rule.
+  service, a *hushkey* entry in the app search); `apt purge hushkey` removes
+  it again, including the udev rule.
 
 Prefer the terminal — or are on macOS? The one-liners do the same job, and
 re-running them updates in place:
@@ -215,7 +216,8 @@ auto-hidden taskbar cannot swallow it. The menu lets
 you switch the whisper model, restart the daemon, open the log folder, check
 for updates and install a new release with one click. If the icon cannot be
 shown (e.g. GNOME without an AppIndicator extension), the daemon keeps running
-regardless — use the commands below then:
+regardless — use the commands below then. On Linux, *hushkey* in the app
+search (GNOME, KDE, …) starts the service again after it was stopped:
 
 ```bash
 # Linux

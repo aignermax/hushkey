@@ -379,3 +379,33 @@ def test_macos_unrelated_pip_failure_keeps_the_venv(sandbox):
     assert "python3.12" not in log and "brew" not in log
     assert (sandbox["repo"] / ".venv/bin/pip").read_text() == OFFLINE_PIP
     assert "Connection reset" in proc.stderr
+
+def test_linux_installs_a_launcher_for_the_app_search(sandbox):
+    """Without a .desktop file the app never shows up in GNOME/KDE search."""
+    for session in ("x11", "wayland"):
+        proc, _ = run_installer(sandbox, session, packaged_ydotool="1")
+        assert proc.returncode == 0, proc.stderr
+        entry = sandbox["home"] / ".local/share/applications/hushkey.desktop"
+        text = entry.read_text()
+        assert "@DIR@" not in text
+        assert f"Icon={sandbox['repo']}/assets/logo.png" in text
+        assert "Exec=systemctl --user start whisper-ptt.service" in text
+
+
+def test_launcher_is_written_even_when_a_logout_is_pending(sandbox):
+    """The early exit after the 'input' group grant must not skip the launcher."""
+    # An id that reports no 'input' group forces NEEDS_LOGOUT=1 on Wayland,
+    # whatever groups the machine running the tests has.
+    _write_exec(sandbox["repo"].parent / "shims/id", """#!/usr/bin/env bash
+if [ "$1" = "-nG" ]; then echo users; else exec /usr/bin/id "$@"; fi
+""")
+    proc, log = run_installer(sandbox, "wayland", packaged_ydotool="1")
+    assert proc.returncode == 0, proc.stderr
+    assert "usermod -aG input" in log and "Log out" in proc.stdout
+    assert (sandbox["home"] / ".local/share/applications/hushkey.desktop").exists()
+
+
+def test_macos_gets_no_desktop_entry(sandbox):
+    proc, _ = run_installer(sandbox, "", uname="Darwin")
+    assert proc.returncode == 0, proc.stderr
+    assert not (sandbox["home"] / ".local/share/applications").exists()

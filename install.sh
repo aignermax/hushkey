@@ -366,6 +366,14 @@ else
     > "$UNIT_DIR/whisper-ptt.service"
   systemctl --user daemon-reload
 
+  # A launcher, so the app shows up in the desktop's app search (GNOME,
+  # KDE, ...). The daemon itself is the service above, so "launching" it
+  # starts the service — a no-op when it already runs, and the way back after
+  # "systemctl --user stop" without a terminal.
+  APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  mkdir -p "$APPS_DIR"
+  sed "s|@DIR@|$DIR|g" "$DIR/desktop/hushkey.desktop.in" > "$APPS_DIR/hushkey.desktop"
+
   if [ "$SESSION" = "wayland" ]; then
     systemctl --user enable "$YDOTOOLD_UNIT"
     if [ "$NEEDS_LOGOUT" -eq 0 ]; then

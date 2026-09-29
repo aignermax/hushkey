@@ -13,6 +13,12 @@ case "$1" in
                 systemctl --user disable --now whisper-ptt.service ydotoold.service \
                 >/dev/null 2>&1 || true
         fi
+        # install.sh put a launcher into the user's app menu; without it
+        # removed, the uninstalled app would keep showing up in the search.
+        USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6 || true)"
+        if [ -n "$USER_HOME" ]; then
+            rm -f "$USER_HOME/.local/share/applications/hushkey.desktop"
+        fi
     fi
     ;;
 esac
