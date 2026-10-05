@@ -24,7 +24,7 @@ jobs:
           cache: pip
       - name: Linux Vulkan build tools and software driver
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build glslc libvulkan-dev mesa-vulkan-drivers libportaudio2
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build glslc libvulkan-dev spirv-headers mesa-vulkan-drivers libportaudio2
       - name: Windows Vulkan SDK
         if: runner.os == 'Windows'
         shell: pwsh

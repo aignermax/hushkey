@@ -222,6 +222,7 @@ class WhisperCppModel:
                 wav.setframerate(16000)
                 wav.writeframes((np.clip(audio, -1, 1) * 32767).astype('<i2').tobytes())
             fields = {'response_format': 'verbose_json', 'language': language or 'auto',
+                      'token_timestamps': 'false',
                       'beam_size': str(beam_size), 'prompt': initial_prompt or '',
                       'temperature': str(0.0 if temperature is None else temperature),
                       'temperature_inc': '0.2' if temperature is None else '0.0',

@@ -150,7 +150,7 @@ directory**. This optional setup compiles the pinned whisper.cpp v1.9.4 source
 with Vulkan. It needs build tools once; it does not install or change GPU drivers.
 Use a current AMD driver (Linux: a working Mesa/RADV Vulkan driver).
 
-**Windows:** install Git, CMake 3.21+ and Visual Studio 2022 Build Tools with
+**Windows 10 1903+ / Windows 11:** install Git and Visual Studio 2022 or 2026 Build Tools with
 **Desktop development with C++**, plus the [Vulkan SDK](https://vulkan.lunarg.com/).
 Open a new PowerShell after installing the tools:
 
@@ -159,9 +159,9 @@ Open a new PowerShell after installing the tools:
 [Environment]::SetEnvironmentVariable('WHISPER_ENGINE', 'vulkan', 'User')
 ```
 
-The default generator is Visual Studio 2022. For Visual Studio 2026 use a CMake
-version supporting it and `--generator "Visual Studio 18 2026"`; `--cmake` accepts
-an explicit path to CMake. **Quit hushkey and sign out/in** so the autostart task
+Setup detects Visual Studio and uses its bundled CMake when available. Otherwise
+install CMake supporting your compiler; `--cmake` and `--generator` accept explicit
+overrides. **Quit hushkey and sign out/in** so the autostart task
 receives the new environment. To try it immediately in the same PowerShell:
 
 ```powershell
@@ -172,7 +172,7 @@ $env:WHISPER_ENGINE = 'vulkan'
 **Debian/Ubuntu Linux:**
 
 ```bash
-sudo apt install build-essential git cmake ninja-build libvulkan-dev glslc mesa-vulkan-drivers
+sudo apt install build-essential git cmake ninja-build libvulkan-dev glslc spirv-headers mesa-vulkan-drivers
 .venv/bin/python setup_vulkan.py --generator Ninja
 systemctl --user edit whisper-ptt
 ```

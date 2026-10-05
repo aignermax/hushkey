@@ -1,8 +1,13 @@
 """Contract tests for the local whisper.cpp adapter (no GPU required)."""
 import io
 import json
+import os
+from pathlib import Path
+import socket
+import subprocess
 import sys
 import threading
+import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -56,6 +61,9 @@ def test_pcm_transcription_preserves_timestamps_language_and_prompt(endpoint):
     assert b'RIFF' in body and b'auto' in body
     assert '简体中文'.encode() in body
     assert b'name="temperature_inc"\r\n\r\n0.0' in body
+    # Native verbose_json otherwise defaults to token wrapping at 60 chars,
+    # which can split a word before the app joins segments with spaces.
+    assert b'name="token_timestamps"\r\n\r\nfalse' in body
 
 
 def test_silence_does_not_call_server(endpoint, monkeypatch):
@@ -153,3 +161,117 @@ def test_batch_uses_vulkan(monkeypatch, tmp_path):
     assert transcribe.main([str(audio), '--out', str(tmp_path / 'notes')]) == 0
     assert 'Hallo AMD' in (tmp_path / 'notes/memo.md').read_text(encoding='utf-8')
     assert closed == [True]
+
+
+@pytest.fixture
+def native_stub(tmp_path):
+    """Real child process and HTTP socket, substituting only the native engine."""
+    path = tmp_path / 'server with spaces.py'
+    path.write_text('''
+import argparse, json
+from http.server import HTTPServer, BaseHTTPRequestHandler
+p=argparse.ArgumentParser()
+p.add_argument('--port', type=int)
+p.add_argument('--request-path')
+args,_=p.parse_known_args()
+class Handler(BaseHTTPRequestHandler):
+ def do_GET(self):
+  self.send_response(200); self.end_headers()
+  self.wfile.write(b'{"status":"ok"}')
+ def log_message(self,*args): pass
+server=HTTPServer(('127.0.0.1',args.port),Handler)
+print('whisper_backend_init_gpu: using Vulkan0 backend',flush=True)
+server.serve_forever()
+''', encoding='utf-8')
+    return path
+
+
+def test_model_lifecycle_owns_server_and_close_is_idempotent(monkeypatch, native_stub):
+    import whisper_cpp
+    monkeypatch.setenv('WHISPER_CPP_SERVER', sys.executable)
+    monkeypatch.setattr(whisper_cpp, 'resolve_model', lambda _: 'tiny.bin')
+    real_popen = subprocess.Popen
+
+    def spawn(command, **kwargs):
+        return real_popen(command[:3] + [sys.executable, str(native_stub)] + command[4:], **kwargs)
+
+    monkeypatch.setattr(whisper_cpp.subprocess, 'Popen', spawn)
+    model = whisper_cpp.WhisperCppModel('tiny', startup_timeout=5)
+    port = int(model.url.split(':')[2].split('/')[0])
+    assert model.device == 'Vulkan0'
+    model.close()
+    model.close()
+    with socket.socket() as sock:
+        assert sock.connect_ex(('127.0.0.1', port)) != 0
+
+
+def test_supervisor_reaps_child_when_application_is_forcibly_terminated(tmp_path, native_stub):
+    import whisper_cpp
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    parent_script = tmp_path / 'parent.py'
+    parent_script.write_text('''
+import subprocess, sys, time
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE)
+time.sleep(60)
+''', encoding='utf-8')
+    parent = subprocess.Popen([sys.executable, str(parent_script), sys.executable,
+        whisper_cpp.__file__, '--supervise', sys.executable, str(native_stub),
+        '--port', str(port), '--request-path', '/test'], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with socket.socket() as sock:
+                if sock.connect_ex(('127.0.0.1', port)) == 0:
+                    break
+            time.sleep(.1)
+        else:
+            pytest.fail('native test server did not start')
+        parent.terminate()
+        parent.wait(timeout=5)
+        # EOF on stdout proves BOTH supervisor and its native child released
+        # their inherited pipe handles, even though the application was killed.
+        parent.communicate(timeout=10)
+        with socket.socket() as sock:
+            assert sock.connect_ex(('127.0.0.1', port)) != 0
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait()
+
+
+def test_startup_timeout_cleans_up_child(monkeypatch, native_stub):
+    import whisper_cpp
+    monkeypatch.setenv('WHISPER_CPP_SERVER', sys.executable)
+    monkeypatch.setattr(whisper_cpp, 'resolve_model', lambda _: 'tiny.bin')
+    processes = []
+    real_popen = subprocess.Popen
+
+    def spawn(command, **kwargs):
+        child = real_popen(command[:3] + [sys.executable, '-c',
+            'import time; time.sleep(60)'], **kwargs)
+        processes.append(child)
+        return child
+
+    monkeypatch.setattr(whisper_cpp.subprocess, 'Popen', spawn)
+    with pytest.raises(RuntimeError, match='timed out'):
+        whisper_cpp.WhisperCppModel('tiny', startup_timeout=.1)
+    assert processes[0].poll() is not None
+
+
+def test_pythonw_supervisor_uses_a_working_stdin_pipe(tmp_path):
+    if sys.platform != 'win32':
+        pytest.skip('pythonw is Windows-only')
+    import whisper_cpp
+    pythonw = Path(sys.executable).with_name('pythonw.exe')
+    proc = subprocess.Popen([str(pythonw), whisper_cpp.__file__, '--supervise',
+        sys.executable, '-c', 'import time; time.sleep(60)'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc.stdin.close()
+    proc.wait(timeout=10)
+    error = proc.stderr.read().decode(errors='replace')
+    proc.stdout.close()
+    proc.stderr.close()
+    assert 'Exception' not in error and 'Traceback' not in error
