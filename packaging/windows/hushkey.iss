@@ -6,8 +6,6 @@
     #define MyAppVersion "0.0.0-dev"
   #endif
 #endif
-; SHA-256 of https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
-#define PythonSha256 "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
 
 [Setup]
 AppId={{7F3A9C2E-4B6D-4E1A-9C5F-2D8E6A1B3F47}
@@ -38,7 +36,8 @@ Source: "..\..\whisper_cpp.py"; DestDir: "{app}"
 Source: "..\..\setup_vulkan.py"; DestDir: "{app}"
 Source: "..\..\acceleration.py"; DestDir: "{app}"
 Source: "..\..\setup_acceleration.py"; DestDir: "{app}"
-Source: "..\..\native\*"; DestDir: "{app}\native"; Flags: recursesubdirs createallsubdirs
+Source: "..\..\native\native-manifest.json"; DestDir: "{app}\native"
+Source: "..\..\native\hushkey-engine-windows-x64.zip"; DestDir: "{app}\native"
 Source: "..\..\install.ps1"; DestDir: "{app}"
 Source: "..\..\uninstall.ps1"; DestDir: "{app}"
 Source: "..\..\requirements.txt"; DestDir: "{app}"
@@ -62,9 +61,9 @@ begin
     WizardForm.StatusLabel.Caption := 'Setting up hushkey and automatic acceleration ...';
     // install.ps1 owns Python discovery and the SHA256-verified bootstrap.
     if not Exec('powershell.exe',
-                '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\install.ps1"',
+                '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\install.ps1" -LogPath "' + ExpandConstant('{app}') + '\install.log"',
                 ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)
        or (ResultCode <> 0) then
-      RaiseException('hushkey setup failed. Check the installation log and retry.');
+      RaiseException('hushkey setup failed. See ' + ExpandConstant('{app}') + '\install.log and retry.');
   end;
 end;

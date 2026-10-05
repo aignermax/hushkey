@@ -11,6 +11,10 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows installer")
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 @pytest.mark.parametrize("setup_code", [0, 37])
 def test_setup_runs_and_failures_propagate_without_autostart(tmp_path, setup_code):
     shutil.copy(ROOT / "install.ps1", tmp_path)
@@ -29,3 +33,40 @@ def test_setup_runs_and_failures_propagate_without_autostart(tmp_path, setup_cod
     assert (tmp_path / "setup-ran").exists(), proc.stdout + proc.stderr
     assert (proc.returncode == 0) == (setup_code == 0)
     assert "autostart:" not in proc.stdout
+
+
+@pytest.mark.parametrize("valid_hash", [False, True])
+def test_fresh_machine_bootstrap_verifies_before_running_python_installer(tmp_path, valid_hash):
+    shutil.copy(ROOT / "install.ps1", tmp_path)
+    (tmp_path / "dictate.py").write_text("")
+    (tmp_path / "pip.py").write_text("")
+    (tmp_path / "setup_acceleration.py").write_text("from pathlib import Path\nPath(__file__).with_name('configured').touch()\n")
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(tmp_path / ".venv")], check=True)
+    digest = "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb" if valid_hash else "bad-download"
+    wrapper = tmp_path / "run.ps1"
+    wrapper.write_text(f"""
+$global:bootstrapped = $false
+function Get-Command {{ param($Name, [switch]$All, $CommandType, $ErrorAction) return $null }}
+function Get-ChildItem {{
+  param($Path, $ErrorAction)
+  if ($global:bootstrapped) {{ [pscustomobject]@{{ FullName = {ps_quote(sys.executable)} }} }}
+}}
+function Invoke-WebRequest {{
+  param([switch]$UseBasicParsing, $Uri, $OutFile)
+  if ($Uri -notlike 'https://www.python.org/*') {{ throw 'unexpected download' }}
+  [IO.File]::WriteAllText($OutFile, 'offline installer boundary')
+}}
+function Get-FileHash {{ param($LiteralPath, $Algorithm) [pscustomobject]@{{ Hash = '{digest}' }} }}
+function Start-Process {{
+  param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru, $WindowStyle)
+  [IO.File]::WriteAllText({ps_quote(tmp_path / 'installer-ran')}, $ArgumentList)
+  $global:bootstrapped = $true
+  [pscustomobject]@{{ ExitCode = 0 }}
+}}
+& {ps_quote(tmp_path / 'install.ps1')} -NoAutostart
+""", encoding="utf-8")
+    proc = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+                          env=dict(os.environ, PYTHONPATH=str(tmp_path)), text=True, capture_output=True, timeout=60)
+    assert (tmp_path / "installer-ran").exists() == valid_hash, proc.stdout + proc.stderr
+    assert (tmp_path / "configured").exists() == valid_hash, proc.stdout + proc.stderr
+    assert (proc.returncode == 0) == valid_hash

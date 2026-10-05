@@ -1,19 +1,17 @@
 #!/bin/sh
-# hushkey prerm: stop our user services before the payload leaves /opt.
-# Best effort — a user who never ran the setup has nothing to stop.
-# The distribution's ydotool.service is deliberately left alone: it is a
-# shared, preset-managed unit, not ours to disable.
-case "$1" in
+# Stop every dpkg-managed user's service, including PackageKit removals which
+# carry no caller identity. Do not stop the distro's shared ydotool service.
+case "${1:-}" in
   remove|deconfigure)
-    USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
-    if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
-        USER_ID="$(id -u "$USER_NAME" 2>/dev/null || true)"
-        if [ -n "$USER_ID" ]; then
-            sudo -u "$USER_NAME" XDG_RUNTIME_DIR="/run/user/$USER_ID" \
-                systemctl --user disable --now whisper-ptt.service ydotoold.service \
-                >/dev/null 2>&1 || true
-        fi
-    fi
+    getent passwd | while IFS=: read -r name password uid gid info home shell; do
+      case "$home" in /|"") continue ;; /*) ;; *) continue ;; esac
+      [ "$name" != root ] || continue
+      [ -f "$home/.local/share/whisper-ptt/.deb-managed" ] || continue
+      sudo -u "$name" XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        systemctl --user disable --now whisper-ptt.service ydotoold.service \
+        >/dev/null 2>&1 || true
+    done
     ;;
 esac
 exit 0

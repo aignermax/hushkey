@@ -5,7 +5,7 @@ set -euo pipefail
 PREFIX="$(pwd)/.shader-tools"
 if [ ! -x "$PREFIX/bin/glslc" ]; then
   git clone --depth 1 --branch v2025.1 https://github.com/google/shaderc.git .shaderc-source
-  test "$(git -C .shaderc-source rev-parse HEAD)" = 7f68b1cf6f35f518febf36d425365bb8e6ad224a
+  test "$(git -C .shaderc-source rev-parse HEAD)" = 0968768c61d4eb7dd861114412e904bb3d59b7b6
   (cd .shaderc-source && python utils/git-sync-deps)
   cmake -S .shaderc-source -B .shaderc-build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=ON \

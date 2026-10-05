@@ -16,7 +16,7 @@ def test_iss_sources_all_exist():
     sources = re.findall(r'^Source: "([^"]+)"', text, flags=re.M)
     assert sources, "no [Files] entries found"
     missing = [s for s in sources
-               if s != "logo.ico" and s != r"..\..\native\*"  # generated in CI
+               if s != "logo.ico" and not s.startswith("..\\..\\native\\")  # generated in CI
                and not (ISS.parent / s.replace("\\", "/")).resolve().exists()]
     assert not missing, f"missing installer payloads: {missing}"
 

@@ -132,13 +132,44 @@ def test_cuda_dependencies_installed_in_active_venv_only_when_missing(monkeypatc
     import setup_acceleration as s
     calls = []
     monkeypatch.setattr(s.importlib.util, 'find_spec', lambda _: None)
+    monkeypatch.setattr(s.importlib.metadata, 'version', lambda name: '8.9.0' if 'cudnn' in name else '12.5.0')
     monkeypatch.setattr(s.subprocess, 'run', lambda command, **kwargs: calls.append((command, kwargs)))
     s.ensure_cuda_libraries()
     assert calls[0][0][:4] == [s.sys.executable, '-m', 'pip', 'install']
     assert calls[0][1]['check'] is True
     monkeypatch.setattr(s.importlib.util, 'find_spec', lambda _: object())
+    monkeypatch.setattr(s.importlib.metadata, 'version', lambda name: '9.5.0' if 'cudnn' in name else '12.5.0')
     s.ensure_cuda_libraries()
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('cudnn,cublas', [('8.9.0', '12.5.0'), ('10.0.0', '12.5.0'), ('9.5.0', '13.0.0')])
+def test_cuda_incompatible_installed_version_is_repaired(monkeypatch, cudnn, cublas):
+    import setup_acceleration as s
+    monkeypatch.setattr(s.importlib.util, 'find_spec', lambda _: object())
+    monkeypatch.setattr(s.importlib.metadata, 'version', lambda name: cudnn if 'cudnn' in name else cublas)
+    calls = []
+    monkeypatch.setattr(s.subprocess, 'run', lambda *args, **kwargs: calls.append(args))
+    s.ensure_cuda_libraries()
+    assert len(calls) == 1
+
+
+def test_setup_resolves_explicit_server_on_path(monkeypatch):
+    import setup_acceleration as s
+    monkeypatch.setenv('WHISPER_ENGINE', 'vulkan')
+    monkeypatch.setenv('WHISPER_CPP_SERVER', 'whisper-server')
+    monkeypatch.setattr(s, 'install_native', lambda: '/bundled/server')
+    monkeypatch.setattr(s.shutil, 'which', lambda command: '/path/server' if command == 'whisper-server' else None)
+    probed = []
+    def probe(server, engine):
+        probed.append(server)
+        return {'server': server, 'engine': engine, 'device': 0}
+    monkeypatch.setattr(s, 'probe_native', probe)
+    saved = []
+    monkeypatch.setattr(s.acceleration, 'save_settings', saved.append)
+    assert s.main() == 0
+    assert probed == ['/path/server']
+    assert saved[0]['server'] == '/path/server'
 
 
 @pytest.mark.parametrize('settings', [
@@ -173,6 +204,8 @@ def test_corrupt_installed_engine_repairs_to_fresh_directory(tmp_path, monkeypat
     ('whisper.cpp did not initialize a hardware GPU\nwhisper_backend_init_gpu: no GPU found', 'NoHardware'),
     ('whisper-server exited during startup; missing DLL', 'RuntimeError'),
     ('Vulkan ErrorIncompatibleDriver', 'NoHardware'),
+    ('ggml_vulkan: Vulkan 1.2 required.\nErrorFeatureNotPresent', 'NoHardware'),
+    ('shader pipeline creation: ErrorFeatureNotPresent', 'RuntimeError'),
     ('device memory allocation failed; no GPU found', 'RuntimeError'),
 ])
 def test_probe_distinguishes_hardware_from_broken_install(monkeypatch, message, exception):
@@ -183,7 +216,7 @@ def test_probe_distinguishes_hardware_from_broken_install(monkeypatch, message, 
         raise RuntimeError(message)
     monkeypatch.setattr(whisper_cpp, 'WhisperCppModel', fail)
     with pytest.raises(RuntimeError) as error:
-        s.probe_native('/server')
+        s.probe_native('/server', 'vulkan')
     assert type(error.value).__name__ == exception
 
 
@@ -197,4 +230,33 @@ def test_setup_rejects_software_vulkan(monkeypatch):
                             close=lambda: None)
     monkeypatch.setattr(whisper_cpp, 'WhisperCppModel', lambda *a, **kw: model)
     with pytest.raises(s.NoHardware, match='software'):
-        s.probe_native('/server')
+        s.probe_native('/server', 'vulkan')
+
+
+def test_metal_without_system_device_is_cpu_before_model_download(monkeypatch):
+    import setup_acceleration as s
+    import whisper_cpp
+    monkeypatch.setattr(s, 'metal_available', lambda: False)
+    monkeypatch.setattr(whisper_cpp, 'resolve_model', lambda _: pytest.fail('unneeded model download'))
+    with pytest.raises(s.NoHardware, match='Metal'):
+        s.probe_native('/server', 'metal')
+
+
+@pytest.mark.parametrize('device', [None, 123])
+def test_metal_preflight_calls_system_framework_without_developer_tools(monkeypatch, device):
+    import setup_acceleration as s
+    from types import SimpleNamespace
+    class Function:
+        def __init__(self, result):
+            self.result = result
+        def __call__(self, *args):
+            return self.result
+    create = Function(device)
+    releases = []
+    def release(*args):
+        releases.append(args)
+    metal = SimpleNamespace(MTLCreateSystemDefaultDevice=create)
+    objc = SimpleNamespace(sel_registerName=Function(456), objc_msgSend=release)
+    monkeypatch.setattr(s.ctypes, 'CDLL', lambda path: metal if '/Metal.framework/' in path else objc)
+    assert s.metal_available() is bool(device)
+    assert len(releases) == bool(device)

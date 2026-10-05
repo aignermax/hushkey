@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import ctypes
 import importlib.util
+import importlib.metadata
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -122,7 +124,13 @@ def ensure_cuda_libraries():
     try:
         present = all(importlib.util.find_spec(name) is not None
                       for name in ('nvidia.cublas', 'nvidia.cudnn'))
-    except (ImportError, ModuleNotFoundError):
+        # CTranslate2 requires cuBLAS 12 and cuDNN 9. Older cuDNN packages use
+        # the same import names, so module presence alone cannot prove this.
+        compatible = all(int(importlib.metadata.version(package).split('.')[0]) == major
+                         for package, major in (('nvidia-cublas-cu12', 12),
+                                                ('nvidia-cudnn-cu12', 9)))
+        present = present and compatible
+    except (ImportError, importlib.metadata.PackageNotFoundError, ValueError):
         present = False
     if not present:
         print('Installing CUDA runtime libraries for the detected NVIDIA GPU...')
@@ -133,8 +141,8 @@ def ensure_cuda_libraries():
 def probe_cuda():
     if sys.platform == 'darwin':
         return False
-    from transcribe import preload_cuda_libs
-    preload_cuda_libs()
+    # Device count uses the driver. Load cuBLAS/cuDNN only inside the worker,
+    # after pip has repaired versions; preloading would lock old DLLs on Windows.
     import ctranslate2
     if not ctranslate2.get_cuda_device_count():
         return False
@@ -170,10 +178,35 @@ def _is_software(name):
     return bool(re.search(r'llvmpipe|lavapipe|swiftshader|software rasterizer', name, re.I))
 
 
+def metal_available():
+    """Ask the system Metal framework, without Xcode or command-line tools.
+
+    whisper.cpp can register its Metal backend even when this function returns
+    nil, then fail later without a useful 'no devices' message.
+    """
+    metal = ctypes.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
+    create = metal.MTLCreateSystemDefaultDevice
+    create.argtypes = []
+    create.restype = ctypes.c_void_p
+    device = create()
+    if not device:
+        return False
+    # MTLCreateSystemDefaultDevice follows the Create ownership convention.
+    objc = ctypes.CDLL('/usr/lib/libobjc.A.dylib')
+    objc.sel_registerName.argtypes = [ctypes.c_char_p]
+    objc.sel_registerName.restype = ctypes.c_void_p
+    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    objc.objc_msgSend.restype = None
+    objc.objc_msgSend(device, objc.sel_registerName(b'release'))
+    return True
+
+
 def probe_native(executable, engine=None):
     from whisper_cpp import WhisperCppModel, resolve_model
     import numpy as np
     engine = engine or ('metal' if sys.platform == 'darwin' else 'vulkan')
+    if engine == 'metal' and not metal_available():
+        raise NoHardware('The system Metal framework reports no hardware device')
     # Complete downloading separately, before classifying a startup error.
     model_path = resolve_model('tiny')
     gpu = int(os.environ.get('WHISPER_CPP_DEVICE', '0'))
@@ -199,7 +232,7 @@ def probe_native(executable, engine=None):
         # Memory, missing DLLs and broken engine builds are installation failures.
         if re.search(r'out of memory|alloc.*fail|timed out', message, re.I):
             raise
-        if re.search(r'no GPU found|No devices found|no device found|no Metal devices|ErrorIncompatibleDriver', message, re.I):
+        if re.search(r'no GPU found|No devices found|no device found|ErrorIncompatibleDriver|Vulkan 1\.2 required', message, re.I):
             raise NoHardware(message) from exc
         raise
     finally:
@@ -221,9 +254,12 @@ def main():
     try:
         # Always provision native files so later environment overrides also work.
         executable = install_native()
+        override = os.environ.get('WHISPER_CPP_SERVER')
+        if override:
+            executable = shutil.which(override) or override
         explicit = os.environ.get('WHISPER_ENGINE', '').strip().lower()
         if explicit in ('vulkan', 'metal'):
-            settings = probe_native(os.environ.get('WHISPER_CPP_SERVER', executable), explicit)
+            settings = probe_native(executable, explicit)
         elif explicit == 'faster-whisper':
             settings = {'engine': explicit, 'device': 'cuda' if probe_cuda() else 'cpu'}
         elif explicit:

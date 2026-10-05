@@ -83,6 +83,13 @@ bootstrap_macos_python() {
   fi
 }
 PYTHON="$(command -v python3 || true)"
+if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+  PYTHON="$VENV/bin/python"
+fi
+# Apple's stub otherwise opens the Command Line Tools installation dialog.
+if [ "$OS" = Darwin ] && [ "$PYTHON" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then
+  PYTHON=""
+fi
 if [ -z "$PYTHON" ] || ! "$PYTHON" -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info < (3, 14)))' 2>/dev/null; then
   case "$OS" in
     Linux)

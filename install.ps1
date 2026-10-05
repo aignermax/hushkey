@@ -3,10 +3,12 @@
 # Usage:  powershell -ExecutionPolicy Bypass -File install.ps1 [-NoAutostart]
 [CmdletBinding()]
 param(
-    [switch]$NoAutostart  # skip the Task Scheduler entry (manual start only)
+    [switch]$NoAutostart,  # skip the Task Scheduler entry (manual start only)
+    [string]$LogPath      # setup.exe saves its hidden console output here
 )
 
 $ErrorActionPreference = "Stop"
+if ($LogPath) { Start-Transcript -Path $LogPath -Append | Out-Null }
 
 # One-liner install straight from the web (no script path when piped via iex):
 #   irm https://raw.githubusercontent.com/aignermax/hushkey/master/install.ps1 | iex
