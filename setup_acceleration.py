@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -43,7 +44,12 @@ def asset_name():
 
 
 def download(url, target):
-    with urllib.request.urlopen(url, timeout=120) as source, open(target, 'wb') as dest:
+    # Python.org macOS installs have no default CA bundle until the optional
+    # Install Certificates.command is run. Use our dependency's trusted roots
+    # directly, keeping certificate and hostname verification enabled.
+    import certifi
+    context = ssl.create_default_context(cafile=certifi.where())
+    with urllib.request.urlopen(url, timeout=120, context=context) as source, open(target, 'wb') as dest:
         shutil.copyfileobj(source, dest)
 
 
@@ -78,15 +84,20 @@ def install_native(bundle_dir=None):
     with tempfile.TemporaryDirectory(prefix='.stage-', dir=root) as temporary:
         stage = Path(temporary)
         manifest_path = bundle / 'native-manifest.json'
-        if not manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.is_file() else None
+        # Source-overlay updates can leave an older installer's native bundle
+        # behind. Its manifest AND identically named archive belong together;
+        # never combine an old bundle with a newly downloaded manifest.
+        use_bundle = manifest is not None and manifest.get('version') == VERSION
+        if not use_bundle:
             manifest_path = stage / 'native-manifest.json'
             download(f'{RELEASE_URL}/native-manifest.json', manifest_path)
-        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         checksum = manifest.get('assets', {}).get(asset)
         if manifest.get('version') != VERSION or not isinstance(checksum, str) or not re.fullmatch('[0-9a-fA-F]{64}', checksum):
             raise ValueError(f'Invalid {VERSION} native manifest for {asset}')
         archive = bundle / asset
-        if not archive.is_file():
+        if not use_bundle or not archive.is_file():
             archive = stage / asset
             download(f'{RELEASE_URL}/{asset}', archive)
         actual = hashlib.sha256(archive.read_bytes()).hexdigest()

@@ -1,4 +1,5 @@
 faster-whisper>=1.2
+certifi>=2024.2.2 # verified native downloads, including fresh Python.org macOS installs
 av>=11,<19       # faster-whisper still uses metadata_errors, removed in PyAV 19
 pynput>=1.7       # key grab + typing on X11, Windows, macOS
 sounddevice>=0.5  # recording backend on Windows/macOS; Linux uses pw-record if present

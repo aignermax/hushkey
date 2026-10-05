@@ -15,14 +15,20 @@ done
 #   curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
 # Piped this way there is no script directory, so fetch the sources first.
 REPO="https://github.com/aignermax/hushkey"
+OS="$(uname -s)"
+HAS_GIT=0
+if command -v git >/dev/null; then
+  # Apple's /usr/bin/git is a developer-tools installation stub on a fresh Mac.
+  if [ "$OS" != Darwin ] || xcode-select -p >/dev/null 2>&1; then HAS_GIT=1; fi
+fi
 if [ -f "$(dirname "${BASH_SOURCE[0]:-/dev/null}")/dictate.py" ]; then
   DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 else
   DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whisper-ptt"
   echo "==> fetching whisper-ptt into $DIR"
-  if [ -d "$DIR/.git" ] && command -v git >/dev/null; then
+  if [ -d "$DIR/.git" ] && [ "$HAS_GIT" = 1 ]; then
     git -C "$DIR" pull --ff-only
-  elif [ -e "$DIR" ] || ! command -v git >/dev/null; then
+  elif [ -e "$DIR" ] || [ "$HAS_GIT" = 0 ]; then
     # No git (or a tarball install already present): plain download works too.
     mkdir -p "$DIR"
     curl -fsSL "$REPO/archive/refs/heads/master.tar.gz" | tar -xz --strip-components=1 -C "$DIR"
@@ -35,7 +41,6 @@ VENV="$DIR/.venv"
 # syntax (a clone under ~/src/R&D/ must not yield a broken unit or icon path).
 DIR_SED="$(printf '%s' "$DIR" | sed 's/[&|\\]/\\&/g')"
 UNIT_DIR="$HOME/.config/systemd/user"
-OS="$(uname -s)"
 # Only meaningful on Linux; stays empty elsewhere so the Wayland paths are skipped.
 SESSION=""
 NEEDS_LOGOUT=0
@@ -64,6 +69,13 @@ install_pkg() {
     echo "ERROR: install $* manually (no apt/dnf/pacman/brew found)" >&2
     exit 1
   fi
+}
+
+debian_packages_installed() {
+  local pkg
+  for pkg in "$@"; do
+    [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null)" = 'install ok installed' ] || return 1
+  done
 }
 
 echo "==> checking prerequisites"
@@ -237,20 +249,21 @@ rm -f "$PIP_ERR"
 # dpkg installs these dependencies before postinst runs; never nest apt there.
 if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
   if command -v apt-get >/dev/null; then
-    install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
+    if ! debian_packages_installed libvulkan1 mesa-vulkan-drivers libportaudio2; then
+      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
+    fi
   elif command -v dnf >/dev/null; then
-    install_pkg vulkan-loader mesa-vulkan-drivers portaudio
+    if ! rpm -q vulkan-loader mesa-vulkan-drivers portaudio >/dev/null 2>&1; then
+      install_pkg vulkan-loader mesa-vulkan-drivers portaudio
+    fi
   elif command -v pacman >/dev/null; then
-    install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
+    if ! pacman -Q vulkan-icd-loader vulkan-radeon vulkan-intel portaudio >/dev/null 2>&1; then
+      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
+    fi
   fi
 fi
 echo "==> configuring automatic hardware acceleration"
 "$VENV/bin/python" "$DIR/setup_acceleration.py"
-
-if [ "$NO_AUTOSTART" = 1 ]; then
-  echo "Done. Dependencies and acceleration configured; autostart skipped."
-  exit 0
-fi
 
 # Older installs sealed their venv (created before --system-site-packages
 # became the default here). Flip the flag instead of recreating the venv:
@@ -403,6 +416,11 @@ if [ "$SESSION" = "wayland" ]; then
     sed -e "s|@DIR@|$DIR_SED|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
       "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
   fi
+fi
+
+if [ "$NO_AUTOSTART" = 1 ]; then
+  echo "Done. Dependencies and acceleration configured; autostart skipped."
+  exit 0
 fi
 
 if [ "$OS" = "Darwin" ]; then

@@ -11,6 +11,8 @@ def test_build_commands_pin_vulkan_and_static_runtime(tmp_path, monkeypatch):
     assert '-DGGML_VULKAN=ON' in configure
     assert '-DBUILD_SHARED_LIBS=OFF' in configure
     assert '-DGGML_NATIVE=OFF' in configure
+    for feature in ('AVX', 'AVX2', 'FMA', 'F16C'):
+        assert f'-DGGML_{feature}=OFF' in configure
     assert build[-4:] == ['--target', 'whisper-server', '--parallel', '2']
 
 

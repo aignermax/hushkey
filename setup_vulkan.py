@@ -46,6 +46,8 @@ def build_commands(cmake, source, build, generator, jobs):
                  '-DGGML_METAL=' + ('ON' if sys.platform == 'darwin' else 'OFF'),
                  '-DGGML_OPENMP=OFF',
                  '-DBUILD_SHARED_LIBS=OFF', '-DGGML_NATIVE=OFF',
+                 '-DGGML_AVX=OFF', '-DGGML_AVX2=OFF',
+                 '-DGGML_FMA=OFF', '-DGGML_F16C=OFF',
                  '-DWHISPER_BUILD_TESTS=OFF', '-DWHISPER_BUILD_SERVER=ON']
     if generator:
         configure += ['-G', generator]

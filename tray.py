@@ -338,10 +338,18 @@ class DaemonSupervisor:
 # --------------------------------------------------------------------------
 # updates
 
+def _https_context():
+    # Fresh Python.org macOS installations may not have system OpenSSL roots.
+    # Keep trust local to these requests, without changing global SSL behavior.
+    import ssl
+    import certifi
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def latest_release_tag():
     req = urllib.request.Request(RELEASES_LATEST_URL,
                                  headers={"User-Agent": f"hushkey/{VERSION}"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=10, context=_https_context()) as resp:
         return json.load(resp)["tag_name"]
 
 
@@ -372,7 +380,7 @@ def _fetch_archive_over_dir():
     kind = "zip" if sys.platform == "win32" else "tar.gz"
     url = f"https://github.com/{REPO}/archive/refs/heads/master.{kind}"
     req = urllib.request.Request(url, headers={"User-Agent": f"hushkey/{VERSION}"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=60, context=_https_context()) as resp:
         blob = resp.read()  # complete in memory before any file is touched
     import io
     if sys.platform == "win32":

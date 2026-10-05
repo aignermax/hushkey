@@ -144,6 +144,37 @@ def test_deb_setup_never_starts_a_nested_package_manager(sandbox):
     assert "apt-get" not in log
 
 
+def test_background_update_with_runtime_dependencies_needs_no_sudo(sandbox):
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "dpkg-query", '#!/bin/sh\nprintf "install ok installed"\n')
+    _write_exec(shims / "sudo", SHIM.replace("exit 0", "exit 37"))
+    for _ in range(2):
+        proc, log = run_installer(sandbox, "x11")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "sudo" not in log and "apt-get" not in log
+        assert "setup_acceleration.py" in log
+
+
+def test_macos_web_install_without_clt_does_not_execute_git_stub(sandbox):
+    shims = sandbox["repo"].parent / "shims"
+    for name in ("git", "xcode-select"):
+        _write_exec(shims / name, SHIM.replace("exit 0", "exit 99"))
+    for name in ("curl", "tar"):
+        # Both sides of the pipe log concurrently; emit each record atomically.
+        _write_exec(shims / name, '#!/bin/sh\nprintf "%s\\n" "$(basename "$0") $*" >> "$SHIM_LOG"\n')
+    (sandbox["repo"] / ".git").mkdir()
+    entry = sandbox["repo"].parent / "entry"
+    entry.mkdir()
+    shutil.copy(sandbox["repo"] / "install.sh", entry)
+    env = dict(sandbox["env"], XDG_DATA_HOME=str(sandbox["repo"].parent), FAKE_UNAME="Darwin")
+    proc = subprocess.run(["bash", str(entry / "install.sh")], env=env, capture_output=True, text=True)
+    log = sandbox["log"].read_text()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "git -C" not in log
+    assert "curl -fsSL" in log
+    assert "setup_acceleration.py" in log
+
+
 @pytest.mark.parametrize("uname", ["Linux", "Darwin"])
 def test_no_autostart_still_provisions_acceleration(sandbox, uname):
     env = dict(sandbox["env"], FAKE_UNAME=uname, XDG_SESSION_TYPE="x11")

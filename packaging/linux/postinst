@@ -85,10 +85,12 @@ if [ -z "$USER_ID" ] || [ -z "$USER_HOME" ]; then
 fi
 
 DEST="$USER_HOME/.local/share/whisper-ptt"
-mkdir -p "$DEST"
-cp -r "$PAYLOAD/." "$DEST/"
-touch "$DEST/.deb-managed"
-chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"
+# Homes are user-controlled, including symlinked parent directories. Never
+# copy, chown, or write markers there with root's filesystem privileges.
+sudo -u "$USER_NAME" mkdir -p "$DEST"
+sudo -u "$USER_NAME" cp -r "$PAYLOAD/." "$DEST/"
+sudo -u "$USER_NAME" touch "$DEST/.deb-managed"
+sudo -u "$USER_NAME" rm -f "$DEST/.setup-version"
 
 # PackageKit cannot prompt for sudo inside a user shell. Prepare Wayland's
 # root-owned input access here, while the package manager already has root.
@@ -102,9 +104,9 @@ if command -v loginctl >/dev/null 2>&1; then
     done
 fi
 if [ "$SESSION_TYPE" = wayland ] && [ "$(id -u)" = 0 ]; then
-    install -m 0644 "$DEST/udev/99-whisper-ptt-uinput.rules" /etc/udev/rules.d/99-whisper-ptt-uinput.rules
+    install -m 0644 "$PAYLOAD/udev/99-whisper-ptt-uinput.rules" /etc/udev/rules.d/99-whisper-ptt-uinput.rules
     udevadm control --reload-rules
-    modprobe uinput
+    if [ ! -e /dev/uinput ]; then modprobe uinput; fi
     udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
     printf 'uinput\n' > /etc/modules-load.d/uinput.conf
     if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx input; then
@@ -115,6 +117,7 @@ fi
 
 # systemctl --user needs the user's runtime environment even via sudo.
 if ! sudo -u "$USER_NAME" \
+        HOME="$USER_HOME" \
         HUSHKEY_PACKAGE_INSTALL=1 \
         XDG_SESSION_TYPE="$SESSION_TYPE" \
         XDG_RUNTIME_DIR="/run/user/$USER_ID" \
@@ -126,8 +129,7 @@ if ! sudo -u "$USER_NAME" \
 fi
 
 if [ -f "$PAYLOAD/.release-version" ]; then
-    cp "$PAYLOAD/.release-version" "$DEST/.setup-version"
-    chown "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST/.setup-version"
+    sudo -u "$USER_NAME" cp "$PAYLOAD/.release-version" "$DEST/.setup-version"
 fi
 
 exit 0

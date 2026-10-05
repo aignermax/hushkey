@@ -2,8 +2,27 @@ import hashlib
 import json
 from pathlib import Path
 import zipfile
+import io
 
 import pytest
+
+
+def test_download_uses_explicit_trusted_certificate_bundle(tmp_path, monkeypatch):
+    import certifi
+    import setup_acceleration as s
+    context = object()
+    calls = []
+    def create_context(**kwargs):
+        assert kwargs == {'cafile': certifi.where()}
+        return context
+    def open_url(url, **kwargs):
+        calls.append(kwargs)
+        return io.BytesIO(b'archive')
+    monkeypatch.setattr(s.ssl, 'create_default_context', create_context)
+    monkeypatch.setattr(s.urllib.request, 'urlopen', open_url)
+    s.download('https://example.com/archive.zip', tmp_path / 'asset.zip')
+    assert calls == [{'timeout': 120, 'context': context}]
+    assert (tmp_path / 'asset.zip').read_bytes() == b'archive'
 
 
 def test_settings_survive_restart_and_environment_wins(tmp_path, monkeypatch):
@@ -44,6 +63,28 @@ def test_bundle_checksum_and_version_validation(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='checksum'):
         s.install_native(tmp_path)
     assert Path(executable).read_bytes() == b'native'
+
+
+def test_stale_bundled_version_downloads_matching_current_archive(tmp_path, monkeypatch):
+    import setup_acceleration as s
+    import acceleration as a
+    monkeypatch.setattr(a, 'data_dir', lambda: tmp_path / 'data')
+    asset = s.asset_name()
+    (tmp_path / asset).write_bytes(b'old bundled archive')
+    (tmp_path / 'native-manifest.json').write_text(json.dumps({'version': 'v0.8.0', 'assets': {asset: '0' * 64}}))
+    current = io.BytesIO()
+    with zipfile.ZipFile(current, 'w') as z:
+        z.writestr('bin/' + s.server_name(), b'new native')
+    current_bytes = current.getvalue()
+    manifest = json.dumps({'version': s.VERSION, 'assets': {asset: hashlib.sha256(current_bytes).hexdigest()}}).encode()
+    downloads = []
+    def download(url, target):
+        downloads.append(url)
+        Path(target).write_bytes(manifest if url.endswith('.json') else current_bytes)
+    monkeypatch.setattr(s, 'download', download)
+    installed = Path(s.install_native(tmp_path))
+    assert installed.read_bytes() == b'new native'
+    assert downloads == [f'{s.RELEASE_URL}/native-manifest.json', f'{s.RELEASE_URL}/{asset}']
 
 
 def test_auto_selection_and_unsupported_fallback(monkeypatch):

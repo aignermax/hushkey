@@ -78,5 +78,5 @@ def test_native_unicode_model_loads_and_cpu_fallback_is_rejected(tmp_path, monke
         return real_popen(command + ['--no-gpu'], **kwargs)
 
     monkeypatch.setattr(whisper_cpp.subprocess, 'Popen', cpu_server)
-    with pytest.raises(RuntimeError, match='did not initialize a Vulkan GPU'):
-        whisper_cpp.WhisperCppModel(str(local_model), startup_timeout=30)
+    with pytest.raises(RuntimeError, match='did not initialize a hardware GPU'):
+        whisper_cpp.WhisperCppModel(str(local_model), startup_timeout=30, engine='vulkan')
