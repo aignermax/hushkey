@@ -26,7 +26,15 @@ jobs:
           cache: pip
       - name: Linux Vulkan build tools and runtime
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build glslc libvulkan-dev spirv-headers mesa-vulkan-drivers libportaudio2
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libvulkan-dev spirv-headers mesa-vulkan-drivers libportaudio2
+      - uses: actions/cache@v4
+        if: runner.os == 'Linux'
+        with:
+          path: .shader-tools
+          key: shaderc-2025.1-vulkan-1.4.321-ubuntu22-${{ matrix.arch }}-v1
+      - name: Portable Linux shader compiler
+        if: runner.os == 'Linux'
+        run: bash packaging/build-linux-shaders.sh
       - name: Windows Vulkan SDK (build machines only)
         if: runner.os == 'Windows'
         shell: pwsh
