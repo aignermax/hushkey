@@ -7,3 +7,4 @@ packaging/windows/dist/
 dist/
 .vulkan-*/
 .vulkan-*.log
+native/

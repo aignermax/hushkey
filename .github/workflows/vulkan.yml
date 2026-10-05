@@ -70,6 +70,19 @@ jobs:
         run: python -m pytest tests/test_vulkan_e2e.py -v
       - name: Package engine with licenses
         run: python packaging/native.py --prefix .vulkan-ci --system ${{ matrix.system }} --arch ${{ matrix.arch }} --out native
+      - name: Generate local bundle manifest
+        run: python packaging/native.py --out native --manifest v0.9.0
+      - name: Fresh Windows installer (no compiler used by installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./install.ps1 -NoAutostart
+      - name: Fresh Linux and macOS installer
+        if: runner.os != 'Windows'
+        run: bash install.sh --no-autostart
+      - name: Verify persisted backend in a fresh process
+        shell: bash
+        run: |
+          python -c "from acceleration import load_settings; s = load_settings(); print(s); assert s.get('version') == 'v0.9.0'; assert s.get('engine') in ('faster-whisper', 'vulkan', 'metal')"
       - uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.system }}-${{ matrix.arch }}
