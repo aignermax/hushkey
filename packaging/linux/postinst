@@ -1,14 +1,13 @@
 #!/bin/sh
 # hushkey postinst: hand the payload to the installing user and run install.sh
-# as that user (venv + dependencies + systemd user service). Never fail the
-# package install because a user-level step did not work — print what to do.
+# as that user (venv + dependencies + systemd user service). Deferred graphical
+# setup uses this same script through pkexec when no desktop user is identifiable.
 set -e
 
 PAYLOAD="${HUSHKEY_PAYLOAD:-/opt/hushkey}"
 
 manual_hint() {
-    echo "hushkey: finish setup as your desktop user:"
-    echo "  cp -r /opt/hushkey ~/.local/share/whisper-ptt && bash ~/.local/share/whisper-ptt/install.sh"
+    echo "hushkey: open hushkey from your desktop application menu to finish setup."
 }
 
 # Which user's home should receive the install?
@@ -86,22 +85,51 @@ if [ -z "$USER_ID" ] || [ -z "$USER_HOME" ]; then
 fi
 
 DEST="$USER_HOME/.local/share/whisper-ptt"
-mkdir -p "$DEST"
-cp -r "$PAYLOAD/." "$DEST/"
-chown -R "$USER_NAME:$(id -gn "$USER_NAME")" "$DEST"
+# Homes are user-controlled, including symlinked parent directories. Never
+# copy, chown, or write markers there with root's filesystem privileges.
+sudo -u "$USER_NAME" mkdir -p "$DEST"
+sudo -u "$USER_NAME" cp -r "$PAYLOAD/." "$DEST/"
+sudo -u "$USER_NAME" touch "$DEST/.deb-managed"
+sudo -u "$USER_NAME" rm -f "$DEST/.setup-version"
 
-# the v0.4.0 deb used a differently named dir — drop it after a successful copy
-if [ -d "$USER_HOME/.local/share/hushkey" ]; then
-    rm -rf "$USER_HOME/.local/share/hushkey"
+# PackageKit cannot prompt for sudo inside a user shell. Prepare Wayland's
+# root-owned input access here, while the package manager already has root.
+SESSION_TYPE=x11
+if command -v loginctl >/dev/null 2>&1; then
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk 'NF {print $1}'); do
+        if [ "$(loginctl show-session "$sid" -p Name --value 2>/dev/null)" = "$USER_NAME" ] &&
+           [ "$(loginctl show-session "$sid" -p Type --value 2>/dev/null)" = wayland ]; then
+            SESSION_TYPE=wayland
+        fi
+    done
+fi
+if [ "$SESSION_TYPE" = wayland ] && [ "$(id -u)" = 0 ]; then
+    install -m 0644 "$PAYLOAD/udev/99-whisper-ptt-uinput.rules" /etc/udev/rules.d/99-whisper-ptt-uinput.rules
+    udevadm control --reload-rules
+    if [ ! -e /dev/uinput ]; then modprobe uinput; fi
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
+    printf 'uinput\n' > /etc/modules-load.d/uinput.conf
+    if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx input; then
+        usermod -aG input "$USER_NAME"
+        echo "hushkey: input access granted; log out and back in before dictating."
+    fi
 fi
 
 # systemctl --user needs the user's runtime environment even via sudo.
 if ! sudo -u "$USER_NAME" \
+        HOME="$USER_HOME" \
+        HUSHKEY_PACKAGE_INSTALL=1 \
+        XDG_SESSION_TYPE="$SESSION_TYPE" \
         XDG_RUNTIME_DIR="/run/user/$USER_ID" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_ID/bus" \
         bash "$DEST/install.sh"; then
     echo "hushkey: automatic setup failed."
     manual_hint
+    exit 1
+fi
+
+if [ -f "$PAYLOAD/.release-version" ]; then
+    sudo -u "$USER_NAME" cp "$PAYLOAD/.release-version" "$DEST/.setup-version"
 fi
 
 exit 0

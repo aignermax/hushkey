@@ -58,8 +58,38 @@ def test_latest_release_tag(monkeypatch):
             return False
 
     monkeypatch.setattr(tray.urllib.request, "urlopen",
-                        lambda req, timeout=0: FakeResponse(b'{"tag_name": "v9.9.9"}'))
+                        lambda req, timeout=0, context=None: FakeResponse(b'{"tag_name": "v9.9.9"}'))
     assert tray.latest_release_tag() == "v9.9.9"
+
+
+def test_update_requests_use_trusted_certificates(tmp_path, monkeypatch):
+    import io
+    import ssl
+    import certifi
+    import tarfile
+    import zipfile
+    context = object()
+    def trusted_context(**kwargs):
+        assert kwargs == {'cafile': certifi.where()}
+        return context
+    monkeypatch.setattr(ssl, 'create_default_context', trusted_context)
+    archive = io.BytesIO()
+    if tray.sys.platform == 'win32':
+        with zipfile.ZipFile(archive, 'w'):
+            pass
+    else:
+        with tarfile.open(fileobj=archive, mode='w:gz'):
+            pass
+    responses = [b'{"tag_name":"v9.9.9"}', archive.getvalue()]
+    calls = []
+    def open_url(request, **kwargs):
+        calls.append(kwargs)
+        return io.BytesIO(responses.pop(0))
+    monkeypatch.setattr(tray.urllib.request, 'urlopen', open_url)
+    monkeypatch.setattr(tray, 'DIR', str(tmp_path))
+    assert tray.latest_release_tag() == 'v9.9.9'
+    tray._fetch_archive_over_dir()
+    assert calls == [{'timeout': 10, 'context': context}, {'timeout': 60, 'context': context}]
 
 
 def test_pid_alive_handles_garbage():

@@ -6,8 +6,6 @@
     #define MyAppVersion "0.0.0-dev"
   #endif
 #endif
-; SHA-256 of https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe
-#define PythonSha256 "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
 
 [Setup]
 AppId={{7F3A9C2E-4B6D-4E1A-9C5F-2D8E6A1B3F47}
@@ -36,6 +34,10 @@ Source: "..\..\recorder.py"; DestDir: "{app}"
 Source: "..\..\transcribe.py"; DestDir: "{app}"
 Source: "..\..\whisper_cpp.py"; DestDir: "{app}"
 Source: "..\..\setup_vulkan.py"; DestDir: "{app}"
+Source: "..\..\acceleration.py"; DestDir: "{app}"
+Source: "..\..\setup_acceleration.py"; DestDir: "{app}"
+Source: "..\..\native\native-manifest.json"; DestDir: "{app}\native"
+Source: "..\..\native\hushkey-engine-windows-x64.zip"; DestDir: "{app}\native"
 Source: "..\..\install.ps1"; DestDir: "{app}"
 Source: "..\..\uninstall.ps1"; DestDir: "{app}"
 Source: "..\..\requirements.txt"; DestDir: "{app}"
@@ -50,100 +52,18 @@ Source: "logo.ico"; DestDir: "{app}"
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" -Purge"; Flags: runhidden waituntilterminated
 
 [Code]
-function HavePython(): Boolean;
-var
-  ResultCode: Integer;
-begin
-  // version-aware: an ancient python on PATH must not suppress the bootstrap
-  Result := Exec('cmd.exe',
-    '/c python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-  if not Result then
-    Result := Exec('cmd.exe',
-      '/c py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-  if not Result then
-    // just bootstrapped by us — PATH of this process is stale
-    Result := FileExists(ExpandConstant(
-                '{localappdata}\Programs\Python\Python312\python.exe'));
-end;
-
-function VerifySha256(const FileName, Expected: string): Boolean;
-var
-  OutFile, Clean, S, C: string;
-  Output: AnsiString;
-  ResultCode, I: Integer;
-begin
-  OutFile := ExpandConstant('{tmp}\pyhash.txt');
-  Exec('cmd.exe', '/c certutil -hashfile "' + FileName + '" SHA256 > "' + OutFile + '"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if not LoadStringFromFile(OutFile, Output) then
-  begin
-    Result := False;
-    exit;
-  end;
-  S := string(Output);
-  Clean := '';
-  for I := 1 to Length(S) do
-  begin
-    C := Lowercase(Copy(S, I, 1));
-    if Pos(C, '0123456789abcdef') > 0 then
-      Clean := Clean + C;
-  end;
-  Result := Pos(Lowercase(Expected), Clean) > 0;
-end;
-
-procedure InstallPython();
-var
-  ResultCode: Integer;
-  Installer: string;
-begin
-  // winget ships with Windows 11 / current Windows 10 (App Installer)
-  if Exec('cmd.exe', '/c winget install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements >nul 2>&1',
-          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
-    exit;
-  // fallback: official per-user installer from python.org, checksum-pinned
-  Installer := ExpandConstant('{tmp}\python-3.12.10-amd64.exe');
-  if not (Exec('cmd.exe', '/c curl -fsSL -o "' + Installer + '" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe',
-          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0)) then
-    exit;
-  if not VerifySha256(Installer, '{#PythonSha256}') then
-  begin
-    DeleteFile(Installer);
-    MsgBox('The downloaded Python installer failed its checksum — ' +
-           'aborting the automatic Python install.', mbError, MB_OK);
-    exit;
-  end;
-  Exec(Installer, '/quiet InstallAllUsers=0 PrependPath=1 Include_test=0',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
-    if not HavePython() then
-    begin
-      WizardForm.StatusLabel.Caption := 'Installing Python 3.12 ...';
-      InstallPython();
-    end;
-    if not HavePython() then
-      MsgBox('Python 3.12 could not be installed automatically.' + #13#10 +
-             'Install it from https://www.python.org/downloads/ and then run install.ps1 in '
-             + ExpandConstant('{app}'), mbError, MB_OK)
-    else
-    begin
-      WizardForm.StatusLabel.Caption := 'Setting up hushkey (venv + dependencies + autostart) ...';
-      // visible console on purpose: pip can take minutes, a hidden window
-      // looks like a frozen installer
-      if not Exec('powershell.exe',
-                  '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\install.ps1"',
-                  ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode)
-         or (ResultCode <> 0) then
-        MsgBox('hushkey setup failed. Run install.ps1 in ' + ExpandConstant('{app}')
-               + ' to see the error.', mbError, MB_OK);
-    end;
+    WizardForm.StatusLabel.Caption := 'Setting up hushkey and automatic acceleration ...';
+    // install.ps1 owns Python discovery and the SHA256-verified bootstrap.
+    if not Exec('powershell.exe',
+                '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}') + '\install.ps1" -LogPath "' + ExpandConstant('{app}') + '\install.log"',
+                ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)
+       or (ResultCode <> 0) then
+      RaiseException('hushkey setup failed. See ' + ExpandConstant('{app}') + '\install.log and retry.');
   end;
 end;

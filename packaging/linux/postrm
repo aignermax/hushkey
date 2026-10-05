@@ -1,29 +1,22 @@
 #!/bin/sh
-# hushkey postrm: clean up what install.sh created outside dpkg's view.
-# The udev rule is ours (namespaced) and security-relevant — remove it always.
-# /etc/modules-load.d/uinput.conf is generic and may predate us — left alone.
-# User-level copies and units are removed only on purge.
-case "$1" in
-  remove|purge)
-    rm -f /etc/udev/rules.d/99-whisper-ptt-uinput.rules
-    ;;
+# Remove owned system configuration on removal. User data is retained unless
+# purging. Drop privileges before removing files inside any user's home.
+case "${1:-}" in
+  remove|purge) rm -f /etc/udev/rules.d/99-whisper-ptt-uinput.rules ;;
 esac
-if [ "$1" = "purge" ]; then
-    USER_NAME="${SUDO_USER:-$(logname 2>/dev/null || true)}"
-    if [ -n "$USER_NAME" ] && [ "$USER_NAME" != "root" ]; then
-        USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6 || true)"
-        if [ -n "$USER_HOME" ]; then
-            rm -f "$USER_HOME/.config/systemd/user/whisper-ptt.service" \
-                  "$USER_HOME/.config/systemd/user/ydotoold.service"
-            rm -rf "$USER_HOME/.local/share/whisper-ptt" \
-                  "$USER_HOME/.local/share/hushkey" \
-                  "$USER_HOME/.local/state/whisper-ptt"
-        fi
-        USER_ID="$(id -u "$USER_NAME" 2>/dev/null || true)"
-        if [ -n "$USER_ID" ]; then
-            sudo -u "$USER_NAME" XDG_RUNTIME_DIR="/run/user/$USER_ID" \
-                systemctl --user daemon-reload >/dev/null 2>&1 || true
-        fi
-    fi
+if [ "${1:-}" = purge ]; then
+  getent passwd | while IFS=: read -r name password uid gid info home shell; do
+    case "$home" in /|"") continue ;; /*) ;; *) continue ;; esac
+    [ "$name" != root ] || continue
+    [ -f "$home/.local/share/whisper-ptt/.deb-managed" ] || continue
+    sudo -u "$name" rm -f "$home/.config/systemd/user/whisper-ptt.service" \
+      "$home/.config/systemd/user/ydotoold.service" \
+      "$home/.local/share/applications/hushkey.desktop" || true
+    sudo -u "$name" rm -rf "$home/.local/share/whisper-ptt" \
+      "$home/.local/share/hushkey" "$home/.local/state/whisper-ptt" || true
+    sudo -u "$name" XDG_RUNTIME_DIR="/run/user/$uid" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+  done
 fi
 exit 0

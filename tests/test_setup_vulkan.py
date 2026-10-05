@@ -3,12 +3,16 @@ from pathlib import Path
 import pytest
 
 
-def test_build_commands_pin_vulkan_and_static_runtime(tmp_path):
+def test_build_commands_pin_vulkan_and_static_runtime(tmp_path, monkeypatch):
+    import setup_vulkan
+    monkeypatch.setattr(setup_vulkan.sys, 'platform', 'linux')
     from setup_vulkan import build_commands
     configure, build = build_commands('cmake', tmp_path / 'source', tmp_path / 'build', None, 2)
     assert '-DGGML_VULKAN=ON' in configure
     assert '-DBUILD_SHARED_LIBS=OFF' in configure
     assert '-DGGML_NATIVE=OFF' in configure
+    for feature in ('AVX', 'AVX2', 'FMA', 'F16C'):
+        assert f'-DGGML_{feature}=OFF' in configure
     assert build[-4:] == ['--target', 'whisper-server', '--parallel', '2']
 
 
@@ -61,3 +65,25 @@ def test_windows_build_embeds_utf8_manifest(tmp_path, monkeypatch):
     configure, _ = setup_vulkan.build_commands('cmake', tmp_path / 's', tmp_path / 'b', None, 2)
     assert any('/MANIFESTINPUT:' in arg for arg in configure)
     assert 'UTF-8' in (tmp_path / 'b/hushkey-utf8.manifest').read_text()
+
+
+def test_macos_build_embeds_metal_without_vulkan_sdk(tmp_path, monkeypatch):
+    import setup_vulkan
+    monkeypatch.setattr(setup_vulkan.sys, 'platform', 'darwin')
+    configure, _ = setup_vulkan.build_commands('cmake', tmp_path / 's', tmp_path / 'b', None, 2)
+    assert '-DGGML_VULKAN=OFF' in configure
+    assert '-DGGML_METAL=ON' in configure
+    assert '-DGGML_METAL_EMBED_LIBRARY=ON' in configure
+    assert '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0' in configure
+
+
+@pytest.mark.parametrize('platform', ['win32', 'linux'])
+def test_portable_build_does_not_need_compiler_runtime_install(tmp_path, monkeypatch, platform):
+    import setup_vulkan
+    monkeypatch.setattr(setup_vulkan.sys, 'platform', platform)
+    configure, _ = setup_vulkan.build_commands('cmake', tmp_path / 's', tmp_path / 'b', None, 2)
+    assert '-DGGML_OPENMP=OFF' in configure
+    if platform == 'win32':
+        assert '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded' in configure
+    else:
+        assert '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc' in configure

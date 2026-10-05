@@ -97,8 +97,8 @@ def sandbox(tmp_path):
 
     shims = tmp_path / "shims"
     shims.mkdir()
-    for name in ("sudo", "chown"):
-        _write_exec(shims / name, LOGGING_SHIM)
+    _write_exec(shims / "sudo", LOGGING_SHIM.replace("exit 0", 'shift 2\nexec env "$@"'))
+    _write_exec(shims / "chown", LOGGING_SHIM)
     _write_exec(shims / "getent", GETENT_SHIM)
     _write_exec(shims / "id", ID_SHIM)
     _write_exec(shims / "logname", LOGNAME_SHIM)
@@ -138,6 +138,26 @@ def test_sudo_install_uses_sudo_user(sandbox):
     assert "sudo -u alice" in log
 
 
+def test_upgrade_preserves_native_engines_and_disables_nested_apt(sandbox):
+    engine = sandbox["home"] / ".local/share/hushkey/native/engine"
+    engine.parent.mkdir(parents=True)
+    engine.write_text("installed native engine")
+    proc, log = run_postinst(sandbox, SUDO_USER="alice", FAKE_USER="alice")
+    assert proc.returncode == 0
+    assert engine.read_text() == "installed native engine"
+    assert "HUSHKEY_PACKAGE_INSTALL=1" in log
+    assert "sudo -u alice mkdir -p" in log
+    assert "sudo -u alice cp -r" in log
+    assert "sudo -u alice touch" in log
+    assert "chown" not in log
+
+
+def test_setup_failure_is_reported_to_package_manager(sandbox):
+    _write_exec(sandbox["home"].parent / "shims/sudo", "#!/bin/sh\nexit 37\n")
+    proc, _ = run_postinst(sandbox, SUDO_USER="alice", FAKE_USER="alice")
+    assert proc.returncode != 0
+
+
 def test_graphical_install_falls_back_to_pkexec_uid(sandbox):
     """pkexec states the caller in PKEXEC_UID, never in SUDO_USER."""
     proc, log = run_postinst(sandbox, PKEXEC_UID=4242, FAKE_USER="bob")
@@ -164,7 +184,7 @@ def test_ambiguous_sessions_install_nothing_rather_than_guess(sandbox):
         FAKE_SESSIONS="3|carol|user|wayland\n5|dave|user|x11")
     assert proc.returncode == 0, "a user-level step must never fail the package"
     assert not _dest(sandbox).exists()
-    assert "finish setup as your desktop user" in proc.stdout
+    assert "open hushkey from your desktop application menu" in proc.stdout
     assert "sudo -u" not in log
 
 
@@ -185,7 +205,7 @@ def test_only_a_greeter_session_installs_nothing(sandbox):
         FAKE_SESSIONS="c1|gdm|greeter|wayland")
     assert proc.returncode == 0
     assert not _dest(sandbox).exists()
-    assert "finish setup as your desktop user" in proc.stdout
+    assert "open hushkey from your desktop application menu" in proc.stdout
 
 
 def test_same_user_with_two_sessions_is_unambiguous(sandbox):
@@ -203,5 +223,5 @@ def test_root_only_environment_still_prints_the_manual_hint(sandbox):
     proc, log = run_postinst(sandbox, SUDO_USER="root")
     assert proc.returncode == 0
     assert not _dest(sandbox).exists()
-    assert "finish setup as your desktop user" in proc.stdout
+    assert "open hushkey from your desktop application menu" in proc.stdout
     assert "sudo -u" not in log

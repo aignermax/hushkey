@@ -1,3 +1,4 @@
-# Installed automatically by install.sh when an NVIDIA GPU is detected
-nvidia-cublas-cu12
-nvidia-cudnn-cu12
+# Installed automatically by setup_acceleration.py for detected NVIDIA GPUs.
+# CTranslate2's CUDA 12 runtime requires cuDNN 9.
+nvidia-cublas-cu12>=12,<13
+nvidia-cudnn-cu12>=9,<10

@@ -89,7 +89,7 @@ def sandbox(tmp_path):
     # interpreter is already executable, which keeps this test fast and offline.
     repo = tmp_path / "whisper-ptt"
     shutil.copytree(REPO, repo, ignore=shutil.ignore_patterns(
-        ".git", ".venv", "__pycache__", "*.pyc"))
+        ".git", ".venv", ".vulkan-test", "native", "dist", "__pycache__", "*.pyc"))
     venv_bin = repo / ".venv/bin"
     venv_bin.mkdir(parents=True)
     for name in ("python", "pip"):
@@ -118,6 +118,73 @@ def run_installer(sandbox, session_type, packaged_ydotool="0", uname="Linux"):
     proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
                           env=env, capture_output=True, text=True, timeout=180)
     return proc, sandbox["log"].read_text()
+
+
+@pytest.mark.parametrize("uname", ["Linux", "Darwin"])
+def test_acceleration_is_set_up_before_autostart(sandbox, uname):
+    proc, log = run_installer(sandbox, "x11", uname=uname)
+    assert proc.returncode == 0, proc.stderr
+    assert "setup_acceleration.py" in log
+    start = "launchctl bootstrap" if uname == "Darwin" else "restart whisper-ptt.service"
+    assert log.index("setup_acceleration.py") < log.index(start)
+
+
+def test_acceleration_failure_prevents_autostart(sandbox):
+    _write_exec(sandbox["repo"] / ".venv/bin/python", SHIM.replace(
+        "exit 0", 'case "$*" in *setup_acceleration.py*) exit 37;; esac\nexit 0'))
+    proc, log = run_installer(sandbox, "x11")
+    assert proc.returncode == 37
+    assert "restart whisper-ptt.service" not in log
+
+
+def test_deb_setup_never_starts_a_nested_package_manager(sandbox):
+    sandbox["env"]["HUSHKEY_PACKAGE_INSTALL"] = "1"
+    proc, log = run_installer(sandbox, "x11")
+    assert proc.returncode == 0, proc.stderr
+    assert "apt-get" not in log
+
+
+def test_background_update_with_runtime_dependencies_needs_no_sudo(sandbox):
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "dpkg-query", '#!/bin/sh\nprintf "install ok installed"\n')
+    _write_exec(shims / "sudo", SHIM.replace("exit 0", "exit 37"))
+    for _ in range(2):
+        proc, log = run_installer(sandbox, "x11")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "sudo" not in log and "apt-get" not in log
+        assert "setup_acceleration.py" in log
+
+
+def test_macos_web_install_without_clt_does_not_execute_git_stub(sandbox):
+    shims = sandbox["repo"].parent / "shims"
+    for name in ("git", "xcode-select"):
+        _write_exec(shims / name, SHIM.replace("exit 0", "exit 99"))
+    for name in ("curl", "tar"):
+        # Both sides of the pipe log concurrently; emit each record atomically.
+        _write_exec(shims / name, '#!/bin/sh\nprintf "%s\\n" "$(basename "$0") $*" >> "$SHIM_LOG"\n')
+    (sandbox["repo"] / ".git").mkdir()
+    entry = sandbox["repo"].parent / "entry"
+    entry.mkdir()
+    shutil.copy(sandbox["repo"] / "install.sh", entry)
+    env = dict(sandbox["env"], XDG_DATA_HOME=str(sandbox["repo"].parent), FAKE_UNAME="Darwin")
+    proc = subprocess.run(["bash", str(entry / "install.sh")], env=env, capture_output=True, text=True)
+    log = sandbox["log"].read_text()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "git -C" not in log
+    assert "curl -fsSL" in log
+    assert "setup_acceleration.py" in log
+
+
+@pytest.mark.parametrize("uname", ["Linux", "Darwin"])
+def test_no_autostart_still_provisions_acceleration(sandbox, uname):
+    env = dict(sandbox["env"], FAKE_UNAME=uname, XDG_SESSION_TYPE="x11")
+    proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh"), "--no-autostart"],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    log = sandbox["log"].read_text()
+    assert "setup_acceleration.py" in log
+    assert "systemctl" not in log and "launchctl" not in log
+    assert not (sandbox["units"] / "whisper-ptt.service").exists()
 
 
 def test_sudo_is_really_shimmed(sandbox):
@@ -249,7 +316,7 @@ def test_venv_creation_uses_system_site_packages_on_linux():
     """
     with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
         text = fh.read()
-    creating = [ln for ln in text.splitlines() if "python3 -m venv" in ln]
+    creating = [ln for ln in text.splitlines() if '"$PYTHON" -m venv' in ln]
     assert creating, "no venv creation found in install.sh"
     for line in creating:
         assert "$VENV_FLAGS" in line, "venv creation must go through $VENV_FLAGS"

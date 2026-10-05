@@ -14,10 +14,16 @@ DEST="$STAGE/$PKG"
 mkdir -p "$DEST/opt/hushkey" "$DEST/DEBIAN" "$OUT"
 
 # --- payload: exactly what install.sh needs at runtime ----------------------
-for f in dictate.py tray.py update_helper.py recorder.py transcribe.py whisper_cpp.py setup_vulkan.py install.sh uninstall.sh \
+for f in dictate.py tray.py update_helper.py recorder.py transcribe.py whisper_cpp.py setup_vulkan.py acceleration.py setup_acceleration.py install.sh uninstall.sh \
          requirements.txt requirements-gpu.txt README.md; do
   cp "$ROOT/$f" "$DEST/opt/hushkey/"
 done
+# Native archives are produced and checksummed by the release build.
+mkdir -p "$DEST/opt/hushkey/native"
+cp "$ROOT/native/native-manifest.json" "$ROOT/native/"hushkey-engine-linux-*.zip "$DEST/opt/hushkey/native/"
+cp "$ROOT/packaging/linux/launch.sh" "$DEST/opt/hushkey/launch.sh"
+cp "$ROOT/packaging/linux/postinst" "$DEST/opt/hushkey/package-setup"
+printf '%s\n' "$VER" > "$DEST/opt/hushkey/.release-version"
 mkdir -p "$DEST/opt/hushkey/assets" "$DEST/opt/hushkey/systemd" "$DEST/opt/hushkey/udev" \
          "$DEST/opt/hushkey/desktop"
 cp "$ROOT/assets/logo.png" "$DEST/opt/hushkey/assets/"
@@ -28,7 +34,7 @@ cp "$ROOT/desktop/"*.desktop.in "$DEST/opt/hushkey/desktop/"
 # GNOME Software, where the maintainer scripts cannot tell who the user is —
 # then takes it along. install.sh sees it and skips its per-user copy.
 mkdir -p "$DEST/usr/share/applications"
-sed "s|@DIR@|/opt/hushkey|g" "$ROOT/desktop/hushkey.desktop.in" \
+sed -e "s|@DIR@|/opt/hushkey|g" -e 's|^Exec=.*|Exec=bash /opt/hushkey/launch.sh|' "$ROOT/desktop/hushkey.desktop.in" \
   > "$DEST/usr/share/applications/hushkey.desktop"
 chmod 0644 "$DEST/usr/share/applications/hushkey.desktop"
 
