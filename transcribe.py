@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch-transcribe audio files to Markdown notes, fully local (faster-whisper).
+"""Batch-transcribe audio files to Markdown notes, fully local.
 
 Usage:
   transcribe.py AUDIO_DIR [--out DIR]          # all new/changed files in a folder
@@ -9,8 +9,9 @@ Usage:
   language, duration) and the transcript as body.
 - Already-transcribed files are skipped (tracked by mtime+size in
   <out>/.transcribe-state.json). Delete that file to force a redo.
-- GPU (CUDA) is used when available, otherwise CPU. After the one-time model
-  download nothing leaves the machine.
+- Default: faster-whisper uses CUDA when available, otherwise CPU. Set
+  WHISPER_ENGINE=vulkan for the optional AMD/whisper.cpp engine (see README).
+  After the one-time model download nothing leaves the machine.
 
 Options:
   --out DIR       output folder (default: <AUDIO_DIR>/transcripts or ./transcripts)
@@ -118,6 +119,16 @@ def main(argv=None):
     state_path = os.path.join(out_dir, ".transcribe-state.json")
     state = load_state(state_path)
 
+    from whisper_cpp import requested_engine, WhisperCppModel
+    if requested_engine() == "vulkan":
+        model_name = args.model or "medium"
+        print(f"loading model '{model_name}' on Vulkan", file=sys.stderr)
+        model = WhisperCppModel(model_name)
+        try:
+            return transcribe_files(model, model_name, files, args, out_dir, state_path, state)
+        finally:
+            model.close()
+
     device, compute, default_model = pick_device()
     model_name = args.model or default_model
     preload_cuda_libs()
@@ -130,11 +141,16 @@ def main(argv=None):
         if device == "cuda":
             print(f"CUDA failed ({exc}), falling back to CPU", file=sys.stderr)
             device, compute = "cpu", "int8"
-            model = WhisperModel(model_name if args.model else "small",
+            model_name = model_name if args.model else "small"
+            model = WhisperModel(model_name,
                                  device=device, compute_type=compute)
         else:
             raise
 
+    return transcribe_files(model, model_name, files, args, out_dir, state_path, state)
+
+
+def transcribe_files(model, model_name, files, args, out_dir, state_path, state):
     failures = skipped = done = 0
     for path in files:
         st = os.stat(path)

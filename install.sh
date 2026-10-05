@@ -192,7 +192,7 @@ if command -v nvidia-smi >/dev/null; then
   echo "==> NVIDIA GPU detected — installing CUDA libraries"
   "$VENV/bin/pip" -q install -r "$DIR/requirements-gpu.txt"
 else
-  echo "==> no NVIDIA GPU — CPU mode (works fine, just slower)"
+  echo "==> no NVIDIA GPU — default CPU mode; for AMD Vulkan setup see README"
 fi
 
 # Older installs sealed their venv (created before --system-site-packages

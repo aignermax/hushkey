@@ -5,3 +5,5 @@ __pycache__/
 packaging/windows/logo.ico
 packaging/windows/dist/
 dist/
+.vulkan-*/
+.vulkan-*.log
