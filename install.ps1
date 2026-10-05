@@ -83,7 +83,7 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     Write-Host "==> NVIDIA GPU detected - installing CUDA libraries"
     & $VenvPython -m pip install -q -r (Join-Path $Dir "requirements-gpu.txt")
 } else {
-    Write-Host "==> no NVIDIA GPU - CPU mode (works fine, just slower)"
+    Write-Host "==> no NVIDIA GPU - default CPU mode; for AMD Vulkan setup see README"
 }
 
 if (-not $NoAutostart) {

@@ -1321,6 +1321,14 @@ class DictationDaemon:
 
     def load_model(self):
         global CURRENT_MODEL
+        from whisper_cpp import requested_engine, WhisperCppModel
+        if requested_engine() == "vulkan":
+            name = configured_model() or "medium"
+            print(f"loading whisper '{name}' on Vulkan ...", file=sys.stderr)
+            self.model = WhisperCppModel(name)
+            CURRENT_MODEL = name
+            log(f"model loaded: {name}/{self.model.device}")
+            return
         device, compute, default_model = pick_device()
         name = configured_model() or default_model
         from faster_whisper import WhisperModel
@@ -1331,6 +1339,7 @@ class DictationDaemon:
             if device == "cuda":
                 print(f"CUDA failed ({exc}); using CPU", file=sys.stderr)
                 self.model = WhisperModel(name, device="cpu", compute_type="int8")
+                device = "cpu"
             else:
                 raise
         CURRENT_MODEL = name
@@ -1603,7 +1612,12 @@ class DictationDaemon:
               file=sys.stderr)
         log(f"ready on {PTT_KEY} ({which} backend)")
         write_state("idle")
-        self.listener.listen(self.start_recording, self.stop_recording)
+        try:
+            self.listener.listen(self.start_recording, self.stop_recording)
+        finally:
+            close = getattr(self.model, "close", None)
+            if close:
+                close()
 
 
 def main():
