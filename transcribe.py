@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch-transcribe audio files to Markdown notes, fully local (faster-whisper).
+"""Batch-transcribe audio files to Markdown notes, fully local.
 
 Usage:
   transcribe.py AUDIO_DIR [--out DIR]          # all new/changed files in a folder
@@ -9,8 +9,9 @@ Usage:
   language, duration) and the transcript as body.
 - Already-transcribed files are skipped (tracked by mtime+size in
   <out>/.transcribe-state.json). Delete that file to force a redo.
-- GPU (CUDA) is used when available, otherwise CPU. After the one-time model
-  download nothing leaves the machine.
+- Default: faster-whisper uses CUDA when available, otherwise CPU. Set
+  WHISPER_ENGINE=vulkan for the optional AMD/whisper.cpp engine (see README).
+  After the one-time model download nothing leaves the machine.
 
 Options:
   --out DIR       output folder (default: <AUDIO_DIR>/transcripts or ./transcripts)

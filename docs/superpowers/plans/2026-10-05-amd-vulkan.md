@@ -31,7 +31,7 @@ falls back to CPU. Setup builds pinned upstream source.
 - [x] Setup and distribution: add setup_vulkan.py, include runtime/helper in both
   packages, document exact prerequisites and commands, test setup failures and
   package payloads; add Windows/Linux real engine CI.
-- [ ] Validate full suite and local RX 7600 XT inference, commit, independent
+- [x] Validate full suite and local RX 7600 XT inference, commit, independent
   review, fix findings with regression tests, create PR, inspect all CI checks.
 
 ## Execution notes
@@ -49,3 +49,7 @@ falls back to CPU. Setup builds pinned upstream source.
 - Ruling: implicit Vulkan layers disabled only in the inference child after a
   controlled experiment isolated severe local stalls to those layers. Cost:
   capture/overlay debugging requires WHISPER_CPP_ALLOW_LAYERS=1.
+- Final-head CI acceptance is tracked on PR #29; keep the PR draft until its
+  platform checks are green. Prior native Windows/Linux builds and inference
+  checks passed; the final test-only change removes reverse DNS from local HTTP
+  fixtures, which exceeded the fixture startup budget on hosted macOS.

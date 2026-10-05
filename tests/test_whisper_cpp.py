@@ -10,6 +10,7 @@ import threading
 import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,7 +33,16 @@ def endpoint():
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    class Server(ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer otherwise calls getfqdn(): reverse DNS of loopback
+            # stalls for ~35 seconds on hosted macOS runners. It is irrelevant
+            # to this numeric-loopback protocol test.
+            TCPServer.server_bind(self)
+            self.server_name = 'localhost'
+            self.server_port = self.server_address[1]
+
+    server = Server(('127.0.0.1', 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f'http://127.0.0.1:{server.server_port}', requests
@@ -187,6 +197,7 @@ def native_stub(tmp_path):
     path.write_text('''
 import argparse, json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import TCPServer
 p=argparse.ArgumentParser()
 p.add_argument('--port', type=int)
 p.add_argument('--request-path')
@@ -196,7 +207,12 @@ class Handler(BaseHTTPRequestHandler):
   self.send_response(200); self.end_headers()
   self.wfile.write(b'{"status":"ok"}')
  def log_message(self,*args): pass
-server=HTTPServer(('127.0.0.1',args.port),Handler)
+class Server(HTTPServer):
+ def server_bind(self):
+  TCPServer.server_bind(self)
+  self.server_name='localhost'
+  self.server_port=self.server_address[1]
+server=Server(('127.0.0.1',args.port),Handler)
 print('whisper_backend_init_gpu: using Vulkan0 backend',flush=True)
 server.serve_forever()
 ''', encoding='utf-8')
@@ -219,6 +235,7 @@ def test_model_lifecycle_owns_server_and_close_is_idempotent(monkeypatch, native
     model.close()
     model.close()
     with socket.socket() as sock:
+        sock.settimeout(.5)
         assert sock.connect_ex(('127.0.0.1', port)) != 0
 
 
@@ -241,6 +258,7 @@ time.sleep(60)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             with socket.socket() as sock:
+                sock.settimeout(.5)
                 if sock.connect_ex(('127.0.0.1', port)) == 0:
                     break
             time.sleep(.1)
@@ -252,6 +270,7 @@ time.sleep(60)
         # their inherited pipe handles, even though the application was killed.
         parent.communicate(timeout=10)
         with socket.socket() as sock:
+            sock.settimeout(.5)
             assert sock.connect_ex(('127.0.0.1', port)) != 0
     finally:
         if parent.poll() is None:

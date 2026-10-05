@@ -7,7 +7,8 @@ Nothing is submitted automatically; review and hit Enter yourself.
 
 - Recording: pw-record (PipeWire) on Linux where available, otherwise
   sounddevice/PortAudio (Windows WASAPI, macOS Core Audio) — see recorder.py.
-- Transcription: faster-whisper, local — GPU (CUDA) when available, else CPU.
+- Transcription: faster-whisper (CUDA/CPU), or whisper.cpp (AMD/Vulkan) with
+  WHISPER_ENGINE=vulkan. All inference is local.
   After the one-time model download nothing leaves the machine.
 - Key grab and text insertion are backend-specific:
     pynput   X11, Windows and macOS: pynput both reads the key and types the
