@@ -58,4 +58,7 @@ jobs:
         env:
           HUSHKEY_TEST_VULKAN: '1'
           WHISPER_CPP_SERVER: .vulkan-ci/bin/whisper-server
+          # Upstream intentionally excludes software devices by default.
+          # This CI-only opt-in exercises Vulkan through Mesa lavapipe.
+          GGML_VK_VISIBLE_DEVICES: '0'
         run: python -m pytest tests/test_vulkan_e2e.py -v
