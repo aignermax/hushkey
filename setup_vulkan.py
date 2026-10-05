@@ -26,7 +26,7 @@ def windows_toolchain(cmake, generator):
     if vswhere.is_file():
         installs = json.loads(subprocess.check_output(
             [str(vswhere), '-latest', '-products', '*', '-requires',
-             'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-format', 'json'],
+             'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-format', 'json', '-utf8'],
             text=True, encoding='utf-8'))
         if installs:
             version = installs[0]['installationVersion'].split('.')[0]

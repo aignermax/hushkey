@@ -47,8 +47,10 @@ def test_windows_generator_matches_installed_visual_studio(tmp_path, monkeypatch
     (tools / 'vswhere.exe').write_bytes(b'fake')
     monkeypatch.setenv('ProgramFiles(x86)', str(tmp_path))
     monkeypatch.delenv('CMAKE_GENERATOR', raising=False)
-    monkeypatch.setattr(setup_vulkan.subprocess, 'check_output', lambda *a, **kw:
-        json.dumps([{'installationVersion': '18.0.1', 'installationPath': str(tmp_path / 'VS')}]))
+    def vswhere(command, **kw):
+        assert '-utf8' in command
+        return json.dumps([{'installationVersion': '18.0.1', 'installationPath': str(tmp_path / 'VS')}])
+    monkeypatch.setattr(setup_vulkan.subprocess, 'check_output', vswhere)
     cmake, generator = setup_vulkan.windows_toolchain('cmake', None)
     assert generator == 'Visual Studio 18 2026'
 

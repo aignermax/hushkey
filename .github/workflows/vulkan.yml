@@ -40,10 +40,13 @@ jobs:
       - name: Windows native executable smoke test
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          HUSHKEY_TEST_CPP_BINARY: '1'
+          WHISPER_CPP_SERVER: .vulkan-ci/bin/whisper-server.exe
         run: |
           & .vulkan-ci/bin/whisper-server.exe --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest tests/test_whisper_cpp.py tests/test_setup_vulkan.py -v
+          python -m pytest tests/test_whisper_cpp.py tests/test_setup_vulkan.py tests/test_vulkan_e2e.py -v
       - name: Cache model
         if: runner.os == 'Linux'
         uses: actions/cache@v4

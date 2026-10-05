@@ -4,22 +4,24 @@ Run with HUSHKEY_TEST_VULKAN=1 and WHISPER_CPP_SERVER pointing at the build.
 """
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import urllib.request
 
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.skipif(os.environ.get('HUSHKEY_TEST_VULKAN') != '1',
-                                reason='requires a built Vulkan whisper-server')
-
-
+@pytest.mark.skipif(os.environ.get('HUSHKEY_TEST_VULKAN') != '1',
+                   reason='requires a built Vulkan whisper-server and Vulkan device')
 def test_real_vulkan_speech_and_repeated_requests(tmp_path):
-    from whisper_cpp import WhisperCppModel
+    from whisper_cpp import WhisperCppModel, resolve_model
     sample = tmp_path / 'speech.wav'
     urllib.request.urlretrieve(
         'https://raw.githubusercontent.com/ggml-org/whisper.cpp/'
         '927cfce34f31707e17f2bff35c349632fb9e2c3a/samples/jfk.wav', sample)
-    model = WhisperCppModel('tiny')
+    local_model = tmp_path / '模型-é.bin'
+    shutil.copyfile(resolve_model('tiny'), local_model)
+    model = WhisperCppModel(str(local_model))
     try:
         assert model.device.startswith('Vulkan')
         for _ in range(2):
@@ -32,3 +34,19 @@ def test_real_vulkan_speech_and_repeated_requests(tmp_path):
     finally:
         model.close()
     assert model.proc.poll() is not None
+
+
+@pytest.mark.skipif(os.environ.get('HUSHKEY_TEST_CPP_BINARY') != '1',
+                   reason='requires a built whisper-server; no GPU necessary')
+def test_native_unicode_model_loads_and_cpu_fallback_is_rejected(tmp_path, monkeypatch):
+    import whisper_cpp
+    local_model = tmp_path / '模型-é.bin'
+    shutil.copyfile(whisper_cpp.resolve_model('tiny'), local_model)
+    real_popen = subprocess.Popen
+
+    def cpu_server(command, **kwargs):
+        return real_popen(command + ['--no-gpu'], **kwargs)
+
+    monkeypatch.setattr(whisper_cpp.subprocess, 'Popen', cpu_server)
+    with pytest.raises(RuntimeError, match='did not initialize a Vulkan GPU'):
+        whisper_cpp.WhisperCppModel(str(local_model), startup_timeout=30)
