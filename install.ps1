@@ -46,6 +46,9 @@ function Find-CompatiblePython {
     }
     $candidates += @(Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending | ForEach-Object { $_.FullName })
+    # Python Install Manager stores runtimes outside the legacy Programs path.
+    $candidates += @(Get-ChildItem "$env:LOCALAPPDATA\Python\pythoncore-*\python.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | ForEach-Object { $_.FullName })
     $launcher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue
     if ($launcher -and $launcher.Source -notmatch '\\WindowsApps\\') {
         foreach ($version in @("-3.12", "-3.13", "-3.11", "-3.10")) {
@@ -65,7 +68,21 @@ function Find-CompatiblePython {
 }
 
 Write-Host "==> checking prerequisites"
-$Python = Find-CompatiblePython
+$VenvPython = Join-Path $Venv "Scripts\python.exe"
+$Python = $null
+$needVenv = $true
+if (Test-Path $VenvPython) {
+    # A working environment may use a newer Python than our fresh-install
+    # preference. Reuse it without discovering or installing another runtime.
+    try {
+        $valid = & $VenvPython -c "import sys,struct; print(sys.version_info >= (3,10) and struct.calcsize('P') == 8)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $valid -eq "True") {
+            $Python = $VenvPython
+            $needVenv = $false
+        }
+    } catch { }
+}
+if (-not $Python) { $Python = Find-CompatiblePython }
 if (-not $Python) {
     Write-Host "==> installing Python 3.12"
     $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -91,14 +108,7 @@ if (-not $Python) {
 }
 $PyArgs = @()
 
-$VenvPython = Join-Path $Venv "Scripts\python.exe"
 Write-Host "==> creating venv at $Venv"
-$needVenv = -not (Test-Path $VenvPython)
-if (-not $needVenv) {
-    # exists — but is it functional? (a removed/upgraded base Python breaks it)
-    & $VenvPython -c "pass" 2>$null
-    $needVenv = ($LASTEXITCODE -ne 0)
-}
 # only (re)create when needed: recreation copies fresh launchers over running
 # ones, which fails while a tray/daemon/update-helper is using them
 if ($needVenv) {
