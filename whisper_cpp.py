@@ -69,6 +69,16 @@ def vulkan_device(log):
     return match.group(1) if match else None
 
 
+def server_environment():
+    env = os.environ.copy()
+    # Capture/overlay layers can intercept compute and stall inference (observed
+    # on RX 7600 XT). Scope this to our child, leaving other GPU apps untouched.
+    # Requires Vulkan loader >= 1.3.262; older loaders ignore the filter.
+    if env.get('WHISPER_CPP_ALLOW_LAYERS') != '1':
+        env.setdefault('VK_LOADER_LAYERS_DISABLE', '~implicit~')
+    return env
+
+
 # whisper.cpp verbose_json uses full language names, whereas the application's
 # Chinese re-decode logic and note metadata need Whisper language codes.
 _LANGUAGES = dict(pair.split('=') for pair in '''
@@ -121,6 +131,7 @@ class WhisperCppModel:
         self.proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), '--supervise', *command],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=server_environment(),
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         self.reader = threading.Thread(target=self._drain, daemon=True)
         self.reader.start()

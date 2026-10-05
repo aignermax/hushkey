@@ -133,6 +133,23 @@ def test_gpu_proof_rejects_cpu_fallback():
     assert vulkan_device('ggml_vulkan: Found 1 Vulkan devices\nwhisper_backend_init_gpu: no GPU found') is None
 
 
+def test_compute_process_disables_implicit_layers_without_changing_parent(monkeypatch):
+    from whisper_cpp import server_environment
+    monkeypatch.delenv('VK_LOADER_LAYERS_DISABLE', raising=False)
+    monkeypatch.delenv('WHISPER_CPP_ALLOW_LAYERS', raising=False)
+    child_env = server_environment()
+    assert child_env['VK_LOADER_LAYERS_DISABLE'] == '~implicit~'
+    assert 'VK_LOADER_LAYERS_DISABLE' not in os.environ
+    monkeypatch.setenv('WHISPER_CPP_ALLOW_LAYERS', '1')
+    assert 'VK_LOADER_LAYERS_DISABLE' not in server_environment()
+
+
+def test_explicit_vulkan_loader_settings_are_preserved(monkeypatch):
+    from whisper_cpp import server_environment
+    monkeypatch.setenv('VK_LOADER_LAYERS_DISABLE', 'my_layer')
+    assert server_environment()['VK_LOADER_LAYERS_DISABLE'] == 'my_layer'
+
+
 def test_daemon_uses_vulkan_without_constructing_faster_whisper(monkeypatch, tmp_path):
     import dictate
     import whisper_cpp

@@ -127,6 +127,7 @@ key* (no config file or env var needed).
 | `WHISPER_ENGINE` | `faster-whisper` | `vulkan` enables whisper.cpp on AMD/other Vulkan GPUs (Windows/Linux); requires the setup below. Explicit Vulkan selection fails clearly if the GPU cannot initialize, rather than silently using CPU |
 | `WHISPER_CPP_SERVER` | installed per-user engine, then PATH | Optional path to the Vulkan-built `whisper-server` executable; keep any required shared libraries beside a custom executable |
 | `WHISPER_CPP_DEVICE` | `0` | GPU index from whisper.cpp's startup device list; useful for choosing the dedicated GPU on machines with integrated graphics |
+| `WHISPER_CPP_ALLOW_LAYERS` | `0` | `1` allows automatically injected Vulkan capture/overlay layers in the inference process. Normally disabled for this process only to avoid stalls; explicit `VK_LOADER_LAYERS_DISABLE` settings are preserved |
 | `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
 | `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
 | `WHISPER_LANG` | `de` | Language code; empty string = auto-detect. Easiest via the tray menu (**Language**: Auto/De/En/It/Es/Fr/Kn/Zh) — applies to the next dictation, no restart; an env var set inside a service unit still wins |
@@ -211,6 +212,12 @@ still do a small amount of CPU work; Whisper inference uses Vulkan. Logs report
 the Vulkan driver and device index; to return to the original CPU/NVIDIA engine,
 set `WHISPER_ENGINE=faster-whisper` and restart. No transcript is sent to the
 internet: the managed server binds only to `127.0.0.1` under a random request path.
+
+The inference process disables implicit Vulkan layers (capture tools/overlays)
+with Vulkan loader 1.3.262 or later. This fixes severe inference stalls observed
+on an RX 7600 XT with injected layers. It does not modify the registry, drivers
+or other applications. For Vulkan debugging, opt back in with
+`WHISPER_CPP_ALLOW_LAYERS=1`.
 
 Speed depends on model, GPU and driver; 16 GB of VRAM does not guarantee NVIDIA
 performance. CI builds the native executable on Windows/Linux and tests real
