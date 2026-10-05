@@ -10,10 +10,11 @@ if [ ! -x "$PREFIX/bin/glslc" ]; then
   cmake -S .shaderc-source -B .shaderc-build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=ON \
     -DSHADERC_SKIP_EXAMPLES=ON -DSHADERC_SKIP_COPYRIGHT_CHECK=ON
-  cmake --build .shaderc-build --target glslc --parallel 3
+  cmake --build .shaderc-build --target glslc_exe --parallel 3
   mkdir -p "$PREFIX/bin"
   cp .shaderc-build/glslc/glslc "$PREFIX/bin/"
   git clone --depth 1 --branch v1.4.321 https://github.com/KhronosGroup/Vulkan-Headers.git .vulkan-headers
+  test "$(git -C .vulkan-headers rev-parse HEAD)" = 2cd90f9d20df57eac214c148f3aed885372ddcfe
   cmake -S .vulkan-headers -B .vulkan-headers/build -DCMAKE_INSTALL_PREFIX="$PREFIX"
   cmake --install .vulkan-headers/build
   cmake -S .shaderc-source/third_party/spirv-headers -B .spirv-headers-build -DCMAKE_INSTALL_PREFIX="$PREFIX"
