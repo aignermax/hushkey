@@ -1,31 +1,33 @@
-name: Vulkan
-
+name: Native engines
 on:
-  pull_request:
+  workflow_call:
   push:
     branches: [master]
-
 permissions:
   contents: read
-
 jobs:
   engine:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        include:
+          - {os: windows-latest, system: windows, arch: x64}
+          - {os: ubuntu-22.04, system: linux, arch: x64}
+          - {os: ubuntu-22.04-arm, system: linux, arch: arm64}
+          - {os: macos-15, system: macos, arch: arm64}
+          - {os: macos-15-intel, system: macos, arch: x64}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - name: Linux Vulkan build tools and software driver
+      - name: Linux Vulkan build tools and runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build glslc libvulkan-dev spirv-headers mesa-vulkan-drivers libportaudio2
-      - name: Windows Vulkan SDK
+      - name: Windows Vulkan SDK (build machines only)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -35,30 +37,58 @@ jobs:
           "$sdk\Bin" >> $env:GITHUB_PATH
       - name: Python dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: Build and install pinned Vulkan engine
-        run: python setup_vulkan.py --prefix .vulkan-ci --jobs 2
-      - name: Windows native executable smoke test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          HUSHKEY_TEST_CPP_BINARY: '1'
-          WHISPER_CPP_SERVER: .vulkan-ci/bin/whisper-server.exe
+      - name: Build portable pinned engine
+        run: python setup_vulkan.py --prefix .vulkan-ci --jobs 3
+      - name: Native executable smoke test
+        shell: bash
         run: |
-          & .vulkan-ci/bin/whisper-server.exe --help
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest tests/test_whisper_cpp.py tests/test_setup_vulkan.py tests/test_vulkan_e2e.py -v
-      - name: Cache model
-        if: runner.os == 'Linux'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: vulkan-ggml-tiny-v1
+          binary=.vulkan-ci/bin/whisper-server
+          [ "$RUNNER_OS" != Windows ] || binary="$binary.exe"
+          "$binary" --help
+          if [ "$RUNNER_OS" = Linux ]; then
+            ldd "$binary" | tee native-dependencies.txt
+            ! grep -q 'not found' native-dependencies.txt
+            ! grep -Eq 'libstdc\+\+|libgomp|libgcc_s' native-dependencies.txt
+          elif [ "$RUNNER_OS" = macOS ]; then
+            otool -L "$binary" | tee native-dependencies.txt
+            ! tail -n +2 native-dependencies.txt | grep -Eq '/opt/homebrew|/usr/local|\.vulkan-ci'
+          fi
+      - name: Native CPU rejection and Unicode paths
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          export HUSHKEY_TEST_CPP_BINARY=1
+          export WHISPER_CPP_SERVER="$PWD/.vulkan-ci/bin/whisper-server"
+          [ "$RUNNER_OS" != Windows ] || export WHISPER_CPP_SERVER="$WHISPER_CPP_SERVER.exe"
+          python -m pytest tests/test_vulkan_e2e.py -v
       - name: Linux real inference through software Vulkan
         if: runner.os == 'Linux'
         env:
           HUSHKEY_TEST_VULKAN: '1'
           WHISPER_CPP_SERVER: .vulkan-ci/bin/whisper-server
-          # Upstream intentionally excludes software devices by default.
-          # This CI-only opt-in exercises Vulkan through Mesa lavapipe.
           GGML_VK_VISIBLE_DEVICES: '0'
         run: python -m pytest tests/test_vulkan_e2e.py -v
+      - name: Package engine with licenses
+        run: python packaging/native.py --prefix .vulkan-ci --system ${{ matrix.system }} --arch ${{ matrix.arch }} --out native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.system }}-${{ matrix.arch }}
+          path: native/*.zip
+          if-no-files-found: error
+  bundles:
+    needs: engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: native
+          merge-multiple: true
+      - name: Generate integrity manifest
+        run: python packaging/native.py --out native --manifest v0.9.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-bundles
+          path: native/*
+          if-no-files-found: error

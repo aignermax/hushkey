@@ -27,9 +27,11 @@ import wave
 
 
 def requested_engine():
-    engine = os.environ.get('WHISPER_ENGINE', 'faster-whisper').strip().lower()
-    if engine not in ('faster-whisper', 'vulkan'):
-        raise ValueError('WHISPER_ENGINE must be faster-whisper or vulkan')
+    from acceleration import load_settings
+    engine = (os.environ['WHISPER_ENGINE'] if 'WHISPER_ENGINE' in os.environ
+              else load_settings().get('engine', 'faster-whisper')).strip().lower()
+    if engine not in ('faster-whisper', 'vulkan', 'metal'):
+        raise ValueError('WHISPER_ENGINE must be faster-whisper, vulkan or metal')
     return engine
 
 
@@ -45,6 +47,10 @@ def server_path():
     override = os.environ.get('WHISPER_CPP_SERVER')
     if override:
         return shutil.which(override) or override
+    from acceleration import load_settings
+    installed_settings = load_settings()
+    if installed_settings.get('server'):
+        return installed_settings['server']
     name = 'whisper-server.exe' if sys.platform == 'win32' else 'whisper-server'
     installed = runtime_dir() / 'bin' / name
     return str(installed) if installed.is_file() else shutil.which(name)
@@ -66,6 +72,11 @@ def resolve_model(name):
 
 def vulkan_device(log):
     match = re.search(r'whisper_backend_init_gpu: using (Vulkan\d+) backend', log)
+    return match.group(1) if match else None
+
+
+def native_device(log):
+    match = re.search(r'whisper_backend_init_gpu: using (Vulkan\d+|Metal\d*|MTL\d+) backend', log)
     return match.group(1) if match else None
 
 
@@ -106,12 +117,17 @@ def _http(request, timeout):
 
 
 class WhisperCppModel:
-    def __init__(self, name, *, startup_timeout=180):
-        executable = server_path()
+    def __init__(self, name, *, startup_timeout=180, executable=None, gpu=None, engine=None):
+        executable = executable or server_path()
         if not executable or not Path(executable).is_file():
-            raise RuntimeError('Vulkan engine missing: run python setup_vulkan.py '
+            raise RuntimeError('Native engine missing: run python setup_acceleration.py '
+                               '(legacy: setup_vulkan.py) '
                                'or set WHISPER_CPP_SERVER to whisper-server')
-        gpu = int(os.environ.get('WHISPER_CPP_DEVICE', '0'))
+        from acceleration import load_settings
+        if gpu is None:
+            saved = load_settings().get('device', 0)
+            gpu = int(os.environ.get('WHISPER_CPP_DEVICE', saved if isinstance(saved, int) else 0))
+        self.engine = engine or requested_engine()
         if gpu < 0:
             raise ValueError('WHISPER_CPP_DEVICE must be a non-negative GPU index')
         model = resolve_model(name)
@@ -124,6 +140,7 @@ class WhisperCppModel:
         self.device = None
         self._startup_error = False
         self._startup_log = deque(maxlen=80)
+        self.gpu_devices = {}
         self._ready = False
         command = [str(Path(executable).resolve()), '-m', model, '--host', '127.0.0.1',
                    '--port', str(port), '--request-path', token, '--device', str(gpu),
@@ -141,7 +158,7 @@ class WhisperCppModel:
                 if self.proc.poll() is not None:
                     self.reader.join(timeout=1)
                     raise RuntimeError('whisper-server exited during startup; check the '
-                                       'model, Vulkan driver and executable dependencies.\n' +
+                                       'model, GPU driver and executable dependencies.\n' +
                                        ''.join(self._startup_log))
                 try:
                     with _http(self.url + '/health', timeout=.5) as response:
@@ -153,9 +170,13 @@ class WhisperCppModel:
                                 break
                             time.sleep(.05)
                         if not self.device or self._startup_error:
-                            raise RuntimeError('whisper.cpp did not initialize a Vulkan GPU; '
+                            raise RuntimeError('whisper.cpp did not initialize a hardware GPU; '
                                                'check drivers and WHISPER_CPP_DEVICE. '
-                                               'CPU fallback is disabled for WHISPER_ENGINE=vulkan')
+                                               f'CPU fallback is disabled for WHISPER_ENGINE={self.engine}.\n' +
+                                               ''.join(self._startup_log))
+                        expected = ('metal', 'mtl') if self.engine == 'metal' else (self.engine,)
+                        if self.engine in ('vulkan', 'metal') and not self.device.lower().startswith(expected):
+                            raise RuntimeError(f'Requested {self.engine}, but initialized {self.device}')
                         atexit.register(self.close)
                         self._ready = True
                         self._startup_log.clear()
@@ -163,7 +184,7 @@ class WhisperCppModel:
                 except (urllib.error.URLError, TimeoutError, OSError):
                     pass
                 time.sleep(.1)
-            raise RuntimeError('Vulkan model startup timed out; check driver and available VRAM')
+            raise RuntimeError('GPU model startup timed out; check driver and available VRAM\n' + ''.join(self._startup_log))
         except BaseException:
             self.close()
             raise
@@ -175,9 +196,16 @@ class WhisperCppModel:
             line = raw.decode('utf-8', errors='replace')
             if not self._ready:
                 self._startup_log.append(line)
-            device = vulkan_device(line)
+            device = native_device(line)
             if device:
                 self.device = device
+            match = re.search(r'ggml_vulkan: (\d+) = (.*?) \| uma: (\d)', line)
+            if match:
+                self.gpu_devices[int(match[1])] = {'name': match[2], 'integrated': match[3] == '1'}
+            if re.search(r'llvmpipe|lavapipe|swiftshader|software rasterizer', line, re.I):
+                # Only the selected Vulkan device is rejected below; systems may
+                # enumerate a software driver alongside their real GPU.
+                self.gpu_devices.setdefault(-1, {'name': line, 'integrated': True})
             if 'failed to initialize' in line and 'backend' in line:
                 self._startup_error = True
 

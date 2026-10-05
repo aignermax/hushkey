@@ -422,6 +422,12 @@ def preload_cuda_libs():
 def pick_device():
     """Return (device, compute_type, default_model)."""
     preload_cuda_libs()
+    from acceleration import saved_device
+    saved = saved_device()
+    if saved == 'cpu':
+        return 'cpu', 'int8', 'small'
+    if saved == 'cuda':
+        return 'cuda', 'float16', 'medium'
     try:
         import ctranslate2  # type: ignore
         if ctranslate2.get_cuda_device_count() > 0:
@@ -1323,9 +1329,9 @@ class DictationDaemon:
     def load_model(self):
         global CURRENT_MODEL
         from whisper_cpp import requested_engine, WhisperCppModel
-        if requested_engine() == "vulkan":
+        if requested_engine() in ("vulkan", "metal"):
             name = configured_model() or "medium"
-            print(f"loading whisper '{name}' on Vulkan ...", file=sys.stderr)
+            print(f"loading whisper '{name}' on {requested_engine()} ...", file=sys.stderr)
             self.model = WhisperCppModel(name)
             CURRENT_MODEL = name
             log(f"model loaded: {name}/{self.model.device}")
@@ -1338,6 +1344,8 @@ class DictationDaemon:
             self.model = WhisperModel(name, device=device, compute_type=compute)
         except Exception as exc:
             if device == "cuda":
+                if 'out of memory' in str(exc).lower():
+                    raise RuntimeError('GPU memory exhausted; choose a smaller WHISPER_MODEL') from exc
                 print(f"CUDA failed ({exc}); using CPU", file=sys.stderr)
                 self.model = WhisperModel(name, device="cpu", compute_type="int8")
                 device = "cpu"

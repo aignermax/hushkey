@@ -8,8 +8,9 @@ Local, offline push-to-talk dictation for **Linux (X11 and Wayland), Windows and
 macOS** — hold <kbd>Right Ctrl</kbd>, speak, release, and the transcript lands
 in whatever window has focus. Terminal, editor, browser, chat: any app. Powered by
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper), CUDA-accelerated
-when an NVIDIA GPU is present (Linux/Windows), CPU otherwise. **AMD GPUs on
-Windows and Linux** can use the optional **whisper.cpp Vulkan engine** below.
+when an NVIDIA GPU is present (Linux/Windows). Installers automatically set up
+**Vulkan for AMD and other supported GPUs on Windows/Linux**, **Metal on macOS**,
+or CPU inference when no supported GPU is available. No separate GPU setup is needed.
 
 Nothing leaves your machine after the one-time model download.
 
@@ -46,7 +47,7 @@ Both fetch the sources (into `~/.local/share/whisper-ptt` on Linux/macOS,
 `%LOCALAPPDATA%\Programs\whisper-ptt` on Windows), install all dependencies and
 set up autostart. From your own checkout, `./install.sh` /
 `powershell -ExecutionPolicy Bypass -File install.ps1` work the same way
-(`install.ps1 -NoAutostart` skips the autostart entry if you prefer to run
+(`install.ps1 -NoAutostart` or `./install.sh --no-autostart` skips autostart if you prefer to run
 `.venv\Scripts\python.exe dictate.py` manually).
 
 That's it: the daemon is running and starts on every login. The one exception is
@@ -89,10 +90,10 @@ anyone who would rather *say* it than type it.
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
-| OS | X11 **or** Wayland (`echo $XDG_SESSION_TYPE`); the installer picks the matching backend | Windows 10+ | recent macOS |
+| OS | Ubuntu 22.04+ or equivalent modern distro, X11 **or** Wayland | Windows 10 1903+ | macOS 13+ (14+ recommended) |
 | Audio | PipeWire `pw-record` (standard on Ubuntu ≥ 22.10/Fedora); fallback: `libportaudio2` | any microphone | any microphone |
-| Python | ≥ 3.10 with `python3-venv` | ≥ 3.10 ([python.org](https://www.python.org/downloads/), "Add to PATH") | ≥ 3.10 |
-| Optional | NVIDIA GPU for CUDA; AMD GPU with Vulkan | NVIDIA GPU for CUDA; AMD GPU with Vulkan | — |
+| Python | ≥ 3.10; installed automatically if missing | installed automatically if missing | compatible Python installed automatically if missing |
+| Acceleration (automatic) | NVIDIA CUDA or Vulkan GPU | NVIDIA CUDA or Vulkan GPU | Metal GPU (Apple Silicon / supported Intel Macs) |
 
 On macOS you must grant the terminal **Microphone**, **Accessibility** and
 **Input Monitoring** permissions when prompted (System Settings → Privacy &
@@ -124,7 +125,7 @@ key* (no config file or env var needed).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WHISPER_ENGINE` | `faster-whisper` | `vulkan` enables whisper.cpp on AMD/other Vulkan GPUs (Windows/Linux); requires the setup below. Explicit Vulkan selection fails clearly if the GPU cannot initialize, rather than silently using CPU |
+| `WHISPER_ENGINE` | installer-selected | Expert override: `faster-whisper`, `vulkan` (Windows/Linux), or `metal` (macOS). Explicit native GPU selection fails clearly if the GPU cannot initialize |
 | `WHISPER_CPP_SERVER` | installed per-user engine, then PATH | Optional path to the Vulkan-built `whisper-server` executable; keep any required shared libraries beside a custom executable |
 | `WHISPER_CPP_DEVICE` | `0` | GPU index from whisper.cpp's startup device list; useful for choosing the dedicated GPU on machines with integrated graphics |
 | `WHISPER_CPP_ALLOW_LAYERS` | `0` | `1` allows automatically injected Vulkan capture/overlay layers in the inference process. Normally disabled for this process only to avoid stalls; explicit `VK_LOADER_LAYERS_DISABLE` settings are preserved |
@@ -144,86 +145,56 @@ key* (no config file or env var needed).
 | `PTT_STREAM_INTERVAL` | `3.0` | Seconds between streaming ticks (streaming mode only) |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
 
-### AMD GPU setup (Windows and Linux)
+### Automatic GPU setup
 
-Install hushkey normally first, then run the commands below **from its install
-directory**. This optional setup compiles the pinned whisper.cpp v1.9.4 source
-with Vulkan. It needs build tools once; it does not install or change GPU drivers.
-Use a current AMD driver (Linux: a working Mesa/RADV Vulkan driver).
+Every existing installation route runs the same acceleration setup: Windows
+`.exe` and PowerShell, Linux `.deb` and shell script, macOS shell script, and
+in-app updates. There is no additional `setup_vulkan.py` command for users.
 
-**Windows 10 1903+ / Windows 11:** install Git and Visual Studio 2022 or 2026 Build Tools with
-**Desktop development with C++**, plus the [Vulkan SDK](https://vulkan.lunarg.com/).
-Open a new PowerShell after installing the tools:
+- **Windows/Linux:** prefer working NVIDIA CUDA, otherwise use a supported
+  Vulkan GPU, including AMD. On hybrid systems prefer the dedicated Vulkan GPU.
+- **macOS:** use the native Metal backend. Apple Silicon and Intel have separate
+  prebuilt engines; Vulkan is not required on the Mac.
+- **CPU-only computers:** install normally and clearly report CPU selection.
 
-```powershell
-.venv\Scripts\python.exe setup_vulkan.py
-[Environment]::SetEnvironmentVariable('WHISPER_ENGINE', 'vulkan', 'User')
-```
+The installer obtains the matching prebuilt engine, verifies its SHA-256 checksum,
+loads a tiny public test model and runs an inference probe before saving the
+backend. Windows includes the Vulkan loader; Linux installs the loader and Mesa
+runtime packages through the distribution's package manager. GPU vendor drivers
+must support the selected backend. No compiler, Visual Studio or Vulkan SDK is
+needed for a normal installation. Internet access is needed for installation,
+the probe model and each newly selected model; inference then works offline.
+Download/corruption/build errors fail setup instead of claiming GPU success.
 
-Setup detects Visual Studio and uses its bundled CMake when available. Otherwise
-install CMake supporting your compiler; `--cmake` and `--generator` accept explicit
-overrides. **Quit hushkey and sign out/in** so the autostart task
-receives the new environment. To try it immediately in the same PowerShell:
+Native release architectures are Windows x64, Linux x64/arm64, and macOS
+x64/arm64. OS permissions still apply: macOS requires Microphone, Accessibility
+and Input Monitoring approval, and Linux/Wayland may require one logout after
+input-group setup. Installation cannot bypass those operating-system controls.
 
-```powershell
-$env:WHISPER_ENGINE = 'vulkan'
-.venv\Scripts\python.exe dictate.py
-```
+Selection is saved in `hushkey/acceleration.json` under `%LOCALAPPDATA%` (Windows),
+`${XDG_DATA_HOME:-~/.local/share}` (Linux), or `~/Library/Application Support`
+(macOS). Autostart and updates use that file, without requiring shell environment
+variables or an extra login. Existing model, language and hotkey choices survive.
+`WHISPER_ENGINE`, `WHISPER_CPP_SERVER` and `WHISPER_CPP_DEVICE` remain explicit
+expert overrides. To repeat hardware detection, rerun the installer.
 
-**Debian/Ubuntu Linux:**
+The model stays loaded between recordings. Logs identify the actual backend,
+for example `small/Vulkan0` or `medium/MTL0`. Native backends use a separate GGML
+model cache. The managed server binds only to `127.0.0.1` with a random request
+path; transcripts never leave the computer. Audio decoding and voice activity
+detection may still use CPU.
 
-```bash
-sudo apt install build-essential git cmake ninja-build libvulkan-dev glslc spirv-headers mesa-vulkan-drivers
-.venv/bin/python setup_vulkan.py --generator Ninja
-systemctl --user edit whisper-ptt
-```
+Vulkan inference disables implicit capture/overlay layers only inside its child
+process to avoid observed AMD driver stalls. Set `WHISPER_CPP_ALLOW_LAYERS=1`
+for debugging; no registry or system driver settings are changed.
 
-Add the following service override, then restart:
+#### Building engines from source (developers)
 
-```ini
-[Service]
-Environment=WHISPER_ENGINE=vulkan
-```
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart whisper-ptt
-```
-
-For other Linux distributions install the equivalent C++/CMake/Vulkan development
-packages. For a terminal-only trial or batch transcription, use
-`WHISPER_ENGINE=vulkan .venv/bin/python transcribe.py recordings --out notes`.
-
-The engine is installed under `%LOCALAPPDATA%\hushkey\vulkan` on Windows or
-`${XDG_DATA_HOME:-~/.local/share}/hushkey/vulkan` on Linux. `--prefix DIR` changes
-this location (then set `WHISPER_CPP_SERVER` to the printed executable path).
-Builds use at most eight parallel jobs; reduce memory usage with `--jobs 2`.
-These optional build files and cached models remain after uninstalling hushkey.
-
-The tray's model selection also works with Vulkan. The first start downloads a
-**separate GGML model** into the Hugging Face cache; later starts work offline.
-`tiny`, `base`, `small`, `medium`, `large` (large-v3), their supported `.en`
-variants, and `large-v3-turbo` are supported. `WHISPER_MODEL` may also point to a
-local GGML `.bin` file; CTranslate2 model directories are not interchangeable.
-
-The model stays loaded between recordings. Audio decoding and speech detection
-still do a small amount of CPU work; Whisper inference uses Vulkan. Logs report
-`model loaded: <model>/Vulkan0` after GPU initialization. If startup fails, check
-the Vulkan driver and device index; to return to the original CPU/NVIDIA engine,
-set `WHISPER_ENGINE=faster-whisper` and restart. No transcript is sent to the
-internet: the managed server binds only to `127.0.0.1` under a random request path.
-
-The inference process disables implicit Vulkan layers (capture tools/overlays)
-with Vulkan loader 1.3.262 or later. This fixes severe inference stalls observed
-on an RX 7600 XT with injected layers. It does not modify the registry, drivers
-or other applications. For Vulkan debugging, opt back in with
-`WHISPER_CPP_ALLOW_LAYERS=1`.
-
-Speed depends on model, GPU and driver; 16 GB of VRAM does not guarantee NVIDIA
-performance. CI builds the native executable on Windows/Linux and tests real
-inference using Mesa software Vulkan on Linux; that is a compatibility check,
-not an AMD performance benchmark. Enable the local hardware test with
-`HUSHKEY_TEST_VULKAN=1` and run `python -m pytest tests/test_vulkan_e2e.py -v`.
+`setup_vulkan.py` remains available for custom builds and CI. It pins whisper.cpp
+v1.9.4, builds Vulkan on Windows/Linux and Metal on macOS, and requires CMake,
+Git and a C++ compiler. Vulkan builds additionally need SDK headers and shader
+compiler tools. `--prefix`, `--generator`, `--cmake` and `--jobs` control the build.
+Normal installers use verified release binaries instead.
 
 ### Setting other variables
 

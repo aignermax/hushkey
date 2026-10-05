@@ -8,10 +8,14 @@ on:
     tags: ["v*"]
   pull_request:
     # smoke-build the installers on packaging changes (no upload)
-    paths: ["packaging/**", ".github/workflows/release.yml", "install.ps1", "install.sh"]
+    paths: ["packaging/**", ".github/workflows/**", "install.ps1", "install.sh", "setup_*.py", "acceleration.py", "whisper_cpp.py", "tests/**"]
 
 jobs:
+  native:
+    uses: ./.github/workflows/vulkan.yml
+
   windows-installer:
+    needs: native
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +23,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-bundles
+          path: native
 
       - name: Generate logo.ico
         run: |
@@ -43,9 +52,15 @@ jobs:
           path: packaging/windows/dist/*.exe
 
   deb-package:
+    needs: native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-bundles
+          path: native
 
       - name: Build .deb
         run: |
@@ -74,3 +89,5 @@ jobs:
           files: |
             artifacts/**/*.exe
             artifacts/**/*.deb
+            artifacts/native-bundles/*.zip
+            artifacts/native-bundles/native-manifest.json

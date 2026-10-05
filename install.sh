@@ -3,6 +3,13 @@
 # On Linux/Wayland it additionally sets up ydotoold (see README "How it works").
 # Idempotent — safe to re-run (e.g. after git pull). On Windows use install.ps1.
 set -euo pipefail
+NO_AUTOSTART=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-autostart) NO_AUTOSTART=1 ;;
+    *) echo "ERROR: unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 # One-liner install straight from the web:
 #   curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
@@ -40,6 +47,10 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
 fi
 
 install_pkg() {
+  if [ "${HUSHKEY_PACKAGE_INSTALL:-0}" = 1 ]; then
+    echo "ERROR: package dependency missing: $* (no nested package manager during dpkg)" >&2
+    return 1
+  fi
   echo "==> installing $* (may ask for your password)"
   if command -v apt-get >/dev/null; then
     $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
@@ -56,7 +67,32 @@ install_pkg() {
 }
 
 echo "==> checking prerequisites"
-command -v python3 >/dev/null || { echo "ERROR: python3 missing"; exit 1; }
+bootstrap_macos_python() {
+  if command -v brew >/dev/null; then
+    brew install python@3.12
+    PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
+  else
+    local pkg
+    pkg="$(mktemp -d)/python.pkg"
+    curl -fSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$pkg"
+    echo "8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4  $pkg" | shasum -a 256 -c -
+    $SUDO installer -pkg "$pkg" -target /
+    rm -f "$pkg"
+    rmdir "$(dirname "$pkg")"
+    PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+  fi
+}
+PYTHON="$(command -v python3 || true)"
+if [ -z "$PYTHON" ] || ! "$PYTHON" -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info < (3, 14)))' 2>/dev/null; then
+  case "$OS" in
+    Linux)
+      if command -v apt-get >/dev/null; then install_pkg python3 python3-venv
+      elif command -v pacman >/dev/null; then install_pkg python
+      else install_pkg python3; fi
+      PYTHON="$(command -v python3)" ;;
+    Darwin) bootstrap_macos_python ;;
+  esac
+fi
 if [ "$OS" = "Linux" ]; then
   SESSION="${XDG_SESSION_TYPE:-x11}"
   command -v pw-record >/dev/null || echo "WARNING: pw-record missing (install pipewire) — recording falls back to sounddevice (needs libportaudio2)"
@@ -83,11 +119,11 @@ VENV_FLAGS=""
 [ "$OS" = "Linux" ] && VENV_FLAGS="--system-site-packages"
 if [ ! -x "$VENV/bin/python" ]; then
   # Debian/Ubuntu split ensurepip into a versioned package, so name the exact one.
-  pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  python3 -m venv $VENV_FLAGS "$VENV" 2>/dev/null || {
+  pyver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  "$PYTHON" -m venv $VENV_FLAGS "$VENV" 2>/dev/null || {
     echo "    ensurepip unavailable — installing python${pyver}-venv"
     install_pkg "python${pyver}-venv"
-    python3 -m venv $VENV_FLAGS "$VENV"
+    "$PYTHON" -m venv $VENV_FLAGS "$VENV"
   }
 fi
 "$VENV/bin/pip" -q install --upgrade pip
@@ -147,6 +183,9 @@ retry_on_older_python() {
       reinstall_venv_with "$py" && return 0
     fi
   fi
+  echo "==> provisioning compatible Python 3.12"
+  bootstrap_macos_python
+  reinstall_venv_with "$PYTHON" && return 0
   echo "ERROR: could not install the Python dependencies on this Mac." >&2
   echo "       Install Python 3.12 (brew install python@3.12 or python.org) and re-run;" >&2
   echo "       for pip's full reason run: $VENV/bin/pip install -r $DIR/requirements.txt" >&2
@@ -173,7 +212,7 @@ if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt" 2>"$PIP_ERR"; then
     fi
   else
     echo "    dependency build failed — installing compiler and Python headers"
-    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    pyver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
     if command -v apt-get >/dev/null; then
       install_pkg build-essential "python${pyver}-dev"
     elif command -v dnf >/dev/null; then
@@ -188,11 +227,22 @@ if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt" 2>"$PIP_ERR"; then
   fi
 fi
 rm -f "$PIP_ERR"
-if command -v nvidia-smi >/dev/null; then
-  echo "==> NVIDIA GPU detected — installing CUDA libraries"
-  "$VENV/bin/pip" -q install -r "$DIR/requirements-gpu.txt"
-else
-  echo "==> no NVIDIA GPU — default CPU mode; for AMD Vulkan setup see README"
+# dpkg installs these dependencies before postinst runs; never nest apt there.
+if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
+  if command -v apt-get >/dev/null; then
+    install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
+  elif command -v dnf >/dev/null; then
+    install_pkg vulkan-loader mesa-vulkan-drivers portaudio
+  elif command -v pacman >/dev/null; then
+    install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
+  fi
+fi
+echo "==> configuring automatic hardware acceleration"
+"$VENV/bin/python" "$DIR/setup_acceleration.py"
+
+if [ "$NO_AUTOSTART" = 1 ]; then
+  echo "Done. Dependencies and acceleration configured; autostart skipped."
+  exit 0
 fi
 
 # Older installs sealed their venv (created before --system-site-packages

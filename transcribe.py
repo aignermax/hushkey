@@ -58,6 +58,12 @@ def preload_cuda_libs():
 
 def pick_device():
     preload_cuda_libs()
+    from acceleration import saved_device
+    saved = saved_device()
+    if saved == 'cpu':
+        return 'cpu', 'int8', 'small'
+    if saved == 'cuda':
+        return 'cuda', 'float16', 'medium'
     try:
         import ctranslate2  # type: ignore
         if ctranslate2.get_cuda_device_count() > 0:
@@ -120,9 +126,9 @@ def main(argv=None):
     state = load_state(state_path)
 
     from whisper_cpp import requested_engine, WhisperCppModel
-    if requested_engine() == "vulkan":
+    if requested_engine() in ("vulkan", "metal"):
         model_name = args.model or "medium"
-        print(f"loading model '{model_name}' on Vulkan", file=sys.stderr)
+        print(f"loading model '{model_name}' on {requested_engine()}", file=sys.stderr)
         model = WhisperCppModel(model_name)
         try:
             return transcribe_files(model, model_name, files, args, out_dir, state_path, state)
@@ -139,6 +145,8 @@ def main(argv=None):
         model = WhisperModel(model_name, device=device, compute_type=compute)
     except Exception as exc:
         if device == "cuda":
+            if 'out of memory' in str(exc).lower():
+                raise RuntimeError('GPU memory exhausted; choose a smaller WHISPER_MODEL') from exc
             print(f"CUDA failed ({exc}), falling back to CPU", file=sys.stderr)
             device, compute = "cpu", "int8"
             model_name = model_name if args.model else "small"

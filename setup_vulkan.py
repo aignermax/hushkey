@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Build the optional Vulkan engine. Requires Git, CMake, a C++ compiler and
-Vulkan development tools (see README). Never changes drivers or system packages.
+"""Build release engines (Vulkan on Windows/Linux, Metal on macOS).
+Developer/CI tool; ordinary installers download prebuilt engines instead.
 """
 from __future__ import annotations
 
@@ -41,12 +41,20 @@ def windows_toolchain(cmake, generator):
 
 def build_commands(cmake, source, build, generator, jobs):
     configure = [cmake, '-S', str(source), '-B', str(build),
-                 '-DCMAKE_BUILD_TYPE=Release', '-DGGML_VULKAN=ON',
+                 '-DCMAKE_BUILD_TYPE=Release',
+                 '-DGGML_VULKAN=' + ('OFF' if sys.platform == 'darwin' else 'ON'),
+                 '-DGGML_METAL=' + ('ON' if sys.platform == 'darwin' else 'OFF'),
+                 '-DGGML_OPENMP=OFF',
                  '-DBUILD_SHARED_LIBS=OFF', '-DGGML_NATIVE=OFF',
                  '-DWHISPER_BUILD_TESTS=OFF', '-DWHISPER_BUILD_SERVER=ON']
     if generator:
         configure += ['-G', generator]
+    if sys.platform == 'darwin':
+        configure += ['-DGGML_METAL_EMBED_LIBRARY=ON', '-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0']
+    elif sys.platform == 'linux':
+        configure += ['-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc']
     if sys.platform == 'win32':
+        configure += ['-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded']
         # Upstream uses main(char**), then interprets model filenames as UTF-8.
         # Ask Windows 10 1903+ to supply UTF-8 argv, including Unicode user homes.
         build.mkdir(parents=True, exist_ok=True)
@@ -86,8 +94,8 @@ def main(argv=None):
     parser.add_argument('--generator', default=None, help='CMake generator, e.g. Ninja')
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
     args = parser.parse_args(argv)
-    if sys.platform not in ('win32', 'linux'):
-        parser.error('This Vulkan setup supports Windows and Linux')
+    if sys.platform not in ('win32', 'linux', 'darwin'):
+        parser.error('Native engines support Windows, Linux and macOS')
     if args.jobs < 1:
         parser.error('--jobs must be positive')
     if sys.platform == 'win32':

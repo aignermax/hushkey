@@ -27,38 +27,67 @@ if (-not $Dir -or -not (Test-Path (Join-Path $Dir "dictate.py"))) {
         Invoke-WebRequest -UseBasicParsing "$Repo/archive/refs/heads/master.zip" -OutFile $zip
         Expand-Archive $zip -DestinationPath $tmp
         New-Item -ItemType Directory -Force $Dir | Out-Null
-        Copy-Item (Join-Path $tmp "whisper-ptt-master\*") $Dir -Recurse -Force
+        Copy-Item (Join-Path $tmp "hushkey-master\*") $Dir -Recurse -Force
         Remove-Item $tmp, $zip -Recurse -Force
     }
 }
 $Venv = Join-Path $Dir ".venv"
 $TaskName = "whisper-ptt"
 
-Write-Host "==> checking prerequisites"
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    $Python = "python"; $PyArgs = @()
-} elseif (Get-Command py -ErrorAction SilentlyContinue) {
-    $Python = "py"; $PyArgs = @("-3")
-} else {
-    # A Python installed moments ago (e.g. by the setup.exe bootstrap via
-    # winget) is not on this process's PATH yet — probe the standard spot.
-    # Version-aware: skip anything below 3.10 (e.g. a stray Python39).
-    $candidate = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
-        Where-Object { ($_.Directory.Name -replace '\D', '') -as [int] -ge 310 } |
-        Sort-Object { ($_.Directory.Name -replace '\D', '') -as [int] } -Descending |
-        Select-Object -First 1
-    if ($candidate) {
-        $Python = $candidate.FullName; $PyArgs = @()
-    } else {
-        Write-Error "Python 3 not found. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH')."
-        exit 1
+function Find-CompatiblePython {
+    # Store aliases can open a store window; never execute them as probes.
+    $candidates = @()
+    foreach ($name in @("python3.12", "python", "python3")) {
+        $candidates += @(Get-Command $name -All -CommandType Application -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -notmatch '\\WindowsApps\\' } |
+            ForEach-Object { $_.Source })
     }
+    $candidates += @(Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | ForEach-Object { $_.FullName })
+    $launcher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue
+    if ($launcher -and $launcher.Source -notmatch '\\WindowsApps\\') {
+        foreach ($version in @("-3.12", "-3.13", "-3.11", "-3.10")) {
+            try {
+                $path = & $launcher.Source $version -c "import sys; print(sys.executable)" 2>$null
+                if ($LASTEXITCODE -eq 0) { $candidates += $path }
+            } catch { }
+        }
+    }
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        try {
+            $valid = & $candidate -c "import sys,struct; print((3,10) <= sys.version_info < (3,14) and struct.calcsize('P') == 8)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $valid -eq "True") { return $candidate }
+        } catch { }
+    }
+    return $null
 }
-$verOk = & $Python @PyArgs -c "import sys; print(sys.version_info >= (3, 10))" 2>$null
-if ($verOk -ne "True") {
-    Write-Error "Python 3.10+ required (if the Microsoft Store just opened, install real Python from python.org first)."
-    exit 1
+
+Write-Host "==> checking prerequisites"
+$Python = Find-CompatiblePython
+if (-not $Python) {
+    Write-Host "==> installing Python 3.12"
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        & $winget.Source install -e --id Python.Python.3.12 --scope user --silent --accept-source-agreements --accept-package-agreements
+        $Python = Find-CompatiblePython
+    }
+    if (-not $Python) {
+        $installer = Join-Path $env:TEMP ("hushkey-python-" + [guid]::NewGuid().ToString("N") + ".exe")
+        try {
+            Invoke-WebRequest -UseBasicParsing https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe -OutFile $installer
+            if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb") {
+                throw "Python download checksum mismatch"
+            }
+            $result = Start-Process -FilePath $installer -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0" -Wait -PassThru -WindowStyle Hidden
+            if ($result.ExitCode -notin @(0, 3010)) { throw "Python installer failed: $($result.ExitCode)" }
+        } finally {
+            Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+        }
+        $Python = Find-CompatiblePython
+    }
+    if (-not $Python) { throw "Compatible 64-bit Python could not be installed." }
 }
+$PyArgs = @()
 
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 Write-Host "==> creating venv at $Venv"
@@ -75,16 +104,14 @@ if ($needVenv) {
     if ($LASTEXITCODE -ne 0) { Write-Error "venv creation failed"; exit 1 }
 }
 & $VenvPython -m pip install -q --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
 
 Write-Host "==> installing python dependencies"
 & $VenvPython -m pip install -q -r (Join-Path $Dir "requirements.txt")
 if ($LASTEXITCODE -ne 0) { Write-Error "dependency install failed"; exit 1 }
-if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-    Write-Host "==> NVIDIA GPU detected - installing CUDA libraries"
-    & $VenvPython -m pip install -q -r (Join-Path $Dir "requirements-gpu.txt")
-} else {
-    Write-Host "==> no NVIDIA GPU - default CPU mode; for AMD Vulkan setup see README"
-}
+Write-Host "==> configuring automatic hardware acceleration"
+& $VenvPython (Join-Path $Dir "setup_acceleration.py")
+if ($LASTEXITCODE -ne 0) { throw "Automatic acceleration setup failed ($LASTEXITCODE)" }
 
 if (-not $NoAutostart) {
     $Pythonw = Join-Path $Venv "Scripts\pythonw.exe"  # no console window
