@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
+import time
+from types import SimpleNamespace
 import urllib.request
 
 import numpy as np
@@ -13,7 +16,7 @@ import pytest
 
 @pytest.mark.skipif(os.environ.get('HUSHKEY_TEST_VULKAN') != '1',
                    reason='requires a built Vulkan whisper-server and Vulkan device')
-def test_real_vulkan_speech_and_repeated_requests(tmp_path):
+def test_real_vulkan_speech_and_repeated_requests(tmp_path, monkeypatch):
     from whisper_cpp import WhisperCppModel, resolve_model
     sample = tmp_path / 'speech.wav'
     urllib.request.urlretrieve(
@@ -31,6 +34,33 @@ def test_real_vulkan_speech_and_repeated_requests(tmp_path):
             assert all(0 <= s.start <= s.end for s in segments)
         segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language='de')
         assert segments == []
+        # Real press/release -> native GPU model -> text insertion flow, with
+        # only the microphone and desktop replaced by controlled test seams.
+        import dictate
+        clip = tmp_path / 'recording.wav'
+        shutil.copyfile(sample, clip)
+        inserted = []
+        idle = threading.Event()
+        monkeypatch.setenv('WHISPER_LANG', 'en')
+        monkeypatch.setattr(dictate, 'PTT_KEY', 'f9')
+        monkeypatch.setattr(dictate, 'STREAMING', False)
+        monkeypatch.setattr(dictate, 'notify', lambda *args: None)
+        monkeypatch.setattr(dictate, 'log', lambda text: None)
+        monkeypatch.setattr(dictate, 'write_state',
+                            lambda state: idle.set() if state == 'idle' else None)
+        monkeypatch.setattr(dictate, 'pick_recorder', lambda: SimpleNamespace(
+            start=lambda: None, stop=lambda: str(clip)))
+        monkeypatch.setattr(dictate, 'make_backends', lambda key: (
+            None, SimpleNamespace(insert=lambda text: inserted.append(text))))
+        daemon = dictate.DictationDaemon()
+        daemon.model = model
+        daemon.start_recording()
+        daemon.start_recording()  # key autorepeat must not duplicate output
+        daemon.recording = time.time() - 11
+        daemon.stop_recording()
+        assert idle.wait(120), 'GPU dictation worker did not finish'
+        assert len(inserted) == 1 and 'country' in inserted[0].lower()
+        assert not clip.exists()
     finally:
         model.close()
     assert model.proc.poll() is not None

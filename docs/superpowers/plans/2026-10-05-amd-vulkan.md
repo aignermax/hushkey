@@ -25,10 +25,10 @@ falls back to CPU. Setup builds pinned upstream source.
 
 ## Tasks
 
-- [ ] Adapter and integration: run tests/test_whisper_cpp.py RED; implement
+- [x] Adapter and integration: run tests/test_whisper_cpp.py RED; implement
   whisper_cpp.py, wire dictate.load_model and transcribe.main; verify GREEN.
   Include lifecycle cleanup, invalid engine, silent audio and HTTP failures.
-- [ ] Setup and distribution: add setup_vulkan.py, include runtime/helper in both
+- [x] Setup and distribution: add setup_vulkan.py, include runtime/helper in both
   packages, document exact prerequisites and commands, test setup failures and
   package payloads; add Windows/Linux real engine CI.
 - [ ] Validate full suite and local RX 7600 XT inference, commit, independent
@@ -41,3 +41,11 @@ falls back to CPU. Setup builds pinned upstream source.
   and rerun the existing real-audio regression test.
 - Authorization: user explicitly requested end-to-end implementation, PR,
   review and fixes. Routine implementation decisions proceed within that scope.
+- Independent review completed; all three findings fixed with regression checks.
+  See ../../amd-vulkan-validation.md for hardware results and integration evidence.
+- Ruling: opt-in engine preserves current installations; installing Vulkan build
+  tools remains an explicit documented setup step rather than a system change
+  performed by the application. Cost: AMD users run one extra setup command.
+- Ruling: implicit Vulkan layers disabled only in the inference child after a
+  controlled experiment isolated severe local stalls to those layers. Cost:
+  capture/overlay debugging requires WHISPER_CPP_ALLOW_LAYERS=1.
