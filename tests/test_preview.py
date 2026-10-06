@@ -205,10 +205,13 @@ def test_real_overlay_renders_and_exits_on_parent_pipe_eof(tmp_path):
                                     preview='Provisional English · Deutsch · 中文')), encoding='utf-8')
     code = f'''
 import tkinter as tk
+import sys
 from pathlib import Path
 import tray
 tray.STATE_PATH = {str(state)!r}
 tray.dictate.LOG_PATH = {str(tmp_path / 'overlay.log')!r}
+area = [20, 60, 640, 600]
+tray.OverlayMonitor.bounds = lambda self: tuple(area)
 mainloop = tk.Misc.mainloop
 def checked_mainloop(root, *args):
     def inspect():
@@ -216,8 +219,38 @@ def checked_mainloop(root, *args):
                   for child in frame.winfo_children() if isinstance(child, tk.Label)]
         assert 'Provisional English · Deutsch · 中文' in labels, labels
         assert root.winfo_viewable()
-        Path({str(rendered)!r}).write_text('visible', encoding='utf-8')
-        print('OVERLAY_RENDERED', flush=True)
+        assert abs(root.winfo_rootx() - (20 + (640 - root.winfo_width()) // 2)) <= 2
+        assert abs(root.winfo_rooty() - 66) <= 2
+        # Simulate the pointer crossing to another monitor without changing
+        # recording state or text. The existing window must follow it.
+        area[:] = [660, 100, 520, 600]
+        def inspect_move():
+            assert abs(root.winfo_rootx() - (660 + (520 - root.winfo_width()) // 2)) <= 2
+            assert abs(root.winfo_rooty() - 106) <= 2
+            assert root.winfo_viewable()
+            if sys.platform == 'win32':
+                import ctypes
+                from ctypes import wintypes
+                api = ctypes.WinDLL('user32')
+                api.GetParent.argtypes = [wintypes.HWND]
+                api.GetParent.restype = wintypes.HWND
+                api.GetForegroundWindow.restype = wintypes.HWND
+                assert api.GetForegroundWindow() != api.GetParent(root.winfo_id())
+            def finish():
+                Path({str(rendered)!r}).write_text('visible', encoding='utf-8')
+                print('OVERLAY_RENDERED', flush=True)
+            if sys.platform != 'darwin':
+                # Real Tk parsing must treat '+-900' as an absolute negative
+                # coordinate, not a distance from the right/bottom screen edge.
+                area[:] = [-900, -600, 800, 500]
+                def inspect_negative():
+                    assert abs(root.winfo_rootx() - (-900 + (800 - root.winfo_width()) // 2)) <= 2
+                    assert abs(root.winfo_rooty() - (-594)) <= 2
+                    finish()
+                root.after(600, inspect_negative)
+            else:
+                finish()  # macOS may constrain windows to physically attached displays
+        root.after(600, inspect_move)
     root.after(400, inspect)
     return mainloop(root, *args)
 tk.Misc.mainloop = checked_mainloop
