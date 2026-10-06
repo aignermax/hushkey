@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -199,10 +200,12 @@ def test_overlay_requests_nonactivating_platform_style(monkeypatch, platform):
 def test_real_overlay_renders_and_exits_on_parent_pipe_eof(tmp_path):
     """Exercise actual Tk main-thread startup, Unicode preview and pipe lifetime."""
     state = tmp_path / 'state.json'
+    rendered = tmp_path / 'rendered'
     state.write_text(json.dumps(dict(state='recording', pid=os.getpid(),
                                     preview='Provisional English · Deutsch · 中文')), encoding='utf-8')
     code = f'''
 import tkinter as tk
+from pathlib import Path
 import tray
 tray.STATE_PATH = {str(state)!r}
 tray.dictate.LOG_PATH = {str(tmp_path / 'overlay.log')!r}
@@ -213,6 +216,7 @@ def checked_mainloop(root, *args):
                   for child in frame.winfo_children() if isinstance(child, tk.Label)]
         assert 'Provisional English · Deutsch · 中文' in labels, labels
         assert root.winfo_viewable()
+        Path({str(rendered)!r}).write_text('visible', encoding='utf-8')
         print('OVERLAY_RENDERED', flush=True)
     root.after(400, inspect)
     return mainloop(root, *args)
@@ -224,8 +228,19 @@ tray.RecordingOverlay().run_child()
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     try:
-        with pytest.raises(subprocess.TimeoutExpired):
-            child.wait(timeout=2)
+        # Cold Cocoa/Tk startup varies across CI runners. Wait for actual
+        # rendering before closing the parent pipe, not an arbitrary sleep.
+        deadline = time.monotonic() + 20
+        while not rendered.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not rendered.exists():
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=8)
+            log = tmp_path / 'overlay.log'
+            pytest.fail('Overlay never rendered:\n' + child.stderr.read().decode(errors='replace')
+                        + (log.read_text(encoding='utf-8') if log.exists() else ''))
+        assert child.poll() is None
         child.stdin.close()
         assert child.wait(timeout=8) == 0, child.stderr.read().decode(errors='replace')
         assert b'OVERLAY_RENDERED' in child.stdout.read()
