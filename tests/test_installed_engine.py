@@ -15,7 +15,7 @@ def test_installed_selection_transcribes_real_speech(tmp_path):
     from whisper_cpp import requested_engine, WhisperCppModel
     import transcribe
     settings = load_settings()
-    assert settings['version'] == 'v0.9.0'
+    assert settings['version'] == 'v0.10.0'
     assert requested_engine() == settings['engine']
     sample = tmp_path / 'speech.wav'
     url = ('https://raw.githubusercontent.com/ggml-org/whisper.cpp/'
