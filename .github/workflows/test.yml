@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
         python-version: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -22,7 +22,7 @@ jobs:
 
       - name: Install PortAudio (Linux, for the sounddevice import)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 python3-tk xvfb
 
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
@@ -35,3 +35,15 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+      - name: Real preview window and parent lifetime (Linux)
+        if: runner.os == 'Linux'
+        env:
+          HUSHKEY_TEST_OVERLAY_UI: '1'
+        run: xvfb-run -a python -m pytest tests/test_preview.py -v
+
+      - name: Real preview window and parent lifetime (Windows and macOS)
+        if: runner.os != 'Linux'
+        env:
+          HUSHKEY_TEST_OVERLAY_UI: '1'
+        run: python -m pytest tests/test_preview.py -v

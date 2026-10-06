@@ -140,7 +140,8 @@ key* (no config file or env var needed).
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
-| `PTT_OVERLAY` | `1` on Windows, else `0` | Show a small always-on-top pill at the top of the screen while recording/transcribing — useful when the taskbar hides the tray icon. `1` also enables it on X11. Needs tkinter, which `install.sh` installs on Linux (`python3-tk`); without it the overlay says so in the log and stays away. It is a Tk window, so on Wayland it goes through Xwayland — usually fine, but the tray icon is the supported indicator there |
+| `PTT_OVERLAY` | `1` | Show the recording/live-preview overlay on Windows, Linux and macOS. `0` disables it. Requires tkinter; on Wayland it uses Xwayland and placement depends on the compositor. |
+| `PTT_PREVIEW` | `1` | Show provisional recognition about every two seconds, plus inference time. `0` keeps the recording indicator without extra inference. Disabled with `PTT_OVERLAY=0` or legacy `PTT_STREAMING=1`. |
 | `PTT_STREAMING` | `0` | Experimental: while the key is held, completed speech blocks are already transcribed and inserted every few seconds instead of one big paste on release — see "Streaming mode" below |
 | `PTT_STREAM_INTERVAL` | `3.0` | Seconds between streaming ticks (streaming mode only) |
 | `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
@@ -177,6 +178,19 @@ Selection is saved in `hushkey/acceleration.json` under `%LOCALAPPDATA%` (Window
 variables or an extra login. Existing model, language and hotkey choices survive.
 `WHISPER_ENGINE`, `WHISPER_CPP_SERVER` and `WHISPER_CPP_DEVICE` remain explicit
 expert overrides. To repeat hardware detection, rerun the installer.
+
+While holding the key, the overlay shows provisional text from the latest 30 seconds
+of audio (up to 500 characters). Words may change as more speech becomes available.
+Release the key to transcribe the **complete recording** and insert it once, with
+its full context. Preview text never enters the target application. This is
+transcription, not an AI summary or rewrite. Preview inference shares the selected
+model; slower devices may update less frequently and finishing an in-flight preview
+can add latency on release. `PTT_PREVIEW=0` disables that extra work.
+
+The current preview is temporarily written to the local `state.json` file read by
+the overlay and cleared on release; it is not written to the dictation log. An
+abrupt crash may leave the last preview in that file until the next daemon start.
+No additional audio or text is sent to cloud services.
 
 The model stays loaded between recordings. Logs identify the actual backend,
 for example `small/Vulkan0` or `medium/MTL0`. Native backends use a separate GGML

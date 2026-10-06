@@ -89,7 +89,8 @@ def sandbox(tmp_path):
     # interpreter is already executable, which keeps this test fast and offline.
     repo = tmp_path / "whisper-ptt"
     shutil.copytree(REPO, repo, ignore=shutil.ignore_patterns(
-        ".git", ".venv", ".vulkan-test", "native", "dist", "__pycache__", "*.pyc"))
+        ".git", ".venv", ".vulkan-test", ".preview-validation", ".codegraph",
+        ".cursor", "native", "dist", "__pycache__", "*.pyc"))
     venv_bin = repo / ".venv/bin"
     venv_bin.mkdir(parents=True)
     for name in ("python", "pip"):
@@ -293,6 +294,24 @@ def test_tkinter_is_a_package_the_installer_knows_about():
         text = fh.read()
     assert "install_pkg python3-tk" in text, \
         "installer never asks for tkinter, so the overlay switch does nothing"
+
+
+def test_macos_installs_tk_matching_the_existing_python(sandbox):
+    marker = sandbox['repo'].parent / 'tk-installed'
+    sandbox['env']['TK_MARKER'] = str(marker)
+    python_shim = SHIM.replace('exit 0', '''
+case "$*" in
+  *"import tkinter"*) test -f "$TK_MARKER"; exit $?;;
+  *"sys.version_info.major"*) echo 3.12;;
+esac
+exit 0''')
+    _write_exec(sandbox['repo'] / '.venv/bin/python', python_shim)
+    _write_exec(sandbox['repo'].parent / 'shims/brew', SHIM.replace(
+        'exit 0', 'case "$*" in *python-tk@3.12*) touch "$TK_MARKER";; esac\nexit 0'))
+    proc, log = run_installer(sandbox, '', uname='Darwin')
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert 'brew install python-tk@3.12' in log
+    assert log.index('brew install python-tk@3.12') < log.index('launchctl bootstrap')
 
 
 def test_ydotoold_is_a_package_the_installer_knows_about():

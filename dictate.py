@@ -200,7 +200,7 @@ _WHISPER_LANGS = frozenset(
 _STATE_LOCK = threading.Lock()
 
 
-def write_state(state):
+def write_state(state, preview=None):
     """Publish the daemon state ('idle'/'recording'/'transcribing') for tray.py.
 
     Best effort and atomic (temp file + replace, serialized by _STATE_LOCK):
@@ -211,11 +211,14 @@ def write_state(state):
         tmp = STATE_PATH + ".tmp"
         try:
             os.makedirs(STATE_DIR, exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"state": state, "pid": os.getpid(),
+            data = {"state": state, "pid": os.getpid(),
                            "version": VERSION, "model": CURRENT_MODEL,
                            "ptt_key": PTT_KEY,
-                           "ts": time.time()}, fh)
+                           "ts": time.time()}
+            if state == "recording" and preview:
+                data["preview"] = preview[-500:]
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
             for attempt in range(5):
                 try:
                     os.replace(tmp, STATE_PATH)
@@ -235,6 +238,10 @@ def write_state(state):
 
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
 PTT_KEY = configured_ptt_key()
+PREVIEW = (os.environ.get("PTT_PREVIEW", "1") != "0"
+           and os.environ.get("PTT_OVERLAY", "1") != "0")
+PREVIEW_INTERVAL = 2.0
+PREVIEW_SECONDS = 30
 
 
 def _env_float(name, default):
@@ -1322,6 +1329,8 @@ class DictationDaemon:
         self.recording = None  # start_time while a recording is active
         self.busy_lock = threading.Lock()
         self._stream = None  # _StreamSession while a streaming dictation runs
+        self._preview = None
+        self._preview_lock = threading.Lock()
         self._caps_restore_until = 0.0  # time backstop for the tap suppression
         self._caps_restore_pending = 0  # synthetic caps taps still in flight
         self.listener, self.injector = make_backends(PTT_KEY)
@@ -1383,11 +1392,25 @@ class DictationDaemon:
                                               args=(session,), daemon=True)
             session.thread.start()  # before the assignment: a failed start
             self._stream = session  # must not leave a thread-less session
+        elif PREVIEW and hasattr(self.recorder, "snapshot_wav"):
+            session = _StreamSession()
+            session.thread = threading.Thread(target=self._preview_loop,
+                                              args=(session,), daemon=True)
+            with self._preview_lock:
+                self._preview = session
+            session.thread.start()
 
     def stop_recording(self):
+        # Invalidate before stopping the recorder; never join GPU inference in
+        # the key listener. Results from a released hold must not be published.
+        with self._preview_lock:
+            if self._preview is not None:
+                self._preview.stop.set()
+                self._preview = None
         started, self.recording = self.recording, None
         if started is None:
             return
+        write_state("transcribing")  # clear provisional words before waiting on inference
         duration = time.time() - started
         session, self._stream = self._stream, None
         if session is not None:
@@ -1426,6 +1449,42 @@ class DictationDaemon:
             return
         threading.Thread(target=self._transcribe_and_insert,
                          args=(wav, duration, session), daemon=True).start()
+
+    def _preview_loop(self, session):
+        while not session.stop.wait(PREVIEW_INTERVAL):
+            try:
+                self._preview_tick(session)
+            except Exception as exc:
+                log(f"preview unavailable ({type(exc).__name__}); final transcription remains enabled")
+                return
+
+    def _preview_tick(self, session):
+        # Share the final-pass lock: no concurrent inference or queued previews.
+        if not self.busy_lock.acquire(blocking=False):
+            return
+        try:
+            with self._preview_lock:
+                if session is not self._preview or session.stop.is_set():
+                    return
+                wav = self.recorder.snapshot_wav()
+            if not wav:
+                return
+            try:
+                audio = _decode_wav_16k(wav)[-PREVIEW_SECONDS * 16000:]
+            finally:
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+            if session.stop.is_set():
+                return
+            segments = self._transcribe(audio, configured_lang())
+            text = " ".join(s.text.strip() for s in segments).strip()
+            with self._preview_lock:
+                if session is self._preview and not session.stop.is_set():
+                    write_state("recording", preview=text)
+        finally:
+            self.busy_lock.release()
 
     def _stream_loop(self, session):
         """Streaming mode: transcribe completed blocks while the key is held."""
