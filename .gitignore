@@ -8,3 +8,4 @@ dist/
 .vulkan-*/
 .vulkan-*.log
 native/
+.preview-validation/

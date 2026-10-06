@@ -23,7 +23,7 @@ update itself (run_pending_update_if_any).
 
 On Windows, a small always-on-top pill at the top of the screen shows
 recording/transcribing state — the indicator the (auto-hidden) taskbar
-swallows. PTT_OVERLAY=0 turns it off; PTT_OVERLAY=1 enables it on X11.
+swallows. The overlay previews speech on every platform; PTT_OVERLAY=0 disables it.
 """
 from __future__ import annotations
 
@@ -174,14 +174,8 @@ def state_from(data):
 
 
 def overlay_wanted():
-    """The recording overlay: on for Windows, opt-in on other X11-ish desktops
-    (PTT_OVERLAY=1), off with PTT_OVERLAY=0. Linux desktops show their own mic
-    indicator; on macOS tkinter and pystray would fight over the main thread,
-    so it is never enabled there."""
-    if sys.platform == "darwin":
-        return False
-    default = "1" if sys.platform == "win32" else "0"
-    return os.environ.get("PTT_OVERLAY", default) != "0"
+    """Tk runs in its own process, including on macOS; explicit opt-out wins."""
+    return os.environ.get("PTT_OVERLAY", "1") != "0"
 
 
 _CONFIG_LOCK = threading.Lock()
@@ -611,9 +605,12 @@ OVERLAY_COLORS = {"recording": "#e53e3e", "transcribing": "#dd6b20",
 OVERLAY_BG = "#2d3542"
 
 
-def pill_for(state):
+def pill_for(state, preview=None):
     """(color, text) for the overlay, or None when it should stay hidden."""
     if state in OVERLAY_COLORS:
+        if state == "recording" and isinstance(preview, str) and preview.strip():
+            text = " ".join(preview.split())
+            return OVERLAY_COLORS[state], ("…" if len(text) > 500 else "") + text[-500:]
         return OVERLAY_COLORS[state], S.get(state, state)
     return None
 
@@ -622,15 +619,37 @@ class RecordingOverlay:
     """Small always-on-top pill at the top of the screen while the daemon is
     recording or transcribing — the indicator an auto-hidden taskbar swallows.
 
-    Fully self-contained: its own tkinter loop in its own thread, polling the
-    state file directly. Nobody calls into it from outside, so there is no
-    cross-thread tkinter usage to go wrong.
+    Tk owns the child process main thread, including on macOS. The parent pipe
+    closes on tray exit (also on forced update shutdown), ending the overlay.
     """
 
     TITLE = "hushkey-overlay"
 
     def start(self):
-        threading.Thread(target=self._run, daemon=True).start()
+        # pythonw does not expose sys.stdin even when given a pipe.
+        python = sys.executable
+        if python.lower().endswith("pythonw.exe"):
+            python = python[:-11] + "python.exe"
+        self.child = subprocess.Popen(
+            [python, os.path.abspath(__file__), "--overlay"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def stop(self):
+        child = getattr(self, "child", None)
+        if child is not None and child.stdin:
+            child.stdin.close()
+
+    def run_child(self):
+        self.parent_exited = threading.Event()
+        def watch_parent():
+            try:
+                sys.stdin.buffer.read()
+            finally:
+                self.parent_exited.set()
+        threading.Thread(target=watch_parent, daemon=True).start()
+        self._run()
 
     def _run(self):
         try:
@@ -649,21 +668,34 @@ class RecordingOverlay:
         except tk.TclError:
             return  # no display (headless) — same deal
         root.title(self.TITLE)
+        root.withdraw()
         root.overrideredirect(True)  # Windows: Tk itself gives these WS_EX_TOOLWINDOW
         root.attributes("-topmost", True)
+        root.configure(takefocus=False)
+        try:
+            configure_overlay_focus(root)
+        except Exception as exc:
+            dictate.log(f"tray: cannot make overlay non-activating ({type(exc).__name__})")
+            root.destroy()
+            return
         # no -alpha: layered windows are invisible to screen captures and can
         # glitch on some setups — a solid dark pill is the reliable choice
         frame = tk.Frame(root, bg=OVERLAY_BG)
         dot = tk.Label(frame, text="●", bg=OVERLAY_BG, font=("Segoe UI", 11))
-        text = tk.Label(frame, bg=OVERLAY_BG, fg="#ffffff",
-                        font=("Segoe UI", 10, "bold"))
+        text = tk.Label(frame, bg=OVERLAY_BG, fg="#ffffff", justify="left",
+                        wraplength=min(620, max(200, root.winfo_screenwidth() - 80)),
+                        font=("TkDefaultFont", 11), takefocus=False)
         dot.pack(side="left", padx=(12, 6), pady=5)
         text.pack(side="left", padx=(0, 14), pady=5)
         frame.pack()
         root.withdraw()
 
         def tick():
-            pill = pill_for(state_from(read_state()))
+            if self.parent_exited.is_set():
+                root.destroy()
+                return
+            data = read_state()
+            pill = pill_for(state_from(data), data.get("preview"))
             if pill:
                 color, label = pill
                 dot.config(fg=color)
@@ -671,13 +703,40 @@ class RecordingOverlay:
                 root.update_idletasks()
                 x = (root.winfo_screenwidth() - root.winfo_reqwidth()) // 2
                 root.geometry(f"+{x}+6")
-                root.deiconify()
+                if root.state() == "withdrawn":
+                    root.deiconify()
             else:
                 root.withdraw()
             root.after(200, tick)
 
         tick()
         root.mainloop()
+
+
+def configure_overlay_focus(root):
+    """Keep preview changes from activating a window above the user's editor."""
+    if sys.platform == "darwin":
+        root.tk.call("::tk::unsupported::MacWindowStyle", "style", root._w,
+                     "help", "noActivates")
+    elif sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        root.update_idletasks()
+        api = ctypes.WinDLL("user32", use_last_error=True)
+        api.GetParent.argtypes = [wintypes.HWND]
+        api.GetParent.restype = wintypes.HWND
+        api.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        api.GetWindowLongW.restype = wintypes.LONG
+        api.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+        api.SetWindowLongW.restype = wintypes.LONG
+        hwnd = api.GetParent(root.winfo_id())
+        style = api.GetWindowLongW(hwnd, -20)
+        ctypes.set_last_error(0)
+        result = api.SetWindowLongW(hwnd, -20, style | 0x08000000 | 0x00000080)
+        if not result and ctypes.get_last_error():
+            raise ctypes.WinError(ctypes.get_last_error())
+    else:
+        root.attributes("-type", "notification")
 
 
 class Tray:
@@ -945,13 +1004,22 @@ def supervise_headless():
 
 
 def main():
+    if sys.argv[1:] == ["--overlay"]:
+        RecordingOverlay().run_child()
+        return 0
     lock = acquire_lock(wait=15)
     if lock is None:
         print("another hushkey tray is already running", file=sys.stderr)
         return 1
     run_pending_update_if_any()  # before any GUI import locks files (Windows)
     if overlay_wanted():
-        RecordingOverlay().start()
+        import atexit
+        overlay = RecordingOverlay()
+        try:
+            overlay.start()
+            atexit.register(overlay.stop)
+        except OSError as exc:
+            dictate.log(f"tray: overlay unavailable ({type(exc).__name__})")
     if not load_tray_backend():
         print("pystray/pillow missing - supervising daemon without tray icon",
               file=sys.stderr)

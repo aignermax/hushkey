@@ -81,7 +81,7 @@ debian_packages_installed() {
 echo "==> checking prerequisites"
 bootstrap_macos_python() {
   if command -v brew >/dev/null; then
-    brew install python@3.12
+    brew install python@3.12 python-tk@3.12
     PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
   else
     local pkg
@@ -311,11 +311,24 @@ if [ "$OS" = "Linux" ] && ! appindicator_probe; then
   fi
 fi
 
-# tkinter, for the recording overlay (PTT_OVERLAY=1). The overlay is off by
-# default on Linux — the tray icon and the desktop's own mic indicator cover it —
-# so this is an optional dependency. Install it anyway: it is small, and without
-# it flipping PTT_OVERLAY=1 does nothing at all. tkinter is part of Python on
-# Windows, which is why nothing here ever asked for it.
+# Tk powers the live preview. Python.org bundles it; Homebrew splits it into a
+# version-matched formula, as do Linux distributions into their own packages.
+if [ "$OS" = "Darwin" ] && [ "${PTT_OVERLAY:-1}" != 0 ] \
+   && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
+  if command -v brew >/dev/null; then
+    tkver="$(pyver_of "$VENV/bin/python")"
+    brew install "python-tk@$tkver" || true
+  fi
+  if ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
+    echo "==> provisioning Python with Tk for the live preview"
+    bootstrap_macos_python
+    reinstall_venv_with "$PYTHON"
+  fi
+  "$VENV/bin/python" -c 'import tkinter' || {
+    echo "ERROR: live preview requires a Python installation with tkinter." >&2
+    exit 1
+  }
+fi
 if [ "$OS" = "Linux" ] && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
   echo "==> installing tkinter (for the PTT_OVERLAY recording overlay)"
   if command -v apt-get >/dev/null; then

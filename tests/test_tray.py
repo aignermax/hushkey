@@ -159,11 +159,11 @@ def test_overlay_wanted_gate(monkeypatch):
     assert tray.overlay_wanted() is False      # explicit off
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("PTT_OVERLAY", raising=False)
-    assert tray.overlay_wanted() is False      # default off elsewhere
+    assert tray.overlay_wanted() is True       # preview on Linux too
     monkeypatch.setenv("PTT_OVERLAY", "1")
     assert tray.overlay_wanted() is True       # opt-in (X11)
     monkeypatch.setattr(sys, "platform", "darwin")
-    assert tray.overlay_wanted() is False      # never on macOS (main-thread clash)
+    assert tray.overlay_wanted() is True       # isolated Tk process on macOS
 
 
 def test_pill_for_known_and_hidden_states():
@@ -265,6 +265,8 @@ def test_set_lang_restarts_only_when_env_masks_the_config(tmp_path, monkeypatch)
     """An env var in the daemon's process env wins over the config file —
     so a language switch must restart the daemon exactly in that case."""
     import os
+    # Test restart policy without modifying the real Windows registry.
+    monkeypatch.setattr(tray, "clear_env_var", lambda name: os.environ.pop(name, None))
     t = tray.Tray.__new__(tray.Tray)
     calls = []
     t.daemon = type("D", (), {"restart": lambda _s: calls.append("restart")})()

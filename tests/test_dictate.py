@@ -34,6 +34,7 @@ def pinned_backend(monkeypatch):
     """
     monkeypatch.setenv("PTT_BACKEND", "pynput")
     monkeypatch.setattr(dictate, "PTT_KEY", "ctrl_r")
+    monkeypatch.setattr(dictate, "PREVIEW", False, raising=False)
 
 
 def test_state_dir_linux(monkeypatch):
