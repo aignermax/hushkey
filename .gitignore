@@ -9,3 +9,6 @@ dist/
 .vulkan-*.log
 native/
 .preview-validation/
+debug-audio/
+debug-audio.json
+debug-audio.lock

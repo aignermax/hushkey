@@ -87,7 +87,9 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 from recorder import pick_recorder
 
@@ -107,6 +109,120 @@ def _state_dir():
 STATE_DIR = _state_dir()
 
 VERSION = "0.10.0"
+
+
+def audio_debug_machine_id():
+    """Local binding, not a tracking ID: never logged or sent anywhere."""
+    import hashlib
+    import socket
+    import uuid
+    identity = f"{socket.gethostname()}\0{uuid.getnode()}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def audio_debug_enabled():
+    try:
+        data = json.loads((Path(STATE_DIR) / "debug-audio.json").read_text(encoding="utf-8"))
+        return (isinstance(data, dict) and data.get("enabled") is True
+                and data.get("machine") == audio_debug_machine_id())
+    except (OSError, ValueError):
+        return False
+
+
+@contextmanager
+def _audio_debug_lock():
+    """Serialize rotation and CLI disable/purge, including across processes."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    fd = os.open(os.path.join(STATE_DIR, "debug-audio.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+b") as lock:
+        if sys.platform == "win32":
+            import msvcrt
+            if os.fstat(lock.fileno()).st_size == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _debug_audio_files():
+    folder = Path(STATE_DIR) / "debug-audio"
+    return sorted(p for p in folder.glob("recording-*")
+                  if p.suffix in (".wav", ".json", ".part")
+                  and p.stem.removeprefix("recording-").isdigit())
+
+
+def configure_audio_debug(enabled):
+    with _audio_debug_lock():
+        target = Path(STATE_DIR) / "debug-audio.json"
+        temporary = target.with_suffix(".tmp")
+        data = {"enabled": bool(enabled), "machine": audio_debug_machine_id()}
+        with open(temporary, "w", encoding="utf-8") as out:
+            json.dump(data, out)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+        if not enabled:
+            for path in _debug_audio_files():
+                path.unlink(missing_ok=True)
+
+
+def retain_debug_audio(wav, metadata):
+    """Best-effort private copy of original audio; the caller still deletes wav.
+
+    Only final recordings reach this path, never live preview snapshots. Prune
+    before copying so even a partial write cannot create a third retained WAV.
+    """
+    try:
+        if not audio_debug_enabled():
+            return
+        import hashlib
+        with _audio_debug_lock():
+            if not audio_debug_enabled():
+                return  # disabled while waiting for another writer
+            folder = Path(STATE_DIR) / "debug-audio"
+            folder.mkdir(mode=0o700, exist_ok=True)
+            files = _debug_audio_files()
+            complete = sorted(p.stem for p in files if p.suffix == ".wav"
+                              and p.with_suffix(".json").is_file())
+            keep = complete[-1:]
+            sequence = max([time.time_ns()] + [int(p.stem[10:]) + 1 for p in files])
+            for path in files:
+                if path.stem not in keep or path.suffix == ".part":
+                    path.unlink(missing_ok=True)
+            target = folder / f"recording-{sequence}.wav"
+            partial = target.with_suffix(".part")
+            digest = hashlib.sha256()
+            try:
+                fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as out, open(wav, "rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                        out.write(chunk)
+                os.replace(partial, target)
+                details = dict(metadata, audio_sha256=digest.hexdigest(),
+                               saved_at=datetime.now().astimezone().isoformat(), app_version=VERSION)
+                fd = os.open(target.with_suffix(".json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as out:
+                    json.dump(details, out, ensure_ascii=False, indent=2)
+            except Exception:
+                for path in (partial, target, target.with_suffix(".json")):
+                    path.unlink(missing_ok=True)
+                raise
+    except Exception as exc:
+        try:
+            log(f"audio debug retention failed ({type(exc).__name__})")
+        except OSError:
+            pass  # a full disk must not prevent normal recording cleanup
 
 # The tray icon (tray.py) reads this file; written on every state transition.
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
@@ -1616,11 +1732,18 @@ class DictationDaemon:
     def _transcribe_and_insert(self, wav, duration, stream=None):
         with self.busy_lock:
             write_state("transcribing")
+            debug_metadata = {"duration_seconds": duration, "model": CURRENT_MODEL,
+                              "device": getattr(getattr(self, "model", None), "device", None),
+                              "engine": getattr(getattr(self, "model", None), "engine", "faster-whisper"),
+                              "language": None, "text": None, "error_type": None,
+                              "streaming": stream is not None, "tail_after_seconds": 0.0}
             try:
                 notify("… transcribing", "")
                 lang = configured_lang()
+                debug_metadata["language"] = lang or "auto"
                 t0 = time.time()
                 skip = stream.committed_end if stream else 0.0
+                debug_metadata["tail_after_seconds"] = skip
                 if skip > 0:
                     # Streaming ticks already transcribed and inserted up to
                     # here — only the tail since then is left.
@@ -1630,6 +1753,7 @@ class DictationDaemon:
                 else:
                     segments = self._transcribe(wav, lang)
                 text = " ".join(s.text.strip() for s in segments).strip()
+                debug_metadata["text"] = " ".join((stream.texts if stream else []) + [text]).strip()
                 model = CURRENT_MODEL or "?"
                 log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
                     f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})"
@@ -1655,9 +1779,11 @@ class DictationDaemon:
                 self.injector.insert(text + " ")  # space separates dictations
                 self._leave_recovery_transcript(stream, text)
             except Exception as exc:
+                debug_metadata["error_type"] = type(exc).__name__
                 log(f"ERROR: {exc}")
                 notify("dictation error", str(exc)[:80])
             finally:
+                retain_debug_audio(wav, debug_metadata)
                 try:
                     os.remove(wav)
                 except OSError:
@@ -1688,7 +1814,18 @@ class DictationDaemon:
                 close()
 
 
-def main():
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Local push-to-talk dictation")
+    parser.add_argument("--debug-audio", choices=("on", "off", "status"),
+                        help="keep the last two original recordings on this machine; off also purges them")
+    args = parser.parse_args(argv)
+    if args.debug_audio:
+        if args.debug_audio != "status":
+            configure_audio_debug(args.debug_audio == "on")
+        print("Audio debug: " + ("on" if audio_debug_enabled() else "off"))
+        print(Path(STATE_DIR) / "debug-audio")
+        return 0
     try:
         DictationDaemon().run()
     except KeyboardInterrupt:
