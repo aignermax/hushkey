@@ -140,7 +140,7 @@ key* (no config file or env var needed).
 | `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
 | `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
-| `PTT_OVERLAY` | `1` | Show the recording/live-preview overlay on Windows, Linux and macOS. `0` disables it. Requires tkinter; on Wayland it uses Xwayland and placement depends on the compositor. |
+| `PTT_OVERLAY` | `1` | Show the recording/live-preview overlay on Windows, Linux and macOS. It follows the mouse to the current monitor. `0` disables it. Requires tkinter; on Wayland monitor selection and placement are best effort through Xwayland. |
 | `PTT_PREVIEW` | `1` | Show provisional recognition about every two seconds, plus inference time. `0` keeps the recording indicator without extra inference. Disabled with `PTT_OVERLAY=0` or legacy `PTT_STREAMING=1`. |
 | `PTT_STREAMING` | `0` | Experimental: while the key is held, completed speech blocks are already transcribed and inserted every few seconds instead of one big paste on release — see "Streaming mode" below |
 | `PTT_STREAM_INTERVAL` | `3.0` | Seconds between streaming ticks (streaming mode only) |
@@ -186,6 +186,21 @@ its full context. Preview text never enters the target application. This is
 transcription, not an AI summary or rewrite. Preview inference shares the selected
 model; slower devices may update less frequently and finishing an in-flight preview
 can add latency on release. `PTT_PREVIEW=0` disables that extra work.
+
+The overlay stays at the top center of the monitor containing the mouse pointer.
+It follows monitor crossings while recording **and** transcribing (checked every
+200 ms); moving within the same monitor does not move it. Windows uses the
+monitor's work area and macOS its visible frame, leaving room for taskbars and
+the menu bar. Monitor origins may be negative; Retina uses logical points.
+
+On Linux/X11, monitor selection uses XRandR (or Xinerama on older servers).
+On Ubuntu/GNOME **Wayland**, Tk runs through Xwayland: the compositor may withhold
+global pointer updates over native Wayland windows or override positioning.
+Following the mouse is therefore **best effort, not guaranteed on Wayland**; the
+preview still works, but may remain on the last monitor reported by Xwayland.
+If a monitor query fails, it keeps the last known monitor (or uses Tk's default
+screen geometry if no monitor has been discovered yet).
+No compositor extensions or additional permissions are installed.
 
 The current preview is temporarily written to the local `state.json` file read by
 the overlay and cleared on release; it is not written to the dictation log. An

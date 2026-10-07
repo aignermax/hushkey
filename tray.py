@@ -615,6 +615,127 @@ def pill_for(state, preview=None):
     return None
 
 
+def monitor_at(point, monitors):
+    """Closest nonempty (x, y, width, height) rectangle in desktop coordinates."""
+    px, py = point
+    def distance(area):
+        x, y, w, h = area
+        return max(x - px, 0, px - (x + w - 1)) ** 2 + max(y - py, 0, py - (y + h - 1)) ** 2
+    return min((m for m in monitors if m[2] > 0 and m[3] > 0), key=distance)
+
+
+def configure_overlay_dpi():
+    """Keep Win32 pointer/monitor coordinates and Tk geometry in physical pixels.
+
+    Only the overlay's GUI thread is affected; never change the tray/daemon's
+    DPI context. This must run before creating the Tk window.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        api = ctypes.WinDLL("user32", use_last_error=True)
+        api.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        api.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        if not api.SetThreadDpiAwarenessContext(-4):  # PER_MONITOR_AWARE_V2
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def windows_pointer_monitor():
+    import ctypes
+    from ctypes import wintypes
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                    ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+
+    api = ctypes.WinDLL("user32", use_last_error=True)
+    api.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    api.GetCursorPos.restype = wintypes.BOOL
+    api.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    api.MonitorFromPoint.restype = wintypes.HANDLE
+    api.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+    api.GetMonitorInfoW.restype = wintypes.BOOL
+    point = wintypes.POINT()
+    if not api.GetCursorPos(ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    monitor = api.MonitorFromPoint(point, 2)  # MONITOR_DEFAULTTONEAREST
+    info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
+    if not api.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    r = info.work  # keep the pill below a taskbar at the top of a monitor
+    return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def mac_pointer_monitor():
+    from AppKit import NSEvent, NSScreen
+    screens = list(NSScreen.screens())
+    point = NSEvent.mouseLocation()
+    frames = [(s.frame().origin.x, s.frame().origin.y,
+               s.frame().size.width, s.frame().size.height) for s in screens]
+    chosen = monitor_at((point.x, point.y), frames)
+    visible = screens[frames.index(chosen)].visibleFrame()
+    # AppKit and Tk both use logical points, including on Retina displays,
+    # but AppKit's y axis points up from the primary screen's bottom edge.
+    primary_top = frames[0][1] + frames[0][3]
+    return (int(visible.origin.x),
+            int(primary_top - visible.origin.y - visible.size.height),
+            int(visible.size.width), int(visible.size.height))
+
+
+def x11_pointer_monitor(display):
+    root = display.screen().root
+    pointer = root.query_pointer()
+    if not pointer.same_screen:
+        raise RuntimeError("pointer is on a different X screen")
+    try:
+        monitors = [(m.x, m.y, m.width_in_pixels, m.height_in_pixels)
+                    for m in root.xrandr_get_monitors(is_active=True).monitors]
+    except Exception:
+        # Older X servers expose Xinerama but not RandR 1.5.
+        monitors = [(m.x, m.y, m.width, m.height)
+                    for m in display.xinerama_query_screens().screens]
+    return monitor_at((pointer.root_x, pointer.root_y), monitors)
+
+
+class OverlayMonitor:
+    """Poll live display bounds; keep one X connection for the overlay's lifetime."""
+    def __init__(self, root):
+        self.root = root
+        self.display = None
+        self.warned = False
+        self.last_bounds = None
+
+    def bounds(self):
+        try:
+            if sys.platform == "win32":
+                bounds = windows_pointer_monitor()
+            elif sys.platform == "darwin":
+                bounds = mac_pointer_monitor()
+            else:
+                if self.display is None:
+                    from Xlib.display import Display
+                    self.display = Display()
+                bounds = x11_pointer_monitor(self.display)
+            self.last_bounds = bounds
+            return bounds
+        except Exception as exc:
+            self.close()
+            if not self.warned:
+                dictate.log(f"tray: monitor under pointer unavailable ({type(exc).__name__}); "
+                            "using last known monitor or default screen")
+                self.warned = True
+            if self.last_bounds is not None:
+                return self.last_bounds
+            return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def close(self):
+        if self.display is not None:
+            try:
+                self.display.close()
+            except Exception:
+                pass
+            self.display = None
+
+
 class RecordingOverlay:
     """Small always-on-top pill at the top of the screen while the daemon is
     recording or transcribing — the indicator an auto-hidden taskbar swallows.
@@ -664,11 +785,13 @@ class RecordingOverlay:
                         "python3-tkinter (Fedora) or tk (Arch)")
             return
         try:
+            configure_overlay_dpi()
             root = tk.Tk()
         except tk.TclError:
             return  # no display (headless) — same deal
         root.title(self.TITLE)
         root.withdraw()
+        monitor = OverlayMonitor(root)
         root.overrideredirect(True)  # Windows: Tk itself gives these WS_EX_TOOLWINDOW
         root.attributes("-topmost", True)
         root.configure(takefocus=False)
@@ -698,19 +821,30 @@ class RecordingOverlay:
             pill = pill_for(state_from(data), data.get("preview"))
             if pill:
                 color, label = pill
+                left, top, width, height = monitor.bounds()
                 dot.config(fg=color)
-                text.config(text=label)
+                text.config(text=label, wraplength=min(620, max(1, width - 80)))
                 root.update_idletasks()
-                x = (root.winfo_screenwidth() - root.winfo_reqwidth()) // 2
-                root.geometry(f"+{x}+6")
+                w = min(root.winfo_reqwidth(), max(1, width - 12))
+                h = min(root.winfo_reqheight(), max(1, height - 12))
+                x = left + (width - w) // 2
+                # '+-1920' is intentional: a plain '-1920' in Tk geometry
+                # means distance from the RIGHT edge, not a negative origin.
+                geometry = f"{w}x{h}+{x}+{top + 6}"
+                if geometry != getattr(self, "_geometry", None):
+                    root.geometry(geometry)
+                    self._geometry = geometry
                 if root.state() == "withdrawn":
                     root.deiconify()
             else:
                 root.withdraw()
             root.after(200, tick)
 
-        tick()
-        root.mainloop()
+        try:
+            tick()
+            root.mainloop()
+        finally:
+            monitor.close()
 
 
 def configure_overlay_focus(root):
@@ -721,20 +855,33 @@ def configure_overlay_focus(root):
     elif sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
-        root.update_idletasks()
         api = ctypes.WinDLL("user32", use_last_error=True)
         api.GetParent.argtypes = [wintypes.HWND]
         api.GetParent.restype = wintypes.HWND
+        api.GetForegroundWindow.restype = wintypes.HWND
+        api.SetForegroundWindow.argtypes = [wintypes.HWND]
+        api.SetForegroundWindow.restype = wintypes.BOOL
         api.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
         api.GetWindowLongW.restype = wintypes.LONG
         api.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
         api.SetWindowLongW.restype = wintypes.LONG
+        previous = api.GetForegroundWindow()
+        # Tk 8.6 can activate its first native wrapper even while withdrawn.
+        # We cannot set NOACTIVATE until that wrapper exists. Restore the
+        # previous app immediately if Tk took focus during this initial setup;
+        # never undo a switch to another app or restore focus during polling.
+        root.update_idletasks()
         hwnd = api.GetParent(root.winfo_id())
-        style = api.GetWindowLongW(hwnd, -20)
-        ctypes.set_last_error(0)
-        result = api.SetWindowLongW(hwnd, -20, style | 0x08000000 | 0x00000080)
-        if not result and ctypes.get_last_error():
-            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            style = api.GetWindowLongW(hwnd, -20)
+            ctypes.set_last_error(0)
+            result = api.SetWindowLongW(hwnd, -20, style | 0x08000000 | 0x00000080)
+            if not result and ctypes.get_last_error():
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if previous and api.GetForegroundWindow() == hwnd:
+                if not api.SetForegroundWindow(previous):
+                    raise RuntimeError("cannot restore focus after creating overlay")
     else:
         root.attributes("-type", "notification")
 

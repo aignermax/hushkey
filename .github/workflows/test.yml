@@ -40,10 +40,10 @@ jobs:
         if: runner.os == 'Linux'
         env:
           HUSHKEY_TEST_OVERLAY_UI: '1'
-        run: xvfb-run -a python -m pytest tests/test_preview.py -v
+        run: xvfb-run -a python -m pytest tests/test_preview.py tests/test_overlay_monitors.py -v
 
       - name: Real preview window and parent lifetime (Windows and macOS)
         if: runner.os != 'Linux'
         env:
           HUSHKEY_TEST_OVERLAY_UI: '1'
-        run: python -m pytest tests/test_preview.py -v
+        run: python -m pytest tests/test_preview.py tests/test_overlay_monitors.py -v
