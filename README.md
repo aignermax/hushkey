@@ -207,6 +207,29 @@ the overlay and cleared on release; it is not written to the dictation log. An
 abrupt crash may leave the last preview in that file until the next daemon start.
 No additional audio or text is sent to cloud services.
 
+For local debugging only, `python dictate.py --debug-audio on` enables a rolling
+archive of the **last two completed dictations** on that computer. Run this with
+the installed virtual environment's Python. The default is **off**; installers
+never enable it. The opt-in file is stored in the user's state directory and is
+bound to the local hostname and hardware address. Copying the app or that file
+to a different computer does not normally enable retention there; this binding
+is an accidental-copy guard, not a security identity mechanism.
+
+The `debug-audio` folder beside `dictate.log` contains original, unprocessed WAV
+files and JSON with the transcript, model/device, language, duration, streaming
+offset, error type, app version and audio SHA-256. Failed transcriptions are kept
+too; preview snapshots and short key taps are not. Creating a third recording
+replaces the oldest. No audio or transcripts are uploaded or committed as test
+fixtures automatically. Keep any recording you need for a regression test in a
+separate private location before two more dictations replace it.
+
+`python dictate.py --debug-audio status` shows the current status and folder.
+`python dictate.py --debug-audio off` disables retention and deletes the managed
+recording/metadata pairs. The running daemon reads the local opt-in per recording,
+so toggling it does not require a restart once this code is installed. Identical
+audio enables repeatable investigations; bit-identical GPU transcription is not
+guaranteed. Enabling capture does not change recognition settings.
+
 The model stays loaded between recordings. Logs identify the actual backend,
 for example `small/Vulkan0` or `medium/MTL0`. Native backends use a separate GGML
 model cache. The managed server binds only to `127.0.0.1` with a random request
