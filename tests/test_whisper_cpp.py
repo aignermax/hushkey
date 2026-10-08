@@ -84,17 +84,27 @@ def test_silence_does_not_call_server(endpoint, monkeypatch):
     assert endpoint[1] == []
 
 
-def test_vad_keeps_original_timeline(endpoint, monkeypatch):
+@pytest.mark.parametrize('speech_end', [32000, 48000])
+def test_vad_trims_only_the_end_preserving_speech_offsets(endpoint, monkeypatch, speech_end):
     import faster_whisper.vad
     monkeypatch.setattr(faster_whisper.vad, 'get_speech_timestamps',
-                        lambda audio: [{'start': 16000, 'end': 32000}])
+                        lambda audio: [{'start': 8000, 'end': 12000},
+                                       {'start': 16000, 'end': speech_end}])
     model = client(endpoint)
-    segments, _ = model.transcribe(np.zeros(48000, dtype=np.float32))
+    original = np.full(48000, 0.5, dtype=np.float32)
+    segments, info = model.transcribe(original)
+    assert info.duration == 3  # original recording duration
+    assert np.all(original == 0.5)  # never mutate the debug recording
     assert segments[0].end == 1.8
     body = endpoint[1][0]
     wav_data = body[body.index(b'RIFF'):].split(b'\r\n--')[0]
     with wave.open(io.BytesIO(wav_data)) as wav:
-        assert wav.getnframes() == 48000  # do not shift streaming offsets
+        assert wav.getnframes() == speech_end
+        pcm = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2')
+    assert np.all(pcm[:8000] == 0)
+    assert np.all(pcm[8000:12000] > 0)
+    assert np.all(pcm[12000:16000] == 0)
+    assert np.all(pcm[16000:] > 0)  # last speech keeps its original offset
 
 
 def test_dead_server_has_actionable_error(endpoint):

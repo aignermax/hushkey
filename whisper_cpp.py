@@ -253,7 +253,10 @@ class WhisperCppModel:
                 masked = np.zeros_like(audio)
                 for chunk in speech:
                     masked[chunk['start']:chunk['end']] = audio[chunk['start']:chunk['end']]
-                audio = masked
+                # VAD ends include its speech padding. Drop only trailing
+                # non-speech: decoding a silent tail can hallucinate text.
+                # Keep leading/internal silence so streaming offsets stay valid.
+                audio = masked[:speech[-1]['end']]
             buffer = io.BytesIO()
             with wave.open(buffer, 'wb') as wav:
                 wav.setnchannels(1)
