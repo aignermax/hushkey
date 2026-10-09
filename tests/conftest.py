@@ -38,3 +38,10 @@ def _started_by_our_code(thread):
     target = getattr(thread, "_target", None)
     module = getattr(target, "__module__", None) or ""
     return module.split(".")[0] in {"dictate", "tray", "recorder", "transcribe"}
+
+
+@pytest.fixture(autouse=True)
+def _isolated_history(monkeypatch, tmp_path):
+    """Dictation tests must never write into the user's real history.json."""
+    import dictate
+    monkeypatch.setattr(dictate, "HISTORY_PATH", str(tmp_path / "history.json"))

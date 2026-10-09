@@ -70,6 +70,8 @@ Config via environment:
   PTT_CLIPBOARD_SETTLE  Wayland: seconds to wait before restoring the previous
                    clipboard (default: 0.4); raise it if a slow app ends up
                    pasting the restored value instead of the transcript
+  PTT_HISTORY      0 = do not keep the last dictations in history.json
+                   (the tray's "Recent dictations" menu; default: 1)
   PTT_CMD_TIMEOUT  seconds a helper (wl-paste, ydotool) may take before it is
                    given up on (default: 30; 0 = wait indefinitely)
 
@@ -350,6 +352,64 @@ def write_state(state, preview=None):
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+# The last few transcripts, newest first — the tray's "Recent dictations"
+# menu restores one when it went into the wrong window (or nowhere).
+HISTORY_PATH = os.path.join(STATE_DIR, "history.json")
+HISTORY_SIZE = 3
+
+
+def read_history():
+    """Recent transcripts, newest first; [] when missing/corrupt."""
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data
+            if isinstance(e, dict) and isinstance(e.get("text"), str)
+            and e["text"]][:HISTORY_SIZE]
+
+
+def record_history(text):
+    """Prepend a transcript to history.json (atomic, best effort).
+
+    Written before the text is inserted, so a failed or misdirected insert
+    is still recoverable. Never let this break dictation itself.
+    """
+    if os.environ.get("PTT_HISTORY", "1") == "0":
+        try:
+            os.remove(HISTORY_PATH)  # opted out: old entries must go too
+        except OSError:
+            pass
+        return
+    text = (text or "").strip()
+    if not text:
+        return
+    entries = [{"text": text, "ts": time.time()}] + read_history()
+    tmp = HISTORY_PATH + ".tmp"
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(entries[:HISTORY_SIZE], fh)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, HISTORY_PATH)
+                break
+            except PermissionError:
+                # Windows: the tray reading history.json blocks the replace
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
+    except OSError as exc:
+        log(f"dictation history not saved: {exc}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 LOG_PATH = os.path.join(STATE_DIR, "dictate.log")
@@ -1758,6 +1818,7 @@ class DictationDaemon:
                 log(f"transcribed {duration:.1f}s audio -> {len(text)} chars "
                     f"in {time.time() - t0:.1f}s ({model}, lang={lang or 'auto'})"
                     + (f" [tail after {skip:.1f}s streamed]" if skip > 0 else ""))
+                record_history(debug_metadata["text"])
                 if not text:
                     if stream is not None and stream.inserted:
                         # blocks already went out; an empty tail is fine —

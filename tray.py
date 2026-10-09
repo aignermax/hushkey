@@ -255,6 +255,72 @@ def clear_env_var(name):
         pass  # the next logon refreshes it anyway
 
 
+HISTORY_LABEL_CHARS = 60
+
+
+def history_label(text):
+    """One-line menu label for a transcript, shortened with an ellipsis."""
+    line = " ".join(text.split())
+    if len(line) > HISTORY_LABEL_CHARS:
+        line = line[:HISTORY_LABEL_CHARS - 1].rstrip() + "…"
+    # Windows menus treat '&' as a mnemonic marker — double it to show it.
+    return line.replace("&", "&&") if sys.platform == "win32" else line
+
+
+def _windows_copy(text):
+    import ctypes
+    from ctypes import wintypes
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    data = text.encode("utf-16-le") + b"\0\0"
+    for _ in range(10):  # another app may hold the clipboard for a moment
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        raise OSError("the clipboard is busy")
+    try:
+        user32.EmptyClipboard()
+        handle = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        if not handle:
+            raise OSError("GlobalAlloc failed")
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            kernel32.GlobalFree(handle)
+            raise OSError("GlobalLock failed")
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(13, handle):  # CF_UNICODETEXT
+            kernel32.GlobalFree(handle)
+            raise OSError("SetClipboardData failed")
+        # on success the clipboard owns the memory — do not free it
+    finally:
+        user32.CloseClipboard()
+
+
+def copy_to_clipboard(text):
+    """Put text on the system clipboard; raises OSError/RuntimeError on failure."""
+    if sys.platform == "win32":
+        _windows_copy(text)
+    elif sys.platform == "darwin":
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True,
+                       timeout=5)
+    elif os.environ.get("WAYLAND_DISPLAY"):
+        # wl-copy forks a background owner and returns right away
+        subprocess.run(["wl-copy", "--type", "text/plain"],
+                       input=text.encode("utf-8"), check=True, timeout=5)
+    else:
+        # the tray is long-lived, so it can serve the selection itself
+        dictate._x11_clipboard_own(text.encode("utf-8"))
+
+
 # --------------------------------------------------------------------------
 # daemon supervision
 
@@ -533,6 +599,10 @@ _STRINGS = {
         "lang_menu": "Language",
         "lang_switching_title": "hushkey language",
         "lang_switching": "language is now {lang} — active on the next dictation",
+        "history_menu": "Recent dictations",
+        "history_copied_title": "hushkey",
+        "history_copied": "copied — paste with {paste}",
+        "history_copy_failed_title": "hushkey: copy failed",
         "update_item": "Install update: v{version}",
         "check_now": "Check for updates",
         "restart": "Restart daemon",
@@ -567,6 +637,10 @@ _STRINGS = {
         "lang_menu": "Sprache",
         "lang_switching_title": "hushkey Sprache",
         "lang_switching": "Sprache ist jetzt {lang} — ab dem nächsten Diktat aktiv",
+        "history_menu": "Letzte Diktate",
+        "history_copied_title": "hushkey",
+        "history_copied": "kopiert — mit {paste} einfügen",
+        "history_copy_failed_title": "hushkey: Kopieren fehlgeschlagen",
         "update_item": "Update installieren: v{version}",
         "check_now": "Nach Updates suchen",
         "restart": "Daemon neu starten",
@@ -911,6 +985,8 @@ class Tray:
             item(S["model_menu"], self._model_menu()),
             item(S["key_menu"], self._key_menu()),
             item(S["lang_menu"], self._lang_menu()),
+            item(S["history_menu"], self._history_menu(),
+                 visible=lambda _m: bool(dictate.read_history())),
             pystray.Menu.SEPARATOR,
             item(lambda _m: S["update_item"].format(version=self.pending_update),
                  self._on_update, visible=lambda _m: self.pending_update is not None),
@@ -934,6 +1010,31 @@ class Tray:
     def _lang_menu(self):
         return self._choice_menu(list(LANGS),
                                  lambda: current_lang(), self._set_lang)
+
+    def _history_menu(self):
+        """Last dictations, newest first; clicking one copies it. A callable
+        Menu re-reads history.json whenever the menu is rebuilt."""
+        item = pystray.MenuItem
+
+        def make_action(text):
+            return lambda _i, _m: self._copy_history(text)
+
+        return pystray.Menu(lambda: [
+            item(history_label(entry["text"]), make_action(entry["text"]))
+            for entry in dictate.read_history()
+        ])
+
+    def _copy_history(self, text):
+        try:
+            copy_to_clipboard(text)
+        except Exception as exc:
+            dictate.log(f"tray: copying a recent dictation failed: {exc}")
+            self._notify(S["history_copy_failed_title"], str(exc)[:120])
+            return
+        paste = "⌘V" if sys.platform == "darwin" else (
+            "Strg+V" if S is _STRINGS["de"] else "Ctrl+V")
+        self._notify(S["history_copied_title"],
+                     S["history_copied"].format(paste=paste))
 
     def _choice_menu(self, entries, current_getter, setter):
         """Radio submenu from (value, display-text) pairs."""
