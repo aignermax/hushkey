@@ -100,7 +100,7 @@ jobs:
       - name: Package engine with licenses
         run: python packaging/native.py --prefix .vulkan-ci --system ${{ matrix.system }} --arch ${{ matrix.arch }} --out native
       - name: Generate local bundle manifest
-        run: python packaging/native.py --out native --manifest v0.10.2
+        run: python packaging/native.py --out native --manifest v0.10.3
       - name: Fresh Windows installer (no compiler used by installer)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -111,7 +111,7 @@ jobs:
       - name: Verify persisted backend in a fresh process
         shell: bash
         run: |
-          python -c "from acceleration import load_settings; s = load_settings(); print(s); assert s.get('version') == 'v0.10.2'; assert s.get('engine') in ('faster-whisper', 'vulkan', 'metal')"
+          python -c "from acceleration import load_settings; s = load_settings(); print(s); assert s.get('version') == 'v0.10.3'; assert s.get('engine') in ('faster-whisper', 'vulkan', 'metal')"
       - name: Transcribe public speech through the installed backend
         env:
           HUSHKEY_TEST_INSTALLED: '1'
@@ -132,7 +132,7 @@ jobs:
           path: native
           merge-multiple: true
       - name: Generate integrity manifest
-        run: python packaging/native.py --out native --manifest v0.10.2
+        run: python packaging/native.py --out native --manifest v0.10.3
       - uses: actions/upload-artifact@v4
         with:
           name: native-bundles
