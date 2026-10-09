@@ -400,3 +400,42 @@ def test_run_exits_with_zero_when_update_arms_zero(monkeypatch):
 
 def test_run_without_update_exits_normally(monkeypatch):
     assert _run_tray_with_fake_icon(monkeypatch, None) == []
+
+
+def test_history_label_shortens_and_flattens(monkeypatch):
+    assert tray.history_label("short\ntext") == "short text"
+    label = tray.history_label("word " * 40)
+    assert len(label) == tray.HISTORY_LABEL_CHARS and label.endswith("…")
+    monkeypatch.setattr(tray.sys, "platform", "win32")
+    assert tray.history_label("a & b") == "a && b"
+
+
+def test_history_menu_lists_entries_and_copies(monkeypatch):
+    import pytest
+    if not tray.load_tray_backend():
+        pytest.skip("pystray not installed")
+    tray.dictate.record_history("first")
+    tray.dictate.record_history("second")
+    t = tray.Tray.__new__(tray.Tray)
+    copied, notes = [], []
+    monkeypatch.setattr(tray, "copy_to_clipboard", copied.append)
+    monkeypatch.setattr(t, "_notify", lambda *a: notes.append(a))
+    items = list(t._history_menu().items)
+    assert [i.text for i in items] == ["second", "first"]
+    items[1](None)
+    assert copied == ["first"]
+    assert len(notes) == 1
+
+
+def test_history_copy_failure_is_reported(monkeypatch):
+    t = tray.Tray.__new__(tray.Tray)
+    notes = []
+    monkeypatch.setattr(tray.dictate, "log", lambda *a: None)
+
+    def boom(_text):
+        raise OSError("the clipboard is busy")
+
+    monkeypatch.setattr(tray, "copy_to_clipboard", boom)
+    monkeypatch.setattr(t, "_notify", lambda *a: notes.append(a))
+    t._copy_history("x")
+    assert notes[0][0] == tray.S["history_copy_failed_title"]

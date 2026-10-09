@@ -2125,3 +2125,52 @@ def test_streaming_inserts_blocks_before_release(monkeypatch):
     # the stop guard leaves a hole in the numbering (the tail re-covers the
     # audio), but never a duplicate or a reorder
     assert nums == sorted(set(nums))
+
+
+def test_history_keeps_the_last_three_newest_first():
+    for text in ("one", "two", "three", "four"):
+        dictate.record_history(text)
+    assert [e["text"] for e in dictate.read_history()] == ["four", "three", "two"]
+
+
+def test_history_ignores_empty_and_survives_corruption(tmp_path):
+    dictate.record_history("   ")
+    assert dictate.read_history() == []
+    (tmp_path / "history.json").write_text("{not json", encoding="utf-8")
+    assert dictate.read_history() == []
+    dictate.record_history("hello")
+    assert [e["text"] for e in dictate.read_history()] == ["hello"]
+
+
+def test_history_opt_out(monkeypatch):
+    dictate.record_history("older")
+    monkeypatch.setenv("PTT_HISTORY", "0")
+    dictate.record_history("secret")
+    assert dictate.read_history() == []
+    assert not os.path.exists(dictate.HISTORY_PATH)
+
+
+def test_transcript_is_recorded_even_when_insert_fails(monkeypatch, tmp_path):
+    """The whole point: a lost insert must stay recoverable from the tray."""
+    monkeypatch.setattr(dictate, "write_state", lambda *a, **k: None)
+    monkeypatch.setattr(dictate, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(dictate, "log", lambda *a, **k: None)
+    monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
+    d = dictate.DictationDaemon.__new__(dictate.DictationDaemon)
+    d.busy_lock = threading.Lock()
+    d.recording = None
+
+    class Seg:
+        text = " lost words "
+
+    d._transcribe = lambda source, lang: [Seg()]
+
+    class BrokenInjector:
+        def insert(self, text, chord=None):
+            raise RuntimeError("no window")
+
+    d.injector = BrokenInjector()
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"")
+    d._transcribe_and_insert(str(wav), 1.0)
+    assert [e["text"] for e in dictate.read_history()] == ["lost words"]
