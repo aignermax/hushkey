@@ -117,7 +117,7 @@ def _state_dir():
 
 STATE_DIR = _state_dir()
 
-VERSION = "0.10.6"
+VERSION = "0.10.7"
 
 
 def audio_debug_machine_id():
