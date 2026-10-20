@@ -6,6 +6,10 @@
     #define MyAppVersion "0.0.0-dev"
   #endif
 #endif
+; RedirectionGuard below is a 6.7.0 directive — fail loudly on an older ISCC.
+#if VER < EncodeVer(6,7,0)
+  #error Inno Setup 6.7.0 or newer is required to build hushkey-setup.
+#endif
 
 [Setup]
 AppId={{7F3A9C2E-4B6D-4E1A-9C5F-2D8E6A1B3F47}
@@ -16,6 +20,11 @@ AppPublisher=aignermax
 AppPublisherURL=https://github.com/aignermax/hushkey
 DefaultDirName={localappdata}\Programs\whisper-ptt
 PrivilegesRequired=lowest
+; install.ps1 and its Python children inherit Setup's RedirectionGuard (observed
+; on 26200 despite the Inno docs saying it isn't inherited) and then can't follow
+; huggingface_hub's cached-model symlinks: WinError 448 when Developer Mode allows
+; user symlinks. The guard only matters for an elevated Setup; this one doesn't request elevation.
+RedirectionGuard=no
 ArchitecturesAllowed=x64compatible
 OutputDir=dist
 OutputBaseFilename=hushkey-setup-{#MyAppVersion}
