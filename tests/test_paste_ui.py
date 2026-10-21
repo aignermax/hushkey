@@ -25,7 +25,8 @@ pytestmark = [
 # pid: a venv's python.exe is a launcher with a child interpreter), then the
 # text field's contents to `out` as soon as something was pasted.
 TARGET = r"""
-import ctypes, os, sys, tkinter as tk
+import ctypes, faulthandler, os, sys, tkinter as tk
+faulthandler.dump_traceback_later(30, exit=True)  # a stuck target shows where
 out = sys.argv[1]
 root = tk.Tk()
 root.title("hushkey paste target")
@@ -97,10 +98,13 @@ def test_paste_lands_in_the_window_and_restores_the_clipboard(
     dictate._win_clipboard_write("OLD")
     out = tmp_path / "pasted.txt"
     target = subprocess.Popen([sys.executable, "-c", TARGET, str(out)],
-                              stdout=subprocess.PIPE, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
     try:
-        ready, pid = target.stdout.readline().split()
-        assert ready == "ready"
+        line = target.stdout.readline()  # EOF at the latest after 30 s
+        assert line.startswith("ready "), \
+            f"the target window never came up:\n{target.stderr.read()}"
+        pid = line.split()[1]
         assert _foreground_pid() == int(pid), \
             "the target window did not get the focus"
         dictate.PynputInjector().insert(text)
