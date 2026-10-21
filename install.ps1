@@ -125,9 +125,48 @@ Write-Host "==> configuring automatic hardware acceleration"
 & $VenvPython (Join-Path $Dir "setup_acceleration.py")
 if ($LASTEXITCODE -ne 0) { throw "Automatic acceleration setup failed ($LASTEXITCODE)" }
 
+$Pythonw = Join-Path $Venv "Scripts\pythonw.exe"  # no console window
+$Daemon = Join-Path $Dir "tray.py"  # tray supervises dictate.py as its child
+# setup.exe ships logo.ico; a git checkout builds it from the PNG (Pillow is a
+# tray dependency, so the venv has it) and rebuilds it when the PNG changes.
+$Icon = Join-Path $Dir "logo.ico"
+$Png = Join-Path $Dir "assets\logo.png"
+$MakeIco = Join-Path $Dir "packaging\windows\make_ico.py"
+if ((Test-Path -LiteralPath $MakeIco) -and (Test-Path -LiteralPath $Png) -and (
+        -not (Test-Path -LiteralPath $Icon) -or
+        (Get-Item -LiteralPath $Png).LastWriteTime -gt (Get-Item -LiteralPath $Icon).LastWriteTime)) {
+    $ErrorActionPreference = "Continue"
+    $out = & $VenvPython $MakeIco $Icon 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Host "    WARNING: could not build logo.ico: $out" }
+    $ErrorActionPreference = "Stop"
+}
+
+function New-TrayShortcut([string]$Path) {
+    $Lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
+    $Lnk.TargetPath = $Pythonw
+    $Lnk.Arguments = "`"$Daemon`""
+    $Lnk.WorkingDirectory = $Dir
+    $Lnk.Description = "Local, offline push-to-talk dictation"
+    if (Test-Path -LiteralPath $Icon) { $Lnk.IconLocation = "$Icon,0" }
+    $Lnk.Save()
+}
+
+# A Start Menu entry, so hushkey shows up in Windows search and can be started
+# again after Quit. A second tray just exits on the instance lock, so launching
+# it while hushkey runs is harmless. Like the autostart entry, the latest
+# install owns it. Best effort: a missing launcher must never cost the
+# autostart setup below. %APPDATA% rather than the Programs known folder, so
+# tests can redirect it; it follows AppData folder redirection.
+$MenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\hushkey.lnk"
+try {
+    New-TrayShortcut $MenuLnk
+    Write-Host "==> Start Menu entry: $MenuLnk"
+} catch {
+    Write-Host "    WARNING: could not create $MenuLnk - hushkey will not show up"
+    Write-Host "             in the Start Menu (dictation is unaffected): $_"
+}
+
 if (-not $NoAutostart) {
-    $Pythonw = Join-Path $Venv "Scripts\pythonw.exe"  # no console window
-    $Daemon = Join-Path $Dir "tray.py"  # tray supervises dictate.py as its child
     $Tr = "`"$Pythonw`" `"$Daemon`""
     # native stderr would abort the script under EAP=Stop, so relax it locally
     $ErrorActionPreference = "Continue"
@@ -143,12 +182,7 @@ if (-not $NoAutostart) {
         $LnkPath = Join-Path ([Environment]::GetFolderPath("Startup")) "whisper-ptt.lnk"
         Write-Host "==> schtasks denied - autostart via Startup folder shortcut instead:"
         Write-Host "    $LnkPath"
-        $Ws = New-Object -ComObject WScript.Shell
-        $Lnk = $Ws.CreateShortcut($LnkPath)
-        $Lnk.TargetPath = $Pythonw
-        $Lnk.Arguments = "`"$Daemon`""
-        $Lnk.WorkingDirectory = $Dir
-        $Lnk.Save()
+        New-TrayShortcut $LnkPath
         Start-Process $Pythonw -ArgumentList "`"$Daemon`"" -WindowStyle Hidden
     }
 }

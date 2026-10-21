@@ -15,6 +15,16 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+START_MENU = Path("Microsoft/Windows/Start Menu/Programs")
+
+
+def installer_env(tmp_path):
+    """Keep the installer's Start Menu entry out of the real user profile."""
+    appdata = tmp_path / "appdata"
+    (appdata / START_MENU).mkdir(parents=True)
+    return dict(os.environ, PYTHONPATH=str(tmp_path), APPDATA=str(appdata))
+
+
 @pytest.mark.parametrize("setup_code", [0, 37])
 def test_setup_runs_and_failures_propagate_without_autostart(tmp_path, setup_code):
     shutil.copy(ROOT / "install.ps1", tmp_path)
@@ -25,7 +35,7 @@ def test_setup_runs_and_failures_propagate_without_autostart(tmp_path, setup_cod
         "Path(__file__).with_name('setup-ran').write_text('yes')\n"
         f"raise SystemExit({setup_code})\n")
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(tmp_path / ".venv")], check=True)
-    env = dict(os.environ, PYTHONPATH=str(tmp_path))
+    env = installer_env(tmp_path)
     proc = subprocess.run([
         shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(tmp_path / "install.ps1"), "-NoAutostart"],
@@ -67,7 +77,7 @@ function Start-Process {{
 & {ps_quote(tmp_path / 'install.ps1')} -NoAutostart
 """, encoding="utf-8")
     proc = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-                          env=dict(os.environ, PYTHONPATH=str(tmp_path)), text=True, capture_output=True, timeout=60)
+                          env=installer_env(tmp_path), text=True, capture_output=True, timeout=60)
     assert (tmp_path / "installer-ran").exists() == valid_hash, proc.stdout + proc.stderr
     assert (tmp_path / "configured").exists() == valid_hash, proc.stdout + proc.stderr
     assert (proc.returncode == 0) == valid_hash
@@ -88,7 +98,7 @@ function Invoke-WebRequest {{ throw 'must not bootstrap Python during an update'
 & {ps_quote(tmp_path / 'install.ps1')} -NoAutostart
 """, encoding="utf-8")
     proc = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-                          env=dict(os.environ, PYTHONPATH=str(tmp_path)), text=True, capture_output=True, timeout=60)
+                          env=installer_env(tmp_path), text=True, capture_output=True, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (tmp_path / "configured").exists()
     assert (tmp_path / ".venv/pyvenv.cfg").read_bytes() == before
@@ -113,3 +123,45 @@ if ($found -ne {ps_quote(sys.executable)}) {{ throw 'manager runtime not discove
     proc = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
                           text=True, capture_output=True, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def read_shortcut(lnk):
+    # UTF-8 on both ends: a non-ASCII user profile must not garble the paths.
+    proc = subprocess.run([shutil.which("powershell"), "-NoProfile", "-Command",
+                           "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                           f"$l = (New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(lnk)}); "
+                           "$l.TargetPath; $l.Arguments"],
+                          capture_output=True, timeout=60)
+    lines = proc.stdout.decode("utf-8").splitlines()
+    assert len(lines) == 2, proc.stdout + proc.stderr
+    return lines
+
+
+def test_start_menu_entry_launches_the_tray_and_only_its_uninstall_removes_it(tmp_path):
+    """Another checkout's uninstall (or a test of it) must not take the entry
+    of the real install along."""
+    install, other = tmp_path / "install", tmp_path / "other"
+    install.mkdir()
+    other.mkdir()
+    shutil.copy(ROOT / "install.ps1", install)
+    for target in (install, other):
+        shutil.copy(ROOT / "uninstall.ps1", target)
+    (install / "dictate.py").write_text("")
+    (install / "pip.py").write_text("")
+    (install / "setup_acceleration.py").write_text("")
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(install / ".venv")], check=True)
+    env = installer_env(tmp_path)
+    env["PYTHONPATH"] = str(install)
+    powershell = [shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+    proc = subprocess.run([*powershell, str(install / "install.ps1"), "-NoAutostart"],
+                          env=env, text=True, capture_output=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lnk = Path(env["APPDATA"]) / START_MENU / "hushkey.lnk"
+    target, arguments = read_shortcut(lnk)
+    assert target.lower().endswith(r"\.venv\scripts\pythonw.exe")
+    assert arguments == f'"{install / "tray.py"}"'
+    for checkout, kept in ((other, True), (install, False)):
+        proc = subprocess.run([*powershell, str(checkout / "uninstall.ps1")],
+                              env=env, text=True, capture_output=True, timeout=60)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert lnk.exists() == kept, proc.stdout
