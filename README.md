@@ -137,8 +137,9 @@ key* (no config file or env var needed).
 | `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
 | `PTT_TYPE_DELAY_TERMINAL` | `0` | Windows + Linux/X11: delay used instead of `PTT_TYPE_DELAY` when the focused window is a terminal — consoles keep up with full-speed keystrokes, so dictation lands instantly there (Wayland pastes instead of typing, so no pacing applies) |
 | `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
-| `PTT_KEEP_CLIPBOARD` | unset | Wayland only: `1` leaves the transcript in the clipboard instead of restoring the previous contents |
-| `PTT_CLIPBOARD_SETTLE` | `0.4` | Wayland only: seconds before the previous clipboard is restored; raise it if a slow app pastes the restored value instead of the transcript |
+| `PTT_KEEP_CLIPBOARD` | unset | `1` leaves the transcript in the clipboard instead of restoring the previous contents |
+| `PTT_CLIPBOARD_SETTLE` | `0.4` | Seconds before the previous clipboard is restored (on Windows counted from the target's first read); raise it if a slow app pastes the restored value instead of the transcript |
+| `PTT_PASTE_TIMEOUT` | `5` | Windows only: seconds to wait for the target app to fetch a pasted dictation; without a fetch the previous clipboard is given up rather than restored |
 | `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
 | `PTT_OVERLAY` | `1` | Show the recording/live-preview overlay on Windows, Linux and macOS. It follows the mouse to the current monitor. `0` disables it. Requires tkinter; on Wayland monitor selection and placement are best effort through Xwayland. |
 | `PTT_PREVIEW` | `1` | Show provisional recognition about every two seconds, plus inference time. `0` keeps the recording indicator without extra inference. Disabled with `PTT_OVERLAY=0` or legacy `PTT_STREAMING=1`. |
@@ -265,13 +266,21 @@ How to set them:
 
 ### Windows paste mode
 
-Hushkey writes and verifies the transcript before sending the paste shortcut.
-The transcript stays in the clipboard until your next copy. Windows clipboard
-reads do not confirm that an application has finished pasting, so restoring the
-old contents can insert stale text in applications that read asynchronously or
-more than once. Temporary dictation text remains excluded from Windows clipboard
-history and cloud synchronization. If writing or verifying the clipboard fails,
-Hushkey falls back to typing instead of pasting stale contents.
+The clipboard is borrowed, not taken: hushkey offers the transcript on the
+clipboard, sends the paste shortcut, and puts your previous text back once the
+target app has fetched the transcript. Windows only reports that an app *read*
+the clipboard, not that it finished pasting, and some apps read twice — so the
+restore waits `PTT_CLIPBOARD_SETTLE` (0.4 s) after that first read. Raise it if
+an app pastes your previous text instead of the dictation.
+
+The restore is skipped, and the transcript stays on the clipboard, when the
+target does not fetch it within `PTT_PASTE_TIMEOUT` (5 s; restoring then could
+let a slow app or a Remote Desktop session paste your previous contents), when
+you copied something else in the meantime, or when the clipboard held no text
+(an image, say). Only plain text is restored. The transcript never enters the
+Win+V clipboard history or cloud synchronization. If the clipboard cannot be
+taken, hushkey types the dictation instead of pasting stale contents.
+`PTT_KEEP_CLIPBOARD=1` leaves every transcript on the clipboard.
 
 ### The Wayland paste chord
 

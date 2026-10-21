@@ -47,3 +47,9 @@ jobs:
         env:
           HUSHKEY_TEST_OVERLAY_UI: '1'
         run: python -m pytest tests/test_preview.py tests/test_overlay_monitors.py -v
+
+      - name: Real paste into a real window restores the clipboard (Windows)
+        if: runner.os == 'Windows'
+        env:
+          HUSHKEY_TEST_PASTE_UI: '1'
+        run: python -m pytest tests/test_paste_ui.py -v

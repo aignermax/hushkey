@@ -2177,23 +2177,29 @@ def test_transcript_is_recorded_even_when_insert_fails(monkeypatch, tmp_path):
 
 
 class FakeOffer:
-    def __init__(self, writes, text, transient, fetched):
+    def __init__(self, writes, text, transient, fetched, owned=True):
         writes.append((text, transient))
         self.fetched, self.armed, self.closed = fetched, False, False
+        self._owned = owned
+        self.waited = False
 
     def arm(self):
         self.armed = True
 
     def wait(self, timeout):
         assert self.armed  # only a fetch after the chord may count
+        self.waited = True
         return self.fetched
+
+    def owned(self):
+        return self._owned
 
     def close(self):
         self.closed = True
 
 
 def _paste_mode(monkeypatch, platform, previous="OLD", terminal=False,
-                fetched=True):
+                fetched=True, owned=True):
     """Paste mode on `platform` with a stubbed clipboard; returns the writes."""
     monkeypatch.setenv("PTT_INSERT", "paste")
     monkeypatch.setattr(sys, "platform", platform)
@@ -2205,7 +2211,8 @@ def _paste_mode(monkeypatch, platform, previous="OLD", terminal=False,
                                      writes.append((data, transient))))
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
                         classmethod(lambda cls, text, transient:
-                                    FakeOffer(writes, text, transient, fetched)))
+                                    FakeOffer(writes, text, transient, fetched,
+                                              owned)))
     monkeypatch.setattr(dictate, "foreground_window_is_terminal",
                         lambda: terminal)
     monkeypatch.setattr(dictate, "_CHORD_KEYS",
@@ -2221,13 +2228,13 @@ def _downs(injector):
     return [k for event, k in injector.controller.events if event == "down"]
 
 
-def test_paste_mode_pastes_with_ctrl_v_and_keeps_the_transcript(monkeypatch):
+def test_paste_mode_pastes_with_ctrl_v_and_restores_the_clipboard(monkeypatch):
     """Default mode: the whole dictation goes in as one paste, not one
     keystroke per character (3,000 chars took 15+ s to type)."""
     injector, writes = _paste_mode(monkeypatch, "win32")
     injector.insert("Hallo, Welt! ")
     assert _downs(injector) == ["<ctrl>", "v"]
-    assert writes == [("Hallo, Welt! ", False)]
+    assert writes == [("Hallo, Welt! ", True), ("OLD", False)]
 
 
 def test_paste_mode_uses_shift_insert_in_windows_terminals(monkeypatch):
@@ -2267,14 +2274,65 @@ def test_paste_mode_does_not_restore_when_the_target_never_fetched(monkeypatch):
     instead of the dictation. Without a confirmed fetch: no restore."""
     injector, writes = _paste_mode(monkeypatch, "win32", fetched=False)
     injector.insert("Hallo")
-    assert writes == [("Hallo", False)]
+    assert writes == [("Hallo", True)]
+
+
+def test_paste_mode_keeps_a_copy_made_while_the_paste_settled(monkeypatch):
+    """Whatever was copied after the dictation is newer than the previous
+    contents; the restore must not overwrite it."""
+    injector, writes = _paste_mode(monkeypatch, "win32", owned=False)
+    injector.insert("Hallo")
+    assert writes == [("Hallo", True)]
 
 
 def test_paste_mode_leaves_the_transcript_when_nothing_to_restore(monkeypatch):
     """An image on the clipboard cannot be restored — the transcript stays."""
     injector, writes = _paste_mode(monkeypatch, "win32", previous=None)
+    offers = []
+    real_offer = dictate.PynputInjector._clipboard_offer
+    monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
+                        classmethod(lambda cls, text, transient: offers.append(
+                            real_offer(text, transient)) or offers[-1]))
     injector.insert("Hallo")
     assert writes == [("Hallo", False)]
+    # Nothing to restore, so nothing to wait for: no stall per dictation.
+    assert not offers[0].waited
+
+
+def test_paste_mode_pastes_even_when_the_previous_clipboard_is_unreadable(
+        monkeypatch):
+    """Typing a long dictation takes seconds; losing the restore does not
+    justify that."""
+    injector, writes = _paste_mode(monkeypatch, "win32")
+
+    def busy():
+        raise OSError("the clipboard is busy")
+
+    monkeypatch.setattr(dictate.PynputInjector, "_clipboard_read",
+                        staticmethod(busy))
+    injector.insert("Hallo")
+    assert _downs(injector) == ["<ctrl>", "v"]
+    assert writes == [("Hallo", False)]
+
+
+def test_paste_mode_puts_the_previous_text_back_when_the_offer_fails(
+        monkeypatch):
+    """The offer may fail after it emptied the clipboard; the previous text
+    must not be lost on the way to the typing fallback."""
+    injector, writes = _paste_mode(monkeypatch, "win32")
+    reads = iter(["OLD", None])
+    monkeypatch.setattr(dictate.PynputInjector, "_clipboard_read",
+                        staticmethod(lambda: next(reads)))
+
+    def emptied_then_failed(*args, **kwargs):
+        raise OSError("clipboard did not take the dictation")
+
+    monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
+                        staticmethod(emptied_then_failed))
+    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
+    injector.insert("ab")
+    assert _downs(injector) == ["a", "b"]
+    assert writes == [("OLD", False)]
 
 
 def test_paste_mode_honours_the_streaming_chord_override(monkeypatch):
@@ -2294,34 +2352,6 @@ def test_paste_mode_falls_back_to_typing_without_a_clipboard(monkeypatch):
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     injector.insert("ab")
     assert _downs(injector) == ["a", "b"]
-
-
-def test_windows_unverified_clipboard_never_sends_a_paste_chord(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("PTT_INSERT", "paste")
-    monkeypatch.setattr(dictate, "_win_clipboard_write", lambda *a, **k: None)
-    monkeypatch.setattr(dictate, "_win_clipboard_read", lambda: "OLD")
-    monkeypatch.setattr(dictate.time, "sleep", lambda _: None)
-    monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
-    injector = dictate.PynputInjector()
-    injector.controller = FakeController()
-    injector.insert("ab")
-    assert _downs(injector) == ["a", "b"]
-
-
-def test_windows_clipboard_verification_tolerates_a_transient_read(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("PTT_INSERT", "paste")
-    monkeypatch.setattr(dictate, "_win_clipboard_write", lambda *a, **k: None)
-    reads = iter([None, "ab"])
-    monkeypatch.setattr(dictate, "_win_clipboard_read", lambda: next(reads))
-    monkeypatch.setattr(dictate.time, "sleep", lambda _: None)
-    monkeypatch.setattr(dictate, "_default_paste_chord", lambda: "ctrl+v")
-    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
-    injector = dictate.PynputInjector()
-    injector.controller = FakeController()
-    injector.insert("ab")
-    assert _downs(injector) == ["<ctrl>", "v"]
 
 
 def test_insert_mode_config(monkeypatch, tmp_path):
@@ -2365,12 +2395,11 @@ def test_windows_clipboard_round_trip_is_private_and_exact():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
-def test_windows_paste_keeps_text_for_a_second_target_read(monkeypatch):
-    """A target may inspect the text before its actual asynchronous paste.
-
-    Rendering a format is not a paste acknowledgement. Restoring after the
-    first read makes the second read insert OLD instead of the transcript.
-    """
+def test_windows_paste_serves_a_second_target_read_then_restores(monkeypatch):
+    """A target may read once to inspect the clipboard and again, a little
+    later, to insert. Only the first read renders, so the restore waits
+    CLIPBOARD_SETTLE: the second read still gets the transcript, and only
+    then does the previous text come back."""
     before = dictate._win_clipboard_read()
     text = "Grüße & 名字 — hotfix"
     reads = []
@@ -2379,20 +2408,42 @@ def test_windows_paste_keeps_text_for_a_second_target_read(monkeypatch):
         def press(self, key):
             if key == "v":
                 reads.append(dictate._win_clipboard_read())
+                late = threading.Timer(0.1, lambda: reads.append(
+                    dictate._win_clipboard_read()))
+                late.start()
+                self.late = late
 
         def release(self, key):
             pass
 
     monkeypatch.setattr(dictate, "_default_paste_chord", lambda: "ctrl+v")
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.4)
     monkeypatch.delenv("PTT_KEEP_CLIPBOARD", raising=False)
     injector = dictate.PynputInjector()
     injector.controller = InspectingTarget()
     try:
         dictate._win_clipboard_write("OLD")
-        assert dictate._win_clipboard_read() == "OLD"
         assert injector._paste_text(text)
-        reads.append(dictate._win_clipboard_read())
+        injector.controller.late.join()
         assert reads == [text, text]
+        assert dictate._win_clipboard_read() == "OLD"
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_owns_the_clipboard_without_rendering_it():
+    """The offer is checked before the chord without reading it back — a
+    read would render the text and the target's fetch would go unseen."""
+    before = dictate._win_clipboard_read()
+    try:
+        offer = dictate._WinClipboardOffer("checked")
+        try:
+            assert offer.owned()
+            assert not offer.fetched.is_set()
+        finally:
+            offer.close()
     finally:
         if before is not None:
             dictate._win_clipboard_write(before)
@@ -2433,6 +2484,151 @@ def test_macos_restores_plain_text(monkeypatch):
 
     monkeypatch.setattr(dictate.subprocess, "run", run)
     assert dictate._mac_clipboard_read() == "Grüße"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_reports_the_fetch_and_renders_exact_text(monkeypatch):
+    """Delayed rendering, end to end on the real clipboard: a read by the
+    paste target (here: this process) renders the exact text and reports
+    the fetch."""
+    monkeypatch.setattr(dictate, "_win_foreground_window", lambda: 1)
+    real_pid = dictate._win_window_pid
+    monkeypatch.setattr(dictate, "_win_window_pid",
+                        lambda hwnd: os.getpid() if hwnd == 1 else real_pid(hwnd))
+    before = dictate._win_clipboard_read()
+    text = "Grüße & 名字 — ok?"
+    try:
+        offer = dictate._WinClipboardOffer(text)
+        try:
+            offer.arm()
+            assert not offer.fetched.is_set()
+            assert dictate._win_clipboard_read() == text  # triggers the render
+            assert offer.wait(2)
+        finally:
+            offer.close()
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_ignores_reads_before_arm_and_survives_close():
+    """A clipboard monitor reading before the paste chord must not count as
+    the target's fetch; closing an unfetched offer keeps the text."""
+    before = dictate._win_clipboard_read()
+    text = "early reader"
+    try:
+        offer = dictate._WinClipboardOffer(text)
+        try:
+            assert dictate._win_clipboard_read() == text  # monitor, unarmed
+            offer.arm()
+            assert not offer.wait(0.3)
+        finally:
+            offer.close()
+        unfetched = dictate._WinClipboardOffer("still here")
+        unfetched.close()  # never read: WM_RENDERALLFORMATS must keep it
+        assert dictate._win_clipboard_read() == "still here"
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
+
+
+def _read_clipboard_with_a_window():
+    """Read CF_UNICODETEXT like a clipboard monitor does: with its own
+    (message-only) window, so the reader is attributable to this process."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = (
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND,
+        wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID)
+    hwnd = user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0,
+                                  wintypes.HWND(-3), None, None, None)
+    assert hwnd
+    try:
+        ctypes_, user32_, kernel32 = dictate._win_clipboard_api()
+        user32.OpenClipboard.argtypes = (wintypes.HWND,)
+        assert user32.OpenClipboard(hwnd)
+        try:
+            handle = user32_.GetClipboardData(dictate._CF_UNICODETEXT)
+            ptr = kernel32.GlobalLock(handle)
+            try:
+                return ctypes.wstring_at(ptr)
+            finally:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+    finally:
+        user32.DestroyWindow(hwnd)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_counts_a_child_window_process_as_the_target(monkeypatch):
+    """UWP: the foreground frame belongs to ApplicationFrameHost, the app
+    that reads the clipboard owns a child window inside it."""
+    monkeypatch.setattr(dictate, "_win_foreground_window", lambda: 1)
+    monkeypatch.setattr(dictate, "_win_window_pids",
+                        lambda hwnd: {999999, os.getpid()} if hwnd == 1 else set())
+    before = dictate._win_clipboard_read()
+    try:
+        offer = dictate._WinClipboardOffer("uwp")
+        try:
+            offer.arm()
+            assert _read_clipboard_with_a_window() == "uwp"
+            assert offer.wait(2)
+        finally:
+            offer.close()
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_does_not_count_a_failed_render_as_a_fetch(monkeypatch):
+    """A render that could not hand out the text left the target with
+    nothing to paste; restoring then would lose the dictation entirely."""
+    before = dictate._win_clipboard_read()
+    try:
+        offer = dictate._WinClipboardOffer("never delivered")
+        try:
+            offer.arm()
+
+            def out_of_memory(fmt, data):
+                raise OSError("GlobalAlloc failed")
+
+            monkeypatch.setattr(dictate, "_win_clipboard_put", out_of_memory)
+            assert dictate._win_clipboard_read() is None
+            assert not offer.wait(0.3)
+        finally:
+            monkeypatch.undo()
+            offer.close()
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows clipboard")
+def test_windows_offer_ignores_readers_other_than_the_paste_target(monkeypatch):
+    """A clipboard monitor reading *after* the chord must not count either:
+    restoring then could let the slower target paste the previous contents."""
+    monkeypatch.setattr(dictate, "_win_foreground_window", lambda: 1)
+    real_pid = dictate._win_window_pid
+    monkeypatch.setattr(dictate, "_win_window_pid",
+                        lambda hwnd: 999999 if hwnd == 1 else real_pid(hwnd))
+    before = dictate._win_clipboard_read()
+    try:
+        offer = dictate._WinClipboardOffer("monitor read")
+        try:
+            offer.arm()  # the target is pid 999999, not us
+            assert _read_clipboard_with_a_window() == "monitor read"
+            assert not offer.wait(0.3)
+        finally:
+            offer.close()
+    finally:
+        if before is not None:
+            dictate._win_clipboard_write(before)
 
 
 def test_macos_restores_office_text_despite_a_pdf_rendition(monkeypatch):
