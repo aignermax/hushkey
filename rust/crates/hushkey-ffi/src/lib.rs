@@ -11,7 +11,8 @@
 //!   freed with `hk_string_free`. Strings inside an event are valid only
 //!   during the callback.
 //! - Callbacks run on a library thread, one event at a time, in order.
-//!   Calling `hk_record_stop` from inside a callback is allowed.
+//!   Calling `hk_record_stop` or `hk_listen_stop` from inside a callback is
+//!   allowed.
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
@@ -23,8 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hushkey_core::{
-    model, read_wav_16k, AudioInput, Engine, EngineConfig, Event, EventSink, Microphone,
-    RecordConfig, RecordSession, TranscribeOptions, WavReplay,
+    endpoint, model, read_wav_16k, AudioInput, Engine, EngineConfig, Event, EventSink,
+    ListenConfig, ListenSession, Microphone, RecordConfig, RecordSession, TranscribeOptions,
+    WavReplay, VAD_FRAME,
 };
 
 /// Version of this ABI. Additions keep the number; incompatible changes
@@ -75,6 +77,37 @@ pub struct HkRecordConfig {
     pub input_realtime: bool,
 }
 
+/// Settings for `hk_listen_start`. Initialize with `hk_listen_config_init`.
+#[repr(C)]
+pub struct HkListenConfig {
+    /// `sizeof(HkListenConfig)` as the caller knows it.
+    pub size: usize,
+    /// A pause this long (ms) ends an utterance. Shorter reacts faster to
+    /// commands; longer lets people pause mid-sentence.
+    pub end_silence_ms: u32,
+    /// Speech must last this long (ms) to count (filters clicks, breaths).
+    pub min_speech_ms: u32,
+    /// An utterance is cut after this long (ms) even without a pause.
+    pub max_utterance_ms: u32,
+    /// Speech probability threshold, between 0 and 1.
+    pub vad_threshold: f32,
+    /// Emit `HK_EVENT_KIND_PREVIEW` events while an utterance is spoken.
+    pub preview: bool,
+    /// Milliseconds between previews.
+    pub preview_interval_ms: u32,
+    /// Overrides the engine's language; `"auto"` forces detection.
+    pub language: *const c_char,
+    /// Vocabulary or style hint passed to whisper (command words, names).
+    pub prompt: *const c_char,
+    /// Input device name; NULL for the default microphone.
+    pub input_device: *const c_char,
+    /// Listen to this WAV file instead of a microphone; the session ends by
+    /// itself when the file does.
+    pub input_wav: *const c_char,
+    /// With `input_wav`: play it at real-time speed like a microphone.
+    pub input_realtime: bool,
+}
+
 /// What an event reports. Newer library versions may add kinds; ignore any
 /// you do not know.
 #[repr(u32)]
@@ -84,6 +117,11 @@ pub enum HkEventKind {
     Preview = 1,
     /// `text`, `language`, `end_ms`: the whole recording, after stop.
     Final = 2,
+    /// Listening: someone started speaking at `start_ms`.
+    SpeechStart = 3,
+    /// Listening: `text`, `language`, `start_ms`, `end_ms` of one finished
+    /// utterance.
+    Utterance = 4,
     /// `text`: what went wrong.
     Error = 7,
     /// The session is over; nothing follows.
@@ -116,9 +154,10 @@ pub struct HkEngine {
     engine: Arc<Engine>,
 }
 
-/// A recording in progress.
-pub struct HkSession {
-    record: RecordSession,
+/// A recording or listening session in progress.
+pub enum HkSession {
+    Record(RecordSession),
+    Listen(ListenSession),
 }
 
 thread_local! {
@@ -478,7 +517,7 @@ pub unsafe extern "C" fn hk_record_start(
         let sink = event_sink(callback, user_data);
         let record = RecordSession::start(engine.engine.clone(), input, config, sink)
             .map_err(|e| e.to_string())?;
-        Ok(Box::into_raw(Box::new(HkSession { record })))
+        Ok(Box::into_raw(Box::new(HkSession::Record(record))))
     })
 }
 
@@ -506,11 +545,164 @@ pub unsafe extern "C" fn hk_record_stop(
             return Err("session is NULL".into());
         }
         let mut session = Box::from_raw(session);
-        let transcript = session.record.stop().map_err(|e| e.to_string())?;
+        let HkSession::Record(record) = &mut *session else {
+            return Err("not a recording session; use hk_listen_stop".into());
+        };
+        let transcript = record.stop().map_err(|e| e.to_string())?;
         if let (Some(t), false) = (transcript, text_out.is_null()) {
             *text_out = into_c_string(&t.text);
         }
         Ok(0)
+    })
+}
+
+/// Fill `cfg` with defaults. Set `cfg->size = sizeof *cfg` first.
+///
+/// # Safety
+/// `cfg` must point to a writable struct of at least `cfg->size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hk_listen_config_init(cfg: *mut HkListenConfig) {
+    if cfg.is_null() {
+        return;
+    }
+    let d = ListenConfig::default();
+    let to_ms = |frames: usize| (frames * VAD_FRAME * 1000 / 16_000) as u32;
+    write_field!(
+        cfg,
+        HkListenConfig,
+        end_silence_ms,
+        to_ms(d.endpoint.end_silence_frames)
+    );
+    write_field!(
+        cfg,
+        HkListenConfig,
+        min_speech_ms,
+        to_ms(d.endpoint.min_speech_frames)
+    );
+    write_field!(
+        cfg,
+        HkListenConfig,
+        max_utterance_ms,
+        to_ms(d.endpoint.max_utterance_frames)
+    );
+    write_field!(cfg, HkListenConfig, vad_threshold, d.endpoint.threshold);
+    write_field!(cfg, HkListenConfig, preview, d.preview);
+    write_field!(
+        cfg,
+        HkListenConfig,
+        preview_interval_ms,
+        d.preview_interval.as_millis() as u32
+    );
+    write_field!(cfg, HkListenConfig, language, ptr::null());
+    write_field!(cfg, HkListenConfig, prompt, ptr::null());
+    write_field!(cfg, HkListenConfig, input_device, ptr::null());
+    write_field!(cfg, HkListenConfig, input_wav, ptr::null());
+    write_field!(cfg, HkListenConfig, input_realtime, true);
+}
+
+/// Start listening continuously: each utterance arrives as
+/// `HK_EVENT_KIND_UTTERANCE`. The engine needs a VAD model
+/// (`HkEngineConfig.vad_model`). Returns NULL on failure.
+///
+/// # Safety
+/// `engine` must be valid; `cfg` initialized or NULL for defaults;
+/// `user_data` must stay valid until the `HK_EVENT_KIND_STOPPED` event.
+#[no_mangle]
+pub unsafe extern "C" fn hk_listen_start(
+    engine: *mut HkEngine,
+    cfg: *const HkListenConfig,
+    callback: HkEventCallback,
+    user_data: *mut c_void,
+) -> *mut HkSession {
+    guard(ptr::null_mut(), || {
+        let engine = engine.as_ref().ok_or("engine is NULL")?;
+        let mut config = ListenConfig::default();
+        let mut input: Box<dyn AudioInput> = Box::new(Microphone::new(None));
+        if !cfg.is_null() {
+            let d = ListenConfig::default();
+            let frames_or = |ms: u32, default: usize| {
+                if ms > 0 {
+                    endpoint::frames(ms)
+                } else {
+                    default
+                }
+            };
+            let e = &mut config.endpoint;
+            e.end_silence_frames = frames_or(
+                read_field!(cfg, HkListenConfig, end_silence_ms, 0),
+                d.endpoint.end_silence_frames,
+            );
+            e.min_speech_frames = frames_or(
+                read_field!(cfg, HkListenConfig, min_speech_ms, 0),
+                d.endpoint.min_speech_frames,
+            );
+            e.max_utterance_frames = frames_or(
+                read_field!(cfg, HkListenConfig, max_utterance_ms, 0),
+                d.endpoint.max_utterance_frames,
+            );
+            let threshold = read_field!(cfg, HkListenConfig, vad_threshold, d.endpoint.threshold);
+            if !(threshold > 0.0 && threshold < 1.0) {
+                return Err(format!(
+                    "vad_threshold must be between 0 and 1, not {threshold}"
+                ));
+            }
+            e.threshold = threshold;
+            config.preview = read_bool!(cfg, HkListenConfig, preview, d.preview);
+            let interval = read_field!(cfg, HkListenConfig, preview_interval_ms, 0);
+            if interval > 0 {
+                config.preview_interval = Duration::from_millis(interval as u64);
+            }
+            config.options.language = opt_str(
+                read_field!(cfg, HkListenConfig, language, ptr::null()),
+                "language",
+            )?;
+            config.options.prompt = opt_str(
+                read_field!(cfg, HkListenConfig, prompt, ptr::null()),
+                "prompt",
+            )?;
+            let device = opt_str(
+                read_field!(cfg, HkListenConfig, input_device, ptr::null()),
+                "input_device",
+            )?;
+            let wav = opt_str(
+                read_field!(cfg, HkListenConfig, input_wav, ptr::null()),
+                "input_wav",
+            )?;
+            let realtime = read_bool!(cfg, HkListenConfig, input_realtime, true);
+            input = match wav {
+                Some(path) => Box::new(WavReplay::new(path, realtime)),
+                None => Box::new(Microphone::new(device)),
+            };
+        }
+        let sink = event_sink(callback, user_data);
+        let listen = ListenSession::start(engine.engine.clone(), input, config, sink)
+            .map_err(|e| e.to_string())?;
+        Ok(Box::into_raw(Box::new(HkSession::Listen(listen))))
+    })
+}
+
+/// Stop listening and free the session. An utterance in progress is
+/// transcribed and reported first, then `HK_EVENT_KIND_STOPPED`. Called from
+/// inside the session's callback, it returns at once and the stop completes
+/// after the callback. Also frees a session that already ended by itself
+/// (its file ran out). Returns 0, or -1 on failure.
+///
+/// # Safety
+/// `session` must come from `hk_listen_start` and not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn hk_listen_stop(session: *mut HkSession) -> c_int {
+    guard(-1, || {
+        if session.is_null() {
+            return Err("session is NULL".into());
+        }
+        let mut session = Box::from_raw(session);
+        let HkSession::Listen(listen) = &mut *session else {
+            return Err("not a listening session; use hk_record_stop".into());
+        };
+        match listen.stop() {
+            Ok(()) | Err(hushkey_core::Error::Stopped) => Ok(0),
+            Err(e) => Err(e.to_string()),
+        }
     })
 }
 
@@ -534,6 +726,15 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
                     (Some(transcript.text), transcript.language, 0, end),
                 )
             }
+            Event::SpeechStart { at_ms } => (HkEventKind::SpeechStart, (None, None, at_ms, at_ms)),
+            Event::Utterance {
+                transcript,
+                start_ms,
+                end_ms,
+            } => (
+                HkEventKind::Utterance,
+                (Some(transcript.text), transcript.language, start_ms, end_ms),
+            ),
             Event::Error { message } => (HkEventKind::Error, (Some(message), None, 0, 0)),
             Event::Stopped => (HkEventKind::Stopped, empty),
         };

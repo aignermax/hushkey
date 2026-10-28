@@ -21,6 +21,7 @@ jobs:
     env:
       HUSHKEY_TEST_MODEL: ${{ github.workspace }}/testdata/ggml-tiny.bin
       HUSHKEY_TEST_SPEECH: ${{ github.workspace }}/testdata/jfk.wav
+      HUSHKEY_TEST_VAD: ${{ github.workspace }}/testdata/ggml-silero-v5.1.2.bin
       # Real-model tests each load a model and decode on the CPU; in parallel
       # on a hosted runner's few cores a single preview outlasts any timeout.
       RUST_TEST_THREADS: "1"
@@ -51,6 +52,7 @@ jobs:
           mkdir -p testdata
           curl -sSfL -o testdata/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
           curl -sSfL -o testdata/jfk.wav https://raw.githubusercontent.com/ggml-org/whisper.cpp/927cfce34f31707e17f2bff35c349632fb9e2c3a/samples/jfk.wav
+          curl -sSfL -o testdata/ggml-silero-v5.1.2.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
 
       - name: Format
         if: runner.os == 'Linux'
@@ -70,4 +72,16 @@ jobs:
           cc -std=c99 -Wall -Wextra -Werror -Iinclude crates/hushkey-ffi/tests/c/smoke.c \
             -Ltarget/release -lhushkey -o target/smoke
           export LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release
-          target/smoke "$HUSHKEY_TEST_MODEL" "$HUSHKEY_TEST_SPEECH"
+          target/smoke "$HUSHKEY_TEST_MODEL" "$HUSHKEY_TEST_SPEECH" "$HUSHKEY_TEST_VAD"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: C host against include/hushkey.h (MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cargo build -p hushkey-ffi --release || exit /b 1
+          cl /nologo /W4 /WX /Iinclude crates/hushkey-ffi/tests/c/smoke.c /Fe:target/smoke.exe /Fo:target/smoke.obj target/release/hushkey.dll.lib || exit /b 1
+          set PATH=%CD%\target\release;%PATH%
+          target\smoke.exe "%HUSHKEY_TEST_MODEL%" "%HUSHKEY_TEST_SPEECH%" "%HUSHKEY_TEST_VAD%"

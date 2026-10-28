@@ -154,3 +154,69 @@ fn records_from_a_wav_and_reports_events_in_order() {
         hk_engine_free(engine);
     }
 }
+
+#[test]
+fn listens_to_a_wav_until_it_ends_and_reports_utterances() {
+    let (model, speech) = fixtures_or_skip!();
+    let Ok(vad) = std::env::var("HUSHKEY_TEST_VAD") else {
+        eprintln!("skipped: set HUSHKEY_TEST_VAD");
+        return;
+    };
+    unsafe {
+        let mut cfg: HkEngineConfig = std::mem::zeroed();
+        cfg.size = size_of::<HkEngineConfig>();
+        hk_engine_config_init(&mut cfg);
+        cfg.model = model.as_ptr();
+        cfg.language = c"en".as_ptr();
+        let vad = CString::new(vad).unwrap();
+        cfg.vad_model = vad.as_ptr();
+        let engine = hk_engine_new(&cfg);
+        assert!(!engine.is_null(), "{}", last_error());
+
+        let mut listen: HkListenConfig = std::mem::zeroed();
+        listen.size = size_of::<HkListenConfig>();
+        hk_listen_config_init(&mut listen);
+        assert_eq!(listen.end_silence_ms, 512); // 16 frames of 32 ms
+        listen.input_wav = speech.as_ptr();
+        listen.input_realtime = false;
+        let events: Box<Mutex<Vec<(HkEventKind, String)>>> = Box::default();
+        let user = &*events as *const _ as *mut c_void;
+        let session = hk_listen_start(engine, &listen, Some(collect), user);
+        assert!(!session.is_null(), "{}", last_error());
+        // The file ends the session by itself; wait for STOPPED, then free.
+        for _ in 0..300 {
+            if events.lock().unwrap().last().map(|e| e.0) == Some(HkEventKind::Stopped) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(hk_listen_stop(session), 0, "{}", last_error());
+        let events = events.lock().unwrap();
+        let text: String = events
+            .iter()
+            .filter(|e| e.0 == HkEventKind::Utterance)
+            .map(|e| e.1.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(text.matches("country").count(), 2, "{events:?}");
+        assert!(events.iter().any(|e| e.0 == HkEventKind::SpeechStart));
+        assert_eq!(events.last().map(|e| e.0), Some(HkEventKind::Stopped));
+
+        // A listening session is not a recording.
+        let session = hk_listen_start(engine, &listen, None, ptr::null_mut());
+        assert_eq!(hk_record_stop(session, ptr::null_mut()), -1);
+        assert!(last_error().contains("hk_listen_stop"));
+        hk_engine_free(engine);
+    }
+}
+
+#[test]
+fn listening_without_a_vad_model_is_refused() {
+    let (model, _) = fixtures_or_skip!();
+    unsafe {
+        let engine = engine(&model);
+        assert!(hk_listen_start(engine, ptr::null(), None, ptr::null_mut()).is_null());
+        assert!(last_error().contains("VAD"));
+        hk_engine_free(engine);
+    }
+}

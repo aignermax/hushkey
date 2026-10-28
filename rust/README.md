@@ -1,8 +1,9 @@
 # hushkey core (Rust)
 
 hushkey's speech recognition as a library: microphone capture, whisper.cpp
-transcription and push-to-talk sessions with a live preview, usable from Rust
-and, through a C ABI, from any language. The Python hushkey app in the
+transcription, push-to-talk sessions with a live preview and continuous
+listening that reports every utterance, usable from Rust and, through a C
+ABI, from any language. The Python hushkey app in the
 repository root is unaffected; see
 [the design](../docs/superpowers/specs/2026-10-28-rust-core-design.md).
 
@@ -10,7 +11,7 @@ repository root is unaffected; see
 | --- | --- |
 | `hushkey-core` | The library: `Engine`, `RecordSession`, audio inputs, model lookup |
 | `hushkey-ffi` | The C ABI (`hushkey.dll` / `libhushkey.so` / `.dylib`, static lib) and [`include/hushkey.h`](include/hushkey.h) |
-| `hushkey-cli` | `hushkey-cli transcribe file.wav`, `record`, `devices` |
+| `hushkey-cli` | `hushkey-cli transcribe file.wav`, `record`, `listen`, `devices` |
 
 ## Use it from C
 
@@ -34,6 +35,19 @@ char *text = NULL;
 hk_record_stop(s, &text);                 /* FINAL, then STOPPED */
 hk_string_free(text);
 hk_engine_free(engine);
+```
+
+Listening continuously instead of push-to-talk: load the engine with
+`cfg.vad_model = "silero"` (or a path), then
+
+```c
+HkListenConfig lis = {.size = sizeof lis};
+hk_listen_config_init(&lis);
+lis.end_silence_ms = 400;      /* pause that ends an utterance */
+lis.prompt = "weiter, zurück, Kanal";  /* words whisper should expect */
+HkSession *s = hk_listen_start(engine, &lis, on_event, NULL);
+/* HK_EVENT_KIND_SPEECH_START, PREVIEW..., UTTERANCE per sentence ... */
+hk_listen_stop(s);             /* the last utterance is finished first */
 ```
 
 Rules of the ABI (also in the header): every struct starts with `size`, so it

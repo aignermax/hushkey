@@ -16,6 +16,8 @@ use crate::error::{Error, Result};
 /// Below this level a recording is treated as "nothing was said": a muted
 /// or unplugged microphone. Matches the Python hushkey.
 const SILENT_RMS: f32 = 0.001;
+/// Samples per voice activity probability (Silero's window at 16 kHz).
+pub const VAD_FRAME: usize = 512;
 /// whisper.cpp rejects very short input; pad to at least this.
 const MIN_SAMPLES: usize = SAMPLE_RATE as usize + SAMPLE_RATE as usize / 10;
 
@@ -228,6 +230,22 @@ impl Engine {
                 })
                 .collect(),
         ))
+    }
+
+    /// Speech probability for each [`VAD_FRAME`] samples of `audio`, or
+    /// `None` without a VAD model. The detector starts fresh on every call,
+    /// so give it some context before the samples that matter.
+    pub fn speech_probabilities(&self, audio: &[f32]) -> Result<Option<Vec<f32>>> {
+        let Some(vad) = &self.vad else {
+            return Ok(None);
+        };
+        if audio.len() < VAD_FRAME {
+            return Ok(Some(Vec::new()));
+        }
+        let mut vad = vad.lock().unwrap_or_else(|p| p.into_inner());
+        vad.detect_speech(audio)
+            .map_err(|e| Error::Transcribe(format!("voice activity detection: {e}")))?;
+        Ok(Some(vad.probabilities().to_vec()))
     }
 
     /// Transcribe 16 kHz mono audio.

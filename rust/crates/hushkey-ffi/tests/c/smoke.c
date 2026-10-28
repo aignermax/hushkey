@@ -1,6 +1,6 @@
 /* A C host using include/hushkey.h: load a model, transcribe a file, record
- * from a WAV as if from a microphone. CI compiles it against the built
- * library. Usage: smoke <model> <speech.wav>
+ * from a WAV as if from a microphone, listen to it continuously. CI compiles
+ * it against the built library. Usage: smoke <model> <speech.wav> <vad>
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 
 #include "hushkey.h"
 
-static int finals, stops;
+static volatile int finals, stops, utterances;
 
 static void on_event(const HkEvent *event, void *user_data) {
     (void)user_data;
@@ -19,6 +19,14 @@ static void on_event(const HkEvent *event, void *user_data) {
     case HK_EVENT_KIND_FINAL:
         finals++;
         printf("final: %s\n", event->text);
+        break;
+    case HK_EVENT_KIND_SPEECH_START:
+        printf("speech at %lld ms\n", (long long)event->start_ms);
+        break;
+    case HK_EVENT_KIND_UTTERANCE:
+        utterances++;
+        printf("utterance [%lld-%lld ms]: %s\n", (long long)event->start_ms,
+               (long long)event->end_ms, event->text);
         break;
     case HK_EVENT_KIND_ERROR:
         printf("error: %s\n", event->text);
@@ -38,10 +46,11 @@ static int fail(const char *what) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <model> <speech.wav>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s <model> <speech.wav> <vad-model>\n", argv[0]);
         return 2;
     }
+    hk_process_init();
     if (hk_abi_version() != HK_ABI_VERSION) {
         fprintf(stderr, "ABI mismatch\n");
         return 1;
@@ -51,6 +60,7 @@ int main(int argc, char **argv) {
     hk_engine_config_init(&cfg);
     cfg.model = argv[1];
     cfg.language = "en";
+    cfg.vad_model = argv[3];
     HkEngine *engine = hk_engine_new(&cfg);
     if (!engine)
         return fail("hk_engine_new");
@@ -75,10 +85,25 @@ int main(int argc, char **argv) {
     /* Stopped at once: the replay may not have delivered everything, but
      * the session must still finish cleanly with exactly one final. */
     hk_string_free(final_text);
+
+    /* Listening to a file ends by itself when the file does. */
+    HkListenConfig lis = {.size = sizeof lis};
+    hk_listen_config_init(&lis);
+    lis.input_wav = argv[2];
+    lis.input_realtime = false;
+    stops = 0;
+    session = hk_listen_start(engine, &lis, on_event, NULL);
+    if (!session)
+        return fail("hk_listen_start");
+    while (stops == 0)
+        ; /* set from the library's thread */
+    if (hk_listen_stop(session) != 0)
+        return fail("hk_listen_stop");
     hk_engine_free(engine);
 
-    if (!ok || finals != 1 || stops != 1) {
-        fprintf(stderr, "unexpected result: ok=%d finals=%d stops=%d\n", ok, finals, stops);
+    if (!ok || finals != 1 || stops != 1 || utterances < 1) {
+        fprintf(stderr, "unexpected result: ok=%d finals=%d stops=%d utterances=%d\n", ok,
+                finals, stops, utterances);
         return 1;
     }
     puts("smoke ok");

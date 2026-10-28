@@ -22,6 +22,11 @@ enum HkEventKind
   HK_EVENT_KIND_PREVIEW = 1,
   // `text`, `language`, `end_ms`: the whole recording, after stop.
   HK_EVENT_KIND_FINAL = 2,
+  // Listening: someone started speaking at `start_ms`.
+  HK_EVENT_KIND_SPEECH_START = 3,
+  // Listening: `text`, `language`, `start_ms`, `end_ms` of one finished
+  // utterance.
+  HK_EVENT_KIND_UTTERANCE = 4,
   // `text`: what went wrong.
   HK_EVENT_KIND_ERROR = 7,
   // The session is over; nothing follows.
@@ -38,7 +43,7 @@ typedef uint32_t HkEventKind;
 // A loaded model. Thread-safe.
 typedef struct HkEngine HkEngine;
 
-// A recording in progress.
+// A recording or listening session in progress.
 typedef struct HkSession HkSession;
 
 // Settings for `hk_engine_new`. Initialize with `hk_engine_config_init`.
@@ -101,6 +106,36 @@ typedef struct {
 // Receives events. `event` and everything it points to are valid only
 // during the call.
 typedef void (*HkEventCallback)(const HkEvent *event, void *user_data);
+
+// Settings for `hk_listen_start`. Initialize with `hk_listen_config_init`.
+typedef struct {
+  // `sizeof(HkListenConfig)` as the caller knows it.
+  size_t size;
+  // A pause this long (ms) ends an utterance. Shorter reacts faster to
+  // commands; longer lets people pause mid-sentence.
+  uint32_t end_silence_ms;
+  // Speech must last this long (ms) to count (filters clicks, breaths).
+  uint32_t min_speech_ms;
+  // An utterance is cut after this long (ms) even without a pause.
+  uint32_t max_utterance_ms;
+  // Speech probability threshold, between 0 and 1.
+  float vad_threshold;
+  // Emit `HK_EVENT_KIND_PREVIEW` events while an utterance is spoken.
+  bool preview;
+  // Milliseconds between previews.
+  uint32_t preview_interval_ms;
+  // Overrides the engine's language; `"auto"` forces detection.
+  const char *language;
+  // Vocabulary or style hint passed to whisper (command words, names).
+  const char *prompt;
+  // Input device name; NULL for the default microphone.
+  const char *input_device;
+  // Listen to this WAV file instead of a microphone; the session ends by
+  // itself when the file does.
+  const char *input_wav;
+  // With `input_wav`: play it at real-time speed like a microphone.
+  bool input_realtime;
+} HkListenConfig;
 
 #ifdef __cplusplus
 extern "C" {
@@ -198,6 +233,34 @@ HkSession *hk_record_start(HkEngine *engine,
 // # Safety
 // `session` must come from `hk_record_start` and not be used afterwards.
 int hk_record_stop(HkSession *session, char **text_out);
+
+// Fill `cfg` with defaults. Set `cfg->size = sizeof *cfg` first.
+//
+// # Safety
+// `cfg` must point to a writable struct of at least `cfg->size` bytes.
+void hk_listen_config_init(HkListenConfig *cfg);
+
+// Start listening continuously: each utterance arrives as
+// `HK_EVENT_KIND_UTTERANCE`. The engine needs a VAD model
+// (`HkEngineConfig.vad_model`). Returns NULL on failure.
+//
+// # Safety
+// `engine` must be valid; `cfg` initialized or NULL for defaults;
+// `user_data` must stay valid until the `HK_EVENT_KIND_STOPPED` event.
+HkSession *hk_listen_start(HkEngine *engine,
+                           const HkListenConfig *cfg,
+                           HkEventCallback callback,
+                           void *user_data);
+
+// Stop listening and free the session. An utterance in progress is
+// transcribed and reported first, then `HK_EVENT_KIND_STOPPED`. Called from
+// inside the session's callback, it returns at once and the stop completes
+// after the callback. Also frees a session that already ended by itself
+// (its file ran out). Returns 0, or -1 on failure.
+//
+// # Safety
+// `session` must come from `hk_listen_start` and not be used afterwards.
+int hk_listen_stop(HkSession *session);
 
 #ifdef __cplusplus
 }  // extern "C"
