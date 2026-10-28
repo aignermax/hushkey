@@ -189,7 +189,8 @@ fn run(
                 beam_size: 1,
                 ..config.options.clone()
             };
-            match engine.transcribe_cancellable(&audio, &options, Some(&shared.stopping)) {
+            let stopping = || shared.stopping.load(Ordering::Relaxed);
+            match engine.transcribe_cancellable(&audio, &options, Some(&stopping)) {
                 Ok(t) if t.text != last_preview => {
                     last_preview = t.text.clone();
                     sink(Event::Preview { text: t.text });

@@ -19,9 +19,16 @@ use crate::event::{Event, EventSink};
 
 /// Frames the detector re-reads before the new ones: it starts fresh on
 /// every call and needs context to judge the first new frame.
-const CONTEXT_FRAMES: usize = 32; // ~1 s
-/// New frames gathered before the detector runs again (~100 ms).
-const HOP_FRAMES: usize = 3;
+const CONTEXT_FRAMES: usize = 16; // ~0.5 s
+/// New frames gathered before the detector runs again (~160 ms): each run
+/// re-reads the context, so a longer hop costs less, a shorter one reacts
+/// sooner to the end of an utterance.
+const HOP_FRAMES: usize = 5;
+/// A preview covers at most this many of the newest frames (~10 s), so it
+/// stays quick however long the utterance gets.
+const PREVIEW_MAX_FRAMES: usize = 312;
+/// Consecutive detector failures that end the session.
+const MAX_VAD_FAILURES: u32 = 5;
 
 #[derive(Clone, Debug)]
 pub struct ListenConfig {
@@ -209,6 +216,7 @@ struct Worker {
     endpointer: Endpointer,
     last_preview: Option<Instant>,
     preview_text: String,
+    vad_failures: u32,
 }
 
 fn ms(sample: usize) -> i64 {
@@ -222,6 +230,10 @@ impl Worker {
         sink: EventSink,
         shared: Arc<Shared>,
     ) -> Self {
+        let mut config = config;
+        // Utterances are already cut to speech; masking again with the
+        // detector's defaults would blank the pre-roll and drop short words.
+        config.options.keep_pauses = true;
         let endpointer = Endpointer::new(config.endpoint.clone());
         Worker {
             engine,
@@ -231,12 +243,13 @@ impl Worker {
             endpointer,
             last_preview: None,
             preview_text: String::new(),
+            vad_failures: 0,
         }
     }
 
     fn run(mut self, mut input: Box<dyn AudioInput>) {
         loop {
-            let (window, window_start, finishing) = {
+            let (window, window_start, finishing, errors) = {
                 let mut state = self.shared.lock();
                 let available = |s: &State| s.end() / VAD_FRAME;
                 while !state.stop
@@ -250,29 +263,35 @@ impl Worker {
                         .wait(state)
                         .unwrap_or_else(|p| p.into_inner());
                 }
-                for message in std::mem::take(&mut state.input_errors) {
-                    (self.sink)(Event::Error { message });
-                    state.stop = true;
-                }
-                let finishing = state.stop || state.input_ended;
+                let errors = std::mem::take(&mut state.input_errors);
+                let finishing = state.stop || state.input_ended || !errors.is_empty();
                 let first = self.endpointer.next_frame().saturating_sub(CONTEXT_FRAMES);
                 let window_start =
                     (first * VAD_FRAME).max(state.base.div_ceil(VAD_FRAME) * VAD_FRAME);
-                let window_end = available(&state) * VAD_FRAME;
-                (
-                    state.slice(window_start, window_end),
-                    window_start,
-                    finishing,
-                )
+                // At the end, the last partial frame is padded with silence
+                // rather than left unheard.
+                let window_end = if finishing {
+                    state.end().div_ceil(VAD_FRAME) * VAD_FRAME
+                } else {
+                    available(&state) * VAD_FRAME
+                };
+                let mut window = state.slice(window_start, window_end);
+                window.resize(window_end.saturating_sub(window_start), 0.0);
+                (window, window_start, finishing, errors)
             };
-            self.classify(&window, window_start / VAD_FRAME);
-            self.maybe_preview();
+            // Events go out with the lock released: the host may stop the
+            // session from its callback, which takes the lock.
+            for message in errors {
+                (self.sink)(Event::Error { message });
+            }
+            let finishing = self.classify(&window, window_start / VAD_FRAME) || finishing;
             if finishing {
                 if let Some(Boundary::Ended { start, end }) = self.endpointer.flush() {
                     self.finish_utterance(start, end);
                 }
                 break;
             }
+            self.maybe_preview();
             let keep = self.endpointer.keep_from().saturating_sub(CONTEXT_FRAMES) * VAD_FRAME;
             self.shared.lock().drop_before(keep);
         }
@@ -281,19 +300,33 @@ impl Worker {
     }
 
     /// Run the detector over `window` (starting at absolute frame `first`)
-    /// and feed the frames the endpointer has not seen yet.
-    fn classify(&mut self, window: &[f32], first: usize) {
+    /// and feed the frames the endpointer has not seen yet. Returns true when
+    /// the detector keeps failing and listening has to end.
+    fn classify(&mut self, window: &[f32], first: usize) -> bool {
+        let frames = window.len() / VAD_FRAME;
         let probabilities = match self.engine.speech_probabilities(window) {
-            Ok(Some(p)) => p,
-            Ok(None) => return,
+            Ok(Some(p)) => {
+                self.vad_failures = 0;
+                p
+            }
+            Ok(None) => return true,
             Err(e) => {
-                (self.sink)(Event::Error {
-                    message: e.to_string(),
-                });
-                return;
+                self.vad_failures += 1;
+                let fatal = self.vad_failures >= MAX_VAD_FAILURES;
+                if self.vad_failures == 1 || fatal {
+                    let message = if fatal {
+                        format!("{e}; listening stopped after {MAX_VAD_FAILURES} failures in a row")
+                    } else {
+                        e.to_string()
+                    };
+                    (self.sink)(Event::Error { message });
+                }
+                // Count the frames as silence so listening moves on instead
+                // of retrying the same audio forever.
+                vec![0.0; frames]
             }
         };
-        for (i, &p) in probabilities.iter().enumerate() {
+        for (i, &p) in probabilities.iter().enumerate().take(frames) {
             if first + i < self.endpointer.next_frame() {
                 continue; // context only
             }
@@ -309,6 +342,7 @@ impl Worker {
                 None => {}
             }
         }
+        self.vad_failures >= MAX_VAD_FAILURES
     }
 
     fn maybe_preview(&mut self) {
@@ -320,17 +354,21 @@ impl Worker {
             return;
         }
         self.last_preview = Some(Instant::now());
-        let audio = self
-            .shared
-            .lock()
-            .slice(start * VAD_FRAME, self.endpointer.next_frame() * VAD_FRAME);
+        let end = self.endpointer.next_frame();
+        let from = start.max(end.saturating_sub(PREVIEW_MAX_FRAMES));
+        let audio = self.shared.lock().slice(from * VAD_FRAME, end * VAD_FRAME);
         let options = TranscribeOptions {
             beam_size: 1,
             ..self.config.options.clone()
         };
+        // The detector waits while a preview decodes; one that overruns its
+        // budget is dropped so the end of the utterance is noticed in time.
+        let began = Instant::now();
+        let budget = self.config.preview_interval * 2;
+        let abort = || self.shared.stopping.load(Ordering::Relaxed) || began.elapsed() > budget;
         match self
             .engine
-            .transcribe_cancellable(&audio, &options, Some(&self.shared.stopping))
+            .transcribe_cancellable(&audio, &options, Some(&abort))
         {
             Ok(t) if !t.text.is_empty() && t.text != self.preview_text => {
                 self.preview_text = t.text.clone();

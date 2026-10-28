@@ -544,9 +544,14 @@ pub unsafe extern "C" fn hk_record_stop(
         if session.is_null() {
             return Err("session is NULL".into());
         }
+        // Check the kind before taking ownership: on a mix-up the session
+        // must stay intact for the right stop function.
+        if !matches!(&*session, HkSession::Record(_)) {
+            return Err("not a recording session; use hk_listen_stop".into());
+        }
         let mut session = Box::from_raw(session);
         let HkSession::Record(record) = &mut *session else {
-            return Err("not a recording session; use hk_listen_stop".into());
+            unreachable!()
         };
         let transcript = record.stop().map_err(|e| e.to_string())?;
         if let (Some(t), false) = (transcript, text_out.is_null()) {
@@ -695,9 +700,12 @@ pub unsafe extern "C" fn hk_listen_stop(session: *mut HkSession) -> c_int {
         if session.is_null() {
             return Err("session is NULL".into());
         }
+        if !matches!(&*session, HkSession::Listen(_)) {
+            return Err("not a listening session; use hk_record_stop".into());
+        }
         let mut session = Box::from_raw(session);
         let HkSession::Listen(listen) = &mut *session else {
-            return Err("not a listening session; use hk_record_stop".into());
+            unreachable!()
         };
         match listen.stop() {
             Ok(()) | Err(hushkey_core::Error::Stopped) => Ok(0),

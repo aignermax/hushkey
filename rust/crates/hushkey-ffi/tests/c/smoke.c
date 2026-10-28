@@ -2,13 +2,36 @@
  * from a WAV as if from a microphone, listen to it continuously. CI compiles
  * it against the built library. Usage: smoke <model> <speech.wav> <vad>
  */
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 199309L /* nanosleep */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "hushkey.h"
 
-static volatile int finals, stops, utterances;
+/* Counters written on the library's thread, read on the main thread. */
+#ifdef _MSC_VER
+#include <windows.h>
+typedef volatile LONG counter;
+#define BUMP(c) InterlockedIncrement(&(c))
+#define READ(c) InterlockedCompareExchange(&(c), 0, 0)
+#define RESET(c) InterlockedExchange(&(c), 0)
+static void sleep_ms(int ms) { Sleep((DWORD)ms); }
+#else
+#include <time.h>
+typedef int counter;
+#define BUMP(c) __atomic_add_fetch(&(c), 1, __ATOMIC_SEQ_CST)
+#define READ(c) __atomic_load_n(&(c), __ATOMIC_SEQ_CST)
+#define RESET(c) __atomic_store_n(&(c), 0, __ATOMIC_SEQ_CST)
+static void sleep_ms(int ms) {
+    struct timespec t = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    nanosleep(&t, NULL);
+}
+#endif
+
+static counter finals, stops, utterances;
 
 static void on_event(const HkEvent *event, void *user_data) {
     (void)user_data;
@@ -17,14 +40,14 @@ static void on_event(const HkEvent *event, void *user_data) {
         printf("preview: %s\n", event->text);
         break;
     case HK_EVENT_KIND_FINAL:
-        finals++;
+        BUMP(finals);
         printf("final: %s\n", event->text);
         break;
     case HK_EVENT_KIND_SPEECH_START:
         printf("speech at %lld ms\n", (long long)event->start_ms);
         break;
     case HK_EVENT_KIND_UTTERANCE:
-        utterances++;
+        BUMP(utterances);
         printf("utterance [%lld-%lld ms]: %s\n", (long long)event->start_ms,
                (long long)event->end_ms, event->text);
         break;
@@ -32,7 +55,7 @@ static void on_event(const HkEvent *event, void *user_data) {
         printf("error: %s\n", event->text);
         break;
     case HK_EVENT_KIND_STOPPED:
-        stops++;
+        BUMP(stops);
         break;
     default:
         break; /* kinds added by newer versions */
@@ -91,19 +114,24 @@ int main(int argc, char **argv) {
     hk_listen_config_init(&lis);
     lis.input_wav = argv[2];
     lis.input_realtime = false;
-    stops = 0;
+    RESET(stops);
     session = hk_listen_start(engine, &lis, on_event, NULL);
     if (!session)
         return fail("hk_listen_start");
-    while (stops == 0)
-        ; /* set from the library's thread */
+    for (int waited = 0; READ(stops) == 0; waited += 100) {
+        if (waited > 120000) {
+            fprintf(stderr, "listening never stopped\n");
+            return 1;
+        }
+        sleep_ms(100);
+    }
     if (hk_listen_stop(session) != 0)
         return fail("hk_listen_stop");
     hk_engine_free(engine);
 
-    if (!ok || finals != 1 || stops != 1 || utterances < 1) {
-        fprintf(stderr, "unexpected result: ok=%d finals=%d stops=%d utterances=%d\n", ok,
-                finals, stops, utterances);
+    if (!ok || READ(finals) != 1 || READ(stops) != 1 || READ(utterances) < 1) {
+        fprintf(stderr, "unexpected result: ok=%d finals=%ld stops=%ld utterances=%ld\n", ok,
+                (long)READ(finals), (long)READ(stops), (long)READ(utterances));
         return 1;
     }
     puts("smoke ok");

@@ -202,10 +202,12 @@ fn listens_to_a_wav_until_it_ends_and_reports_utterances() {
         assert!(events.iter().any(|e| e.0 == HkEventKind::SpeechStart));
         assert_eq!(events.last().map(|e| e.0), Some(HkEventKind::Stopped));
 
-        // A listening session is not a recording.
+        // A listening session is not a recording: the mix-up is refused and
+        // leaves the session intact for the right stop function.
         let session = hk_listen_start(engine, &listen, None, ptr::null_mut());
         assert_eq!(hk_record_stop(session, ptr::null_mut()), -1);
         assert!(last_error().contains("hk_listen_stop"));
+        assert_eq!(hk_listen_stop(session), 0, "{}", last_error());
         hk_engine_free(engine);
     }
 }

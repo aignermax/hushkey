@@ -159,3 +159,63 @@ fn listening_needs_a_vad_model() {
     .expect("refused");
     assert!(err.to_string().contains("VAD"), "{err}");
 }
+
+/// An input that fails right after starting, like an unplugged microphone.
+struct FailingInput;
+
+impl hushkey_core::AudioInput for FailingInput {
+    fn start(&mut self, mut sink: hushkey_core::AudioSink) -> hushkey_core::Result<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            (sink.on_error)("device unplugged".into());
+        });
+        Ok(())
+    }
+
+    fn stop(&mut self) {}
+}
+
+#[test]
+fn stopping_from_the_error_callback_does_not_deadlock() {
+    let (model, _, vad) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.vad_model = Some(vad);
+    let engine = Arc::new(Engine::new(config).unwrap());
+    let slot: Arc<std::sync::Mutex<Option<ListenSession>>> = Arc::default();
+    let (tx, rx) = mpsc::channel();
+    let in_callback = slot.clone();
+    let sink: EventSink = Arc::new(move |e| {
+        if matches!(e, Event::Error { .. }) {
+            if let Some(session) = in_callback.lock().unwrap().as_mut() {
+                session.stop().unwrap(); // the host's natural reaction
+            }
+        }
+        let _ = tx.send(e);
+    });
+    let session = ListenSession::start(
+        engine,
+        Box::new(FailingInput),
+        ListenConfig::default(),
+        sink,
+    )
+    .unwrap();
+    *slot.lock().unwrap() = Some(session);
+    let mut events = Vec::new();
+    while let Ok(e) = rx.recv_timeout(Duration::from_secs(30)) {
+        let done = e == Event::Stopped;
+        events.push(e);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(
+        events,
+        vec![
+            Event::Error {
+                message: "device unplugged".into()
+            },
+            Event::Stopped
+        ]
+    );
+    drop(slot.lock().unwrap().take());
+}

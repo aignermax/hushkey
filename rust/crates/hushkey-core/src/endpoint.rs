@@ -2,7 +2,9 @@
 //! probabilities, one per VAD frame.
 //!
 //! Hysteresis keeps a word's quiet syllables from splitting it: speech starts
-//! above `threshold` and only counts as stopped below `threshold - 0.15`.
+//! above `threshold` and only counts as stopped below `threshold - 0.15`
+//! (but never below half the threshold, so a low threshold still hears
+//! silence).
 
 use crate::engine::VAD_FRAME;
 
@@ -60,6 +62,8 @@ enum State {
     },
     Speaking {
         start: usize,
+        /// First speech frame, without the pre-roll.
+        onset: usize,
         last_speech: usize,
     },
 }
@@ -112,7 +116,7 @@ impl Endpointer {
         self.next_frame += 1;
         let c = &self.config;
         let speech = probability >= c.threshold;
-        let still_speech = probability >= c.threshold - 0.15;
+        let still_speech = probability >= (c.threshold - 0.15).max(c.threshold * 0.5);
         match self.state.clone() {
             State::Silent => {
                 if speech {
@@ -139,16 +143,27 @@ impl Endpointer {
                     None
                 }
             }
-            State::Speaking { start, last_speech } => {
+            State::Speaking {
+                start,
+                onset,
+                last_speech,
+            } => {
                 let last_speech = if still_speech { frame } else { last_speech };
                 let silence = frame - last_speech;
-                if silence >= c.end_silence_frames || frame + 1 - start >= c.max_utterance_frames {
+                // Measured from the onset: the pre-roll does not count, and a
+                // maximum shorter than the minimum speech is raised to it.
+                let max = c.max_utterance_frames.max(c.min_speech_frames + 1);
+                if silence >= c.end_silence_frames || frame + 1 - onset >= max {
                     self.state = State::Silent;
                     let end = (last_speech + 1 + c.post_roll_frames).min(frame + 1);
                     self.floor = end;
                     return Some(Boundary::Ended { start, end });
                 }
-                self.state = State::Speaking { start, last_speech };
+                self.state = State::Speaking {
+                    start,
+                    onset,
+                    last_speech,
+                };
                 None
             }
         }
@@ -162,6 +177,7 @@ impl Endpointer {
                     .max(self.floor);
                 self.state = State::Speaking {
                     start,
+                    onset: first,
                     last_speech: self.next_frame - 1,
                 };
                 return Some(Boundary::Started { start });
@@ -175,7 +191,9 @@ impl Endpointer {
     pub fn flush(&mut self) -> Option<Boundary> {
         let state = std::mem::replace(&mut self.state, State::Silent);
         match state {
-            State::Speaking { start, last_speech } => {
+            State::Speaking {
+                start, last_speech, ..
+            } => {
                 let end = (last_speech + 1 + self.config.post_roll_frames).min(self.next_frame);
                 Some(Boundary::Ended { start, end })
             }
@@ -282,6 +300,33 @@ mod tests {
                 (pair[0][1], pair[1][0])
             {
                 assert!(start >= end, "{b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_low_threshold_still_hears_silence() {
+        let mut c = config();
+        c.threshold = 0.1;
+        let probs: Vec<f32> = [vec![0.3; 4], vec![0.01; 6]].concat();
+        assert_eq!(
+            run(&probs, c),
+            vec![
+                Boundary::Started { start: 0 },
+                Boundary::Ended { start: 0, end: 5 }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_maximum_below_the_minimum_speech_does_not_chop_speech_into_crumbs() {
+        let mut c = config();
+        c.max_utterance_frames = 1; // pre-roll 2 + min speech 3 exceed it
+        let b = run(&[0.9; 12], c);
+        // pieces of at least min_speech + 1 frames, not one-frame crumbs
+        for pair in b.chunks(2) {
+            if let [Boundary::Started { .. }, Boundary::Ended { start, end }] = pair {
+                assert!(end - start >= 4, "{b:?}");
             }
         }
     }
