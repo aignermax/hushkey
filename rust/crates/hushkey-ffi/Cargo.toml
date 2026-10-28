@@ -1,0 +1,27 @@
+[package]
+name = "hushkey-ffi"
+description = "hushkey's C ABI: include/hushkey.h"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lib]
+# hushkey.dll / libhushkey.so / libhushkey.dylib, a static library, and an
+# rlib so the tests can call the C functions directly.
+name = "hushkey"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = []
+vulkan = ["hushkey-core/vulkan"]
+metal = ["hushkey-core/metal"]
+cuda = ["hushkey-core/cuda"]
+download = ["hushkey-core/download"]
+
+[dependencies]
+hushkey-core.workspace = true
+
+[dev-dependencies]
+cbindgen = "0.29"
