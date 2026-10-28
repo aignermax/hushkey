@@ -23,10 +23,11 @@ use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hushkey_brain::{Claudio, ClaudioConfig, OpenAiChat, OpenAiConfig};
 use hushkey_core::{
-    endpoint, model, read_wav_16k, AudioInput, Engine, EngineConfig, Event, EventSink,
-    ListenConfig, ListenSession, Microphone, RecordConfig, RecordSession, TranscribeOptions,
-    WavReplay, VAD_FRAME,
+    endpoint, model, read_wav_16k, AudioInput, Brain, CommandSet, Engine, EngineConfig, Event,
+    EventSink, ListenConfig, ListenSession, Microphone, RecordConfig, RecordSession,
+    TranscribeOptions, WavReplay, VAD_FRAME,
 };
 
 /// Version of this ABI. Additions keep the number; incompatible changes
@@ -106,6 +107,38 @@ pub struct HkListenConfig {
     pub input_wav: *const c_char,
     /// With `input_wav`: play it at real-time speed like a microphone.
     pub input_realtime: bool,
+    /// Voice commands as JSON (see hushkey-core's `commands` module):
+    /// `{"commands":[{"name":"channel","phrases":["kanal {n}"]}]}`. Matching
+    /// utterances are also reported as `HK_EVENT_KIND_COMMAND`, and the
+    /// command words become whisper's prompt unless `prompt` is set.
+    pub commands_json: *const c_char,
+    /// Who answers utterances that are no command (`HK_EVENT_KIND_REPLY`).
+    pub brain: HkBrainKind,
+    /// The brain's base URL, e.g. `https://192.168.1.112:8766` (Claudio on
+    /// the Thor) or `http://127.0.0.1:8080` (llama.cpp's server).
+    pub brain_url: *const c_char,
+    /// Claudio: the chat profile (NULL: the first offered). OpenAI: the
+    /// model name (required).
+    pub brain_model: *const c_char,
+    /// Bearer token: Claudio's team token or an API key; NULL for none.
+    pub brain_token: *const c_char,
+    /// Path to a PEM certificate to trust (Claudio's `server.pem`); NULL
+    /// trusts the usual public authorities only.
+    pub brain_ca_cert: *const c_char,
+    /// OpenAI-compatible brains: instructions sent first with every request.
+    pub brain_system_prompt: *const c_char,
+}
+
+/// Who answers what was said.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HkBrainKind {
+    /// Nobody: utterances are only reported.
+    None = 0,
+    /// Claudio, the Akhetonics lab assistant (`POST /v1/chat`).
+    Claudio = 1,
+    /// An OpenAI-compatible `/v1/chat/completions` server.
+    Openai = 2,
 }
 
 /// What an event reports. Newer library versions may add kinds; ignore any
@@ -122,6 +155,13 @@ pub enum HkEventKind {
     /// Listening: `text`, `language`, `start_ms`, `end_ms` of one finished
     /// utterance.
     Utterance = 4,
+    /// Listening: the utterance just reported is a command: `name`, `args`
+    /// (`n_args` slot values, numbers as digits), `confidence`, and the
+    /// utterance as `text`.
+    Command = 5,
+    /// Listening: the brain's answer as `text`, to the utterance in
+    /// `utterance`.
+    Reply = 6,
     /// `text`: what went wrong.
     Error = 7,
     /// The session is over; nothing follows.
@@ -142,6 +182,15 @@ pub struct HkEvent {
     pub start_ms: i64,
     /// End of the reported audio, in milliseconds from the session start.
     pub end_ms: i64,
+    /// Command name, or NULL.
+    pub name: *const c_char,
+    /// Command slot values, or NULL.
+    pub args: *const *const c_char,
+    pub n_args: usize,
+    /// How closely a command's words matched, 0..1.
+    pub confidence: f32,
+    /// For a reply: the utterance it answers. NULL otherwise.
+    pub utterance: *const c_char,
 }
 
 /// Receives events. `event` and everything it points to are valid only
@@ -603,6 +652,13 @@ pub unsafe extern "C" fn hk_listen_config_init(cfg: *mut HkListenConfig) {
     write_field!(cfg, HkListenConfig, input_device, ptr::null());
     write_field!(cfg, HkListenConfig, input_wav, ptr::null());
     write_field!(cfg, HkListenConfig, input_realtime, true);
+    write_field!(cfg, HkListenConfig, commands_json, ptr::null());
+    write_field!(cfg, HkListenConfig, brain, HkBrainKind::None);
+    write_field!(cfg, HkListenConfig, brain_url, ptr::null());
+    write_field!(cfg, HkListenConfig, brain_model, ptr::null());
+    write_field!(cfg, HkListenConfig, brain_token, ptr::null());
+    write_field!(cfg, HkListenConfig, brain_ca_cert, ptr::null());
+    write_field!(cfg, HkListenConfig, brain_system_prompt, ptr::null());
 }
 
 /// Start listening continuously: each utterance arrives as
@@ -678,6 +734,15 @@ pub unsafe extern "C" fn hk_listen_start(
                 Some(path) => Box::new(WavReplay::new(path, realtime)),
                 None => Box::new(Microphone::new(device)),
             };
+            if let Some(json) = opt_str(
+                read_field!(cfg, HkListenConfig, commands_json, ptr::null()),
+                "commands_json",
+            )? {
+                config.commands = Some(Arc::new(
+                    CommandSet::from_json(&json).map_err(|e| e.to_string())?,
+                ));
+            }
+            config.brain = brain(cfg)?;
         }
         let sink = event_sink(callback, user_data);
         let listen = ListenSession::start(engine.engine.clone(), input, config, sink)
@@ -714,47 +779,147 @@ pub unsafe extern "C" fn hk_listen_stop(session: *mut HkSession) -> c_int {
     })
 }
 
+/// The brain `cfg` asks for, if any.
+unsafe fn brain(cfg: *const HkListenConfig) -> Result<Option<Box<dyn Brain>>, String> {
+    // Read as the raw number: a host may pass a kind this version lacks.
+    let end = offset_of!(HkListenConfig, brain) + size_of::<u32>();
+    let kind = if (*cfg).size >= end {
+        ptr::addr_of!((*cfg).brain).cast::<u32>().read_unaligned()
+    } else {
+        0
+    };
+    if kind == HkBrainKind::None as u32 {
+        return Ok(None);
+    }
+    let text = |p: *const c_char, what: &str| opt_str(p, what);
+    let url = text(
+        read_field!(cfg, HkListenConfig, brain_url, ptr::null()),
+        "brain_url",
+    )?
+    .ok_or("brain_url is required")?;
+    let model = text(
+        read_field!(cfg, HkListenConfig, brain_model, ptr::null()),
+        "brain_model",
+    )?;
+    let token = text(
+        read_field!(cfg, HkListenConfig, brain_token, ptr::null()),
+        "brain_token",
+    )?;
+    let ca_cert_pem = match text(
+        read_field!(cfg, HkListenConfig, brain_ca_cert, ptr::null()),
+        "brain_ca_cert",
+    )? {
+        Some(path) => Some(std::fs::read(&path).map_err(|e| format!("brain_ca_cert {path}: {e}"))?),
+        None => None,
+    };
+    let system_prompt = text(
+        read_field!(cfg, HkListenConfig, brain_system_prompt, ptr::null()),
+        "brain_system_prompt",
+    )?;
+    let brain: Box<dyn Brain> = if kind == HkBrainKind::Claudio as u32 {
+        Box::new(Claudio::new(ClaudioConfig {
+            url,
+            profile_id: model,
+            token,
+            ca_cert_pem,
+        })?)
+    } else if kind == HkBrainKind::Openai as u32 {
+        Box::new(OpenAiChat::new(OpenAiConfig {
+            url,
+            model: model.ok_or("brain_model is required for an OpenAI-compatible brain")?,
+            api_key: token,
+            system_prompt,
+            max_history: 20,
+            ca_cert_pem,
+        })?)
+    } else {
+        return Err(format!("unknown brain kind {kind}"));
+    };
+    Ok(Some(brain))
+}
+
 struct UserData(*mut c_void);
 // The host promises user_data may be used from the library's thread.
 unsafe impl Send for UserData {}
 unsafe impl Sync for UserData {}
+
+fn c_string(s: &str) -> CString {
+    CString::new(s.replace('\0', " ")).unwrap_or_default()
+}
 
 fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
     let user = UserData(user_data);
     Arc::new(move |event: Event| {
         let Some(callback) = callback else { return };
         let user = &user;
-        let empty = (None::<String>, None::<String>, 0i64, 0i64);
-        let (kind, (text, language, start_ms, end_ms)) = match event {
-            Event::Preview { text } => (HkEventKind::Preview, (Some(text), None, 0, 0)),
-            Event::Final { transcript } => {
-                let end = transcript.segments.last().map_or(0, |s| s.end_ms);
-                (
-                    HkEventKind::Final,
-                    (Some(transcript.text), transcript.language, 0, end),
-                )
+        // Owned strings for this event; the C struct points into them.
+        let mut text = None;
+        let mut language = None;
+        let mut name = None;
+        let mut utterance = None;
+        let mut args: Vec<CString> = Vec::new();
+        let (mut start_ms, mut end_ms, mut confidence) = (0, 0, 0.0f32);
+        let kind = match event {
+            Event::Preview { text: t } => {
+                text = Some(c_string(&t));
+                HkEventKind::Preview
             }
-            Event::SpeechStart { at_ms } => (HkEventKind::SpeechStart, (None, None, at_ms, at_ms)),
+            Event::Final { transcript } => {
+                end_ms = transcript.segments.last().map_or(0, |s| s.end_ms);
+                text = Some(c_string(&transcript.text));
+                language = transcript.language.as_deref().map(c_string);
+                HkEventKind::Final
+            }
+            Event::SpeechStart { at_ms } => {
+                (start_ms, end_ms) = (at_ms, at_ms);
+                HkEventKind::SpeechStart
+            }
             Event::Utterance {
                 transcript,
-                start_ms,
-                end_ms,
-            } => (
-                HkEventKind::Utterance,
-                (Some(transcript.text), transcript.language, start_ms, end_ms),
-            ),
-            Event::Error { message } => (HkEventKind::Error, (Some(message), None, 0, 0)),
-            Event::Stopped => (HkEventKind::Stopped, empty),
+                start_ms: s,
+                end_ms: e,
+            } => {
+                (start_ms, end_ms) = (s, e);
+                text = Some(c_string(&transcript.text));
+                language = transcript.language.as_deref().map(c_string);
+                HkEventKind::Utterance
+            }
+            Event::Command { command, text: t } => {
+                text = Some(c_string(&t));
+                name = Some(c_string(&command.name));
+                args = command.args.iter().map(|a| c_string(a)).collect();
+                confidence = command.confidence;
+                HkEventKind::Command
+            }
+            Event::Reply { text: t, to } => {
+                text = Some(c_string(&t));
+                utterance = Some(c_string(&to));
+                HkEventKind::Reply
+            }
+            Event::Error { message } => {
+                text = Some(c_string(&message));
+                HkEventKind::Error
+            }
+            Event::Stopped => HkEventKind::Stopped,
         };
-        let text = text.map(|t| CString::new(t.replace('\0', " ")).unwrap_or_default());
-        let language = language.map(|l| CString::new(l.replace('\0', " ")).unwrap_or_default());
+        let arg_ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        let ptr_of = |s: &Option<CString>| s.as_ref().map_or(ptr::null(), |s| s.as_ptr());
         let event = HkEvent {
             size: size_of::<HkEvent>(),
             kind,
-            text: text.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
-            language: language.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+            text: ptr_of(&text),
+            language: ptr_of(&language),
             start_ms,
             end_ms,
+            name: ptr_of(&name),
+            args: if arg_ptrs.is_empty() {
+                ptr::null()
+            } else {
+                arg_ptrs.as_ptr()
+            },
+            n_args: arg_ptrs.len(),
+            confidence,
+            utterance: ptr_of(&utterance),
         };
         unsafe { callback(&event, user.0) };
     })

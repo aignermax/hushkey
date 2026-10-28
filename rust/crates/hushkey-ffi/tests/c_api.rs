@@ -5,6 +5,7 @@
 
 use std::ffi::{c_void, CStr, CString};
 use std::mem::size_of;
+use std::path::Path;
 use std::ptr;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -219,6 +220,147 @@ fn listening_without_a_vad_model_is_refused() {
         let engine = engine(&model);
         assert!(hk_listen_start(engine, ptr::null(), None, ptr::null_mut()).is_null());
         assert!(last_error().contains("VAD"));
+        hk_engine_free(engine);
+    }
+}
+
+/// A tiny OpenAI-compatible chat server answering every request with
+/// "it is late".
+fn chat_server() -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim_end().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("test-model"));
+            let reply = r#"{"choices":[{"message":{"role":"assistant","content":"it is late"}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+    });
+    url
+}
+
+unsafe extern "C" fn collect_commands(event: *const HkEvent, user: *mut c_void) {
+    let seen = &*(user as *const Mutex<Vec<String>>);
+    let e = &*event;
+    let text = |p: *const std::ffi::c_char| {
+        if p.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    };
+    let line = match e.kind {
+        HkEventKind::Command => {
+            let args: Vec<String> = (0..e.n_args).map(|i| text(*e.args.add(i))).collect();
+            format!(
+                "command {}({}) {:.1}",
+                text(e.name),
+                args.join(","),
+                e.confidence
+            )
+        }
+        HkEventKind::Reply => format!("reply {} <- {}", text(e.text), text(e.utterance)),
+        HkEventKind::Error => format!("error {}", text(e.text)),
+        HkEventKind::Stopped => "stopped".into(),
+        _ => return,
+    };
+    seen.lock().unwrap().push(line);
+}
+
+#[test]
+fn commands_and_an_openai_brain_through_the_c_api() {
+    let (model, _) = fixtures_or_skip!();
+    let Ok(vad) = std::env::var("HUSHKEY_TEST_VAD") else {
+        eprintln!("skipped: set HUSHKEY_TEST_VAD");
+        return;
+    };
+    let wav = CString::new(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../hushkey-core/tests/data/commands-de.wav")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let url = CString::new(chat_server()).unwrap();
+    unsafe {
+        let mut cfg: HkEngineConfig = std::mem::zeroed();
+        cfg.size = size_of::<HkEngineConfig>();
+        hk_engine_config_init(&mut cfg);
+        cfg.model = model.as_ptr();
+        cfg.language = c"de".as_ptr();
+        let vad = CString::new(vad).unwrap();
+        cfg.vad_model = vad.as_ptr();
+        let engine = hk_engine_new(&cfg);
+        assert!(!engine.is_null(), "{}", last_error());
+
+        let mut lis: HkListenConfig = std::mem::zeroed();
+        lis.size = size_of::<HkListenConfig>();
+        hk_listen_config_init(&mut lis);
+        assert_eq!(lis.brain, HkBrainKind::None);
+        lis.input_wav = wav.as_ptr();
+        lis.input_realtime = false;
+        let commands = cr#"{"commands":[{"name":"next","phrases":["weiter"]},{"name":"back","phrases":["zurück"]},{"name":"channel","phrases":["kanal {n}"]}]}"#;
+        lis.commands_json = commands.as_ptr();
+        lis.brain = HkBrainKind::Openai;
+        lis.brain_url = url.as_ptr();
+        lis.brain_model = c"test-model".as_ptr();
+        let seen: Box<Mutex<Vec<String>>> = Box::default();
+        let user = &*seen as *const _ as *mut c_void;
+        let session = hk_listen_start(engine, &lis, Some(collect_commands), user);
+        assert!(!session.is_null(), "{}", last_error());
+        for _ in 0..600 {
+            if seen.lock().unwrap().last().map(String::as_str) == Some("stopped") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(hk_listen_stop(session), 0, "{}", last_error());
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            &seen[..4],
+            [
+                "command next() 1.0",
+                "command channel(6) 1.0",
+                "command channel(21) 1.0",
+                "command back() 1.0"
+            ],
+            "{seen:?}"
+        );
+        assert!(
+            seen[4].starts_with("reply it is late <- ") && seen[4].to_lowercase().contains("spät"),
+            "{seen:?}"
+        );
+        assert_eq!(seen.last().map(String::as_str), Some("stopped"));
+
+        // A bad command set or brain is refused up front, with the reason.
+        lis.commands_json = c"{\"commands\": [{\"name\": \"x\", \"phrases\": [\"{n}\"]}]}".as_ptr();
+        assert!(hk_listen_start(engine, &lis, None, ptr::null_mut()).is_null());
+        assert!(last_error().contains("no words"), "{}", last_error());
+        lis.commands_json = ptr::null();
+        lis.brain_model = ptr::null();
+        assert!(hk_listen_start(engine, &lis, None, ptr::null_mut()).is_null());
+        assert!(last_error().contains("brain_model"), "{}", last_error());
         hk_engine_free(engine);
     }
 }

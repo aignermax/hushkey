@@ -36,9 +36,9 @@ jobs:
         with:
           workspaces: rust
 
-      - name: ALSA headers (cpal)
+      - name: ALSA (cpal) and OpenSSL (native TLS for brains) headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
 
       - name: libclang for whisper-rs bindgen (Windows)
         if: runner.os == 'Windows'

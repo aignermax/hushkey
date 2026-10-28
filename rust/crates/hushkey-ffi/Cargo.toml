@@ -22,6 +22,7 @@ download = ["hushkey-core/download"]
 
 [dependencies]
 hushkey-core.workspace = true
+hushkey-brain.workspace = true
 
 [dev-dependencies]
 cbindgen = "0.29"

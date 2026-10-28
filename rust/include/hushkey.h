@@ -27,6 +27,13 @@ enum HkEventKind
   // Listening: `text`, `language`, `start_ms`, `end_ms` of one finished
   // utterance.
   HK_EVENT_KIND_UTTERANCE = 4,
+  // Listening: the utterance just reported is a command: `name`, `args`
+  // (`n_args` slot values, numbers as digits), `confidence`, and the
+  // utterance as `text`.
+  HK_EVENT_KIND_COMMAND = 5,
+  // Listening: the brain's answer as `text`, to the utterance in
+  // `utterance`.
+  HK_EVENT_KIND_REPLY = 6,
   // `text`: what went wrong.
   HK_EVENT_KIND_ERROR = 7,
   // The session is over; nothing follows.
@@ -37,6 +44,27 @@ enum HkEventKind
 typedef enum HkEventKind HkEventKind;
 #else
 typedef uint32_t HkEventKind;
+#endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
+
+// Who answers what was said.
+enum HkBrainKind
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
+ {
+  // Nobody: utterances are only reported.
+  HK_BRAIN_KIND_NONE = 0,
+  // Claudio, the Akhetonics lab assistant (`POST /v1/chat`).
+  HK_BRAIN_KIND_CLAUDIO = 1,
+  // An OpenAI-compatible `/v1/chat/completions` server.
+  HK_BRAIN_KIND_OPENAI = 2,
+};
+#ifndef __cplusplus
+#if __STDC_VERSION__ >= 202311L
+typedef enum HkBrainKind HkBrainKind;
+#else
+typedef uint32_t HkBrainKind;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -101,6 +129,15 @@ typedef struct {
   int64_t start_ms;
   // End of the reported audio, in milliseconds from the session start.
   int64_t end_ms;
+  // Command name, or NULL.
+  const char *name;
+  // Command slot values, or NULL.
+  const char *const *args;
+  size_t n_args;
+  // How closely a command's words matched, 0..1.
+  float confidence;
+  // For a reply: the utterance it answers. NULL otherwise.
+  const char *utterance;
 } HkEvent;
 
 // Receives events. `event` and everything it points to are valid only
@@ -135,6 +172,26 @@ typedef struct {
   const char *input_wav;
   // With `input_wav`: play it at real-time speed like a microphone.
   bool input_realtime;
+  // Voice commands as JSON (see hushkey-core's `commands` module):
+  // `{"commands":[{"name":"channel","phrases":["kanal {n}"]}]}`. Matching
+  // utterances are also reported as `HK_EVENT_KIND_COMMAND`, and the
+  // command words become whisper's prompt unless `prompt` is set.
+  const char *commands_json;
+  // Who answers utterances that are no command (`HK_EVENT_KIND_REPLY`).
+  HkBrainKind brain;
+  // The brain's base URL, e.g. `https://192.168.1.112:8766` (Claudio on
+  // the Thor) or `http://127.0.0.1:8080` (llama.cpp's server).
+  const char *brain_url;
+  // Claudio: the chat profile (NULL: the first offered). OpenAI: the
+  // model name (required).
+  const char *brain_model;
+  // Bearer token: Claudio's team token or an API key; NULL for none.
+  const char *brain_token;
+  // Path to a PEM certificate to trust (Claudio's `server.pem`); NULL
+  // trusts the usual public authorities only.
+  const char *brain_ca_cert;
+  // OpenAI-compatible brains: instructions sent first with every request.
+  const char *brain_system_prompt;
 } HkListenConfig;
 
 #ifdef __cplusplus

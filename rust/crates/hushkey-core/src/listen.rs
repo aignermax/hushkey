@@ -3,15 +3,20 @@
 //! The voice activity detector runs over the newest audio every few frames;
 //! the [`Endpointer`] turns its probabilities into utterance boundaries, and
 //! each finished utterance is transcribed at once. While someone speaks,
-//! previews of the utterance so far follow.
+//! previews of the utterance so far follow. With a [`CommandSet`], an
+//! utterance that is a command is reported as one too; anything else goes
+//! to the [`Brain`], if there is one, whose answer follows as a reply.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use crate::audio::{AudioInput, AudioSink, SAMPLE_RATE};
+use crate::brain::Brain;
+use crate::commands::CommandSet;
 use crate::endpoint::{frames, Boundary, EndpointConfig, Endpointer};
 use crate::engine::{Engine, TranscribeOptions, VAD_FRAME};
 use crate::error::{Error, Result};
@@ -30,14 +35,18 @@ const PREVIEW_MAX_FRAMES: usize = 312;
 /// Consecutive detector failures that end the session.
 const MAX_VAD_FAILURES: u32 = 5;
 
-#[derive(Clone, Debug)]
 pub struct ListenConfig {
     pub endpoint: EndpointConfig,
     /// Emit [`Event::Preview`]s while an utterance is being spoken.
     pub preview: bool,
     pub preview_interval: Duration,
-    /// Settings for transcribing each utterance.
+    /// Settings for transcribing each utterance. Without a prompt of its
+    /// own, a command set's words become the prompt.
     pub options: TranscribeOptions,
+    /// Report utterances that are commands as [`Event::Command`] too.
+    pub commands: Option<Arc<CommandSet>>,
+    /// Answers every utterance that is no command ([`Event::Reply`]).
+    pub brain: Option<Box<dyn Brain>>,
 }
 
 impl Default for ListenConfig {
@@ -47,7 +56,22 @@ impl Default for ListenConfig {
             preview: true,
             preview_interval: Duration::from_secs(1),
             options: TranscribeOptions::accurate(),
+            commands: None,
+            brain: None,
         }
+    }
+}
+
+impl std::fmt::Debug for ListenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenConfig")
+            .field("endpoint", &self.endpoint)
+            .field("preview", &self.preview)
+            .field("preview_interval", &self.preview_interval)
+            .field("options", &self.options)
+            .field("commands", &self.commands)
+            .field("brain", &self.brain.is_some())
+            .finish()
     }
 }
 
@@ -68,6 +92,10 @@ struct State {
     stop: bool,
     input_ended: bool,
     input_errors: Vec<String>,
+    /// Answers from the brain thread: (utterance, reply or error).
+    replies: Vec<(String, std::result::Result<String, String>)>,
+    /// Utterances handed to the brain and not answered yet.
+    thinking: usize,
 }
 
 impl State {
@@ -146,6 +174,14 @@ impl ListenSession {
                 on_end.wake.notify_all();
             }),
         })?;
+        let mut config = config;
+        if config.options.prompt.is_none() {
+            config.options.prompt = config.commands.as_ref().map(|c| c.prompt());
+        }
+        let to_brain = match config.brain.take() {
+            None => None,
+            Some(brain) => Some(spawn_brain(brain, shared.clone())?),
+        };
         let worker_shared = shared.clone();
         let worker = std::thread::Builder::new()
             .name("hushkey-listen".into())
@@ -153,7 +189,7 @@ impl ListenSession {
                 let on_panic = sink.clone();
                 // The host waits for Stopped before freeing its state; a
                 // panic must still end with it.
-                let worker = Worker::new(engine, config, sink, worker_shared);
+                let worker = Worker::new(engine, config, sink, worker_shared, to_brain);
                 if catch_unwind(AssertUnwindSafe(|| worker.run(input))).is_err() {
                     on_panic(Event::Error {
                         message: "internal error: the listening thread panicked".into(),
@@ -171,7 +207,8 @@ impl ListenSession {
     }
 
     /// Stop listening. An utterance in progress is transcribed first, then
-    /// [`Event::Stopped`] follows. From inside the session's own callback
+    /// [`Event::Stopped`] follows; answers the brain is still working on are
+    /// dropped. From inside the session's own callback
     /// this returns at once and the stop completes after the callback.
     pub fn stop(&mut self) -> Result<()> {
         self.shared.stopping.store(true, Ordering::Relaxed);
@@ -188,8 +225,8 @@ impl ListenSession {
         }
     }
 
-    /// Block until the session ends by itself (a finite input ran out) or
-    /// is stopped from elsewhere.
+    /// Block until the session ends by itself (a finite input ran out, and
+    /// the brain answered everything) or is stopped from elsewhere.
     pub fn wait(&mut self) -> Result<()> {
         match self.worker.take() {
             None => Err(Error::Stopped),
@@ -208,6 +245,27 @@ impl Drop for ListenSession {
     }
 }
 
+/// Start the thread that asks the brain, one utterance at a time. It ends
+/// when the worker drops the sender.
+fn spawn_brain(mut brain: Box<dyn Brain>, shared: Arc<Shared>) -> Result<mpsc::Sender<String>> {
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::Builder::new()
+        .name("hushkey-brain".into())
+        .spawn(move || {
+            for utterance in rx {
+                let reply = catch_unwind(AssertUnwindSafe(|| brain.reply(&utterance)))
+                    .unwrap_or_else(|_| Err("internal error: the brain panicked".into()));
+                let mut state = shared.lock();
+                state.replies.push((utterance, reply));
+                state.thinking = state.thinking.saturating_sub(1);
+                drop(state);
+                shared.wake.notify_all();
+            }
+        })
+        .map_err(Error::Io)?;
+    Ok(tx)
+}
+
 struct Worker {
     engine: Arc<Engine>,
     config: ListenConfig,
@@ -217,6 +275,7 @@ struct Worker {
     last_preview: Option<Instant>,
     preview_text: String,
     vad_failures: u32,
+    to_brain: Option<mpsc::Sender<String>>,
 }
 
 fn ms(sample: usize) -> i64 {
@@ -229,6 +288,7 @@ impl Worker {
         config: ListenConfig,
         sink: EventSink,
         shared: Arc<Shared>,
+        to_brain: Option<mpsc::Sender<String>>,
     ) -> Self {
         let mut config = config;
         // Utterances are already cut to speech; masking again with the
@@ -244,17 +304,31 @@ impl Worker {
             last_preview: None,
             preview_text: String::new(),
             vad_failures: 0,
+            to_brain,
+        }
+    }
+
+    /// Report the brain's answers that arrived.
+    fn deliver_replies(&self, replies: Vec<(String, std::result::Result<String, String>)>) {
+        for (to, reply) in replies {
+            match reply {
+                Ok(text) => (self.sink)(Event::Reply { text, to }),
+                Err(message) => (self.sink)(Event::Error {
+                    message: format!("brain: {message}"),
+                }),
+            }
         }
     }
 
     fn run(mut self, mut input: Box<dyn AudioInput>) {
         loop {
-            let (window, window_start, finishing, errors) = {
+            let (window, window_start, finishing, errors, replies) = {
                 let mut state = self.shared.lock();
                 let available = |s: &State| s.end() / VAD_FRAME;
                 while !state.stop
                     && !state.input_ended
                     && state.input_errors.is_empty()
+                    && state.replies.is_empty()
                     && available(&state) < self.endpointer.next_frame() + HOP_FRAMES
                 {
                     state = self
@@ -277,8 +351,10 @@ impl Worker {
                 };
                 let mut window = state.slice(window_start, window_end);
                 window.resize(window_end.saturating_sub(window_start), 0.0);
-                (window, window_start, finishing, errors)
+                let replies = std::mem::take(&mut state.replies);
+                (window, window_start, finishing, errors, replies)
             };
+            self.deliver_replies(replies);
             // Events go out with the lock released: the host may stop the
             // session from its callback, which takes the lock.
             for message in errors {
@@ -289,6 +365,7 @@ impl Worker {
                 if let Some(Boundary::Ended { start, end }) = self.endpointer.flush() {
                     self.finish_utterance(start, end);
                 }
+                self.await_brain();
                 break;
             }
             self.maybe_preview();
@@ -389,14 +466,65 @@ impl Worker {
             // Breath, a cough, a door: the detector heard something, whisper
             // found no words.
             Ok(t) if t.text.is_empty() => {}
-            Ok(transcript) => (self.sink)(Event::Utterance {
-                transcript,
-                start_ms: ms(from),
-                end_ms: ms(to),
-            }),
+            Ok(transcript) => {
+                let text = transcript.text.clone();
+                (self.sink)(Event::Utterance {
+                    transcript,
+                    start_ms: ms(from),
+                    end_ms: ms(to),
+                });
+                self.dispatch(text);
+            }
             Err(e) => (self.sink)(Event::Error {
                 message: e.to_string(),
             }),
+        }
+    }
+
+    /// A command, or else a question for the brain.
+    fn dispatch(&mut self, text: String) {
+        if let Some(command) = self
+            .config
+            .commands
+            .as_ref()
+            .and_then(|c| c.match_text(&text))
+        {
+            (self.sink)(Event::Command { command, text });
+            return;
+        }
+        if let Some(tx) = &self.to_brain {
+            self.shared.lock().thinking += 1;
+            if tx.send(text).is_err() {
+                self.shared.lock().thinking -= 1;
+            }
+        }
+    }
+
+    /// At the end of a finite input, wait for the answers still coming so
+    /// they are reported before Stopped; a stop request drops them.
+    fn await_brain(&mut self) {
+        self.to_brain = None; // the brain thread ends after its last answer
+        loop {
+            let replies = {
+                let mut state = self.shared.lock();
+                while state.thinking > 0 && state.replies.is_empty() && !state.stop {
+                    state = self
+                        .shared
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(|p| p.into_inner());
+                }
+                if state.stop {
+                    return;
+                }
+                std::mem::take(&mut state.replies)
+            };
+            self.deliver_replies(replies);
+            if self.shared.lock().thinking == 0 {
+                let rest = std::mem::take(&mut self.shared.lock().replies);
+                self.deliver_replies(rest);
+                return;
+            }
         }
     }
 }

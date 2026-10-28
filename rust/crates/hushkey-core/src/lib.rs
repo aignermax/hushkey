@@ -8,6 +8,8 @@
 //! [`Event::Utterance`].
 
 mod audio;
+mod brain;
+pub mod commands;
 pub mod endpoint;
 mod engine;
 mod error;
@@ -20,6 +22,8 @@ mod session;
 pub use audio::{
     read_wav_16k, AudioInput, AudioSink, Microphone, SamplesFn, WavReplay, SAMPLE_RATE,
 };
+pub use brain::Brain;
+pub use commands::{CommandMatch, CommandSet};
 pub use endpoint::{EndpointConfig, Endpointer};
 pub use engine::{
     init_process, Engine, EngineConfig, Segment, TranscribeOptions, Transcript, VAD_FRAME,

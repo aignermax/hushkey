@@ -219,3 +219,80 @@ fn stopping_from_the_error_callback_does_not_deadlock() {
     );
     drop(slot.lock().unwrap().take());
 }
+
+/// Answers by repeating; records what it was asked.
+struct EchoBrain(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl hushkey_core::Brain for EchoBrain {
+    fn reply(&mut self, utterance: &str) -> Result<String, String> {
+        self.0.lock().unwrap().push(utterance.to_string());
+        std::thread::sleep(Duration::from_millis(300)); // thinking takes a while
+        Ok(format!("echo: {utterance}"))
+    }
+}
+
+#[test]
+fn spoken_commands_become_command_events_and_the_rest_goes_to_the_brain() {
+    let (model, _, vad) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.language = Some("de".into());
+    config.vad_model = Some(vad);
+    let engine = Arc::new(Engine::new(config).unwrap());
+    let commands = hushkey_core::CommandSet::from_json(
+        r#"{"commands": [
+            {"name": "next", "phrases": ["weiter"]},
+            {"name": "back", "phrases": ["zurück"]},
+            {"name": "channel", "phrases": ["kanal {n}"]}]}"#,
+    )
+    .unwrap();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listen = ListenConfig {
+        commands: Some(Arc::new(commands)),
+        brain: Some(Box::new(EchoBrain(asked.clone()))),
+        ..ListenConfig::default()
+    };
+    let (tx, rx) = mpsc::channel();
+    let sink: EventSink = Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let wav = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/commands-de.wav");
+    let mut session =
+        ListenSession::start(engine, Box::new(WavReplay::new(&wav, false)), listen, sink).unwrap();
+    session.wait().unwrap();
+    let events: Vec<Event> = rx.try_iter().collect();
+
+    let commands: Vec<(String, Vec<String>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Command { command, .. } => Some((command.name.clone(), command.args.clone())),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = vec![
+        ("next".into(), vec![]),
+        ("channel".into(), vec!["6".into()]),
+        ("channel".into(), vec!["21".into()]),
+        ("back".into(), vec![]),
+    ];
+    assert_eq!(commands, expected, "{events:#?}");
+    // Only the question went to the brain, and its answer came before Stopped.
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "{:?}",
+        asked.lock().unwrap()
+    );
+    let reply = events
+        .iter()
+        .position(|e| matches!(e, Event::Reply { text, .. } if text.to_lowercase().starts_with("echo: wie spät")));
+    assert!(reply.is_some(), "{events:#?}");
+    assert_eq!(events.last(), Some(&Event::Stopped));
+    // Every command follows the utterance it came from.
+    for (i, e) in events.iter().enumerate() {
+        if let Event::Command { text, .. } = e {
+            assert!(
+                matches!(&events[i - 1], Event::Utterance { transcript, .. } if &transcript.text == text)
+            );
+        }
+    }
+}
