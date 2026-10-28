@@ -97,6 +97,9 @@ pub struct Transcript {
     pub segments: Vec<Segment>,
     /// The language whisper decoded in, as an ISO code.
     pub language: Option<String>,
+    /// Whisper's highest probability, over the segments, that there was no
+    /// speech at all: noise it decoded anyway scores high.
+    pub no_speech: f32,
 }
 
 /// A loaded model. Thread-safe: calls from several threads are serialized.
@@ -357,7 +360,9 @@ impl Engine {
         result.map_err(|e| Error::Transcribe(e.to_string()))?;
         let duration_ms = (audio.len() as i64 * 1000) / SAMPLE_RATE as i64;
         let mut segments = Vec::new();
+        let mut no_speech = 0.0f32;
         for segment in state.as_iter() {
+            no_speech = no_speech.max(segment.no_speech_probability());
             let text = segment
                 .to_str_lossy()
                 .map_err(|e| Error::Transcribe(e.to_string()))?;
@@ -383,6 +388,7 @@ impl Engine {
             text,
             segments,
             language,
+            no_speech,
         })
     }
 }

@@ -224,10 +224,13 @@ fn stopping_from_the_error_callback_does_not_deadlock() {
 struct EchoBrain(Arc<std::sync::Mutex<Vec<String>>>);
 
 impl hushkey_core::Brain for EchoBrain {
-    fn reply(&mut self, utterance: &str) -> Result<String, String> {
+    fn reply(&mut self, utterance: &str) -> Result<hushkey_core::Reply, String> {
         self.0.lock().unwrap().push(utterance.to_string());
         std::thread::sleep(Duration::from_millis(300)); // thinking takes a while
-        Ok(format!("echo: {utterance}"))
+        Ok(hushkey_core::Reply {
+            text: format!("echo: {utterance}"),
+            details: None,
+        })
     }
 }
 
@@ -295,4 +298,57 @@ fn spoken_commands_become_command_events_and_the_rest_goes_to_the_brain() {
             );
         }
     }
+}
+
+/// Answers slowly; counts what it was asked.
+struct SlowBrain(Arc<std::sync::atomic::AtomicUsize>);
+
+impl hushkey_core::Brain for SlowBrain {
+    fn reply(&mut self, _utterance: &str) -> Result<hushkey_core::Reply, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        Ok(hushkey_core::Reply {
+            text: "ok".into(),
+            details: None,
+        })
+    }
+}
+
+#[test]
+fn after_a_stop_queued_utterances_no_longer_reach_the_brain() {
+    let (model, _, vad) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.language = Some("de".into());
+    config.vad_model = Some(vad);
+    let engine = Arc::new(Engine::new(config).unwrap());
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listen = ListenConfig {
+        brain: Some(Box::new(SlowBrain(asked.clone()))),
+        ..ListenConfig::default()
+    };
+    let (tx, rx) = mpsc::channel();
+    let sink: EventSink = Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let wav = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/commands-de.wav");
+    // Without commands all five utterances go to the brain, which is busy
+    // with the first one while the rest queue up.
+    let mut session =
+        ListenSession::start(engine, Box::new(WavReplay::new(&wav, false)), listen, sink).unwrap();
+    let mut utterances = 0;
+    while utterances < 5 {
+        let event = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("utterances");
+        if matches!(event, Event::Utterance { .. }) {
+            utterances += 1;
+        }
+    }
+    session.stop().unwrap();
+    std::thread::sleep(Duration::from_secs(4)); // long enough for two more answers
+    let asked = asked.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        asked <= 2,
+        "the brain was asked {asked} times after the stop"
+    );
 }

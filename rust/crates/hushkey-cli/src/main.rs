@@ -64,8 +64,10 @@ struct BrainArgs {
     /// System prompt for --openai.
     #[arg(long, requires = "openai")]
     system_prompt: Option<String>,
-    /// Bearer token: Claudio's team token or an API key.
-    #[arg(long, env = "HUSHKEY_BRAIN_TOKEN", hide_env_values = true)]
+    /// Bearer token (Claudio's team token or an API key), from the
+    /// HUSHKEY_BRAIN_TOKEN environment variable only: on the command line it
+    /// would show in the process list and the shell history.
+    #[arg(skip = std::env::var("HUSHKEY_BRAIN_TOKEN").ok())]
     token: Option<String>,
     /// PEM certificate to trust (Claudio's server.pem).
     #[arg(long)]
@@ -267,7 +269,12 @@ fn run(cli: Cli) -> Result<(), String> {
                         command.confidence
                     );
                 }
-                Event::Reply { text, .. } => println!("  ← {text}"),
+                Event::Reply { text, details, .. } => {
+                    println!("  ← {text}");
+                    if let Some(details) = details {
+                        println!("    (also proposed, not carried out: {details})");
+                    }
+                }
                 Event::Error { message } => eprintln!("\nerror: {message}"),
                 _ => {}
             });

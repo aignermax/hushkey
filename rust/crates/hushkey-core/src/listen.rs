@@ -15,12 +15,13 @@ use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use crate::audio::{AudioInput, AudioSink, SAMPLE_RATE};
-use crate::brain::Brain;
+use crate::brain::{Brain, Reply};
 use crate::commands::CommandSet;
 use crate::endpoint::{frames, Boundary, EndpointConfig, Endpointer};
 use crate::engine::{Engine, TranscribeOptions, VAD_FRAME};
 use crate::error::{Error, Result};
 use crate::event::{Event, EventSink};
+use crate::filter::is_non_speech;
 
 /// Frames the detector re-reads before the new ones: it starts fresh on
 /// every call and needs context to judge the first new frame.
@@ -34,6 +35,9 @@ const HOP_FRAMES: usize = 5;
 const PREVIEW_MAX_FRAMES: usize = 312;
 /// Consecutive detector failures that end the session.
 const MAX_VAD_FAILURES: u32 = 5;
+/// An utterance whisper rates more likely than this to be no speech is
+/// dropped (whisper.cpp's own no-speech threshold).
+const NO_SPEECH: f32 = 0.6;
 
 pub struct ListenConfig {
     pub endpoint: EndpointConfig,
@@ -93,7 +97,7 @@ struct State {
     input_ended: bool,
     input_errors: Vec<String>,
     /// Answers from the brain thread: (utterance, reply or error).
-    replies: Vec<(String, std::result::Result<String, String>)>,
+    replies: Vec<(String, std::result::Result<Reply, String>)>,
     /// Utterances handed to the brain and not answered yet.
     thinking: usize,
 }
@@ -253,6 +257,11 @@ fn spawn_brain(mut brain: Box<dyn Brain>, shared: Arc<Shared>) -> Result<mpsc::S
         .name("hushkey-brain".into())
         .spawn(move || {
             for utterance in rx {
+                // After a stop nothing more leaves the machine, not even
+                // utterances still queued.
+                if shared.stopping.load(Ordering::Relaxed) {
+                    break;
+                }
                 let reply = catch_unwind(AssertUnwindSafe(|| brain.reply(&utterance)))
                     .unwrap_or_else(|_| Err("internal error: the brain panicked".into()));
                 let mut state = shared.lock();
@@ -309,10 +318,10 @@ impl Worker {
     }
 
     /// Report the brain's answers that arrived.
-    fn deliver_replies(&self, replies: Vec<(String, std::result::Result<String, String>)>) {
+    fn deliver_replies(&self, replies: Vec<(String, std::result::Result<Reply, String>)>) {
         for (to, reply) in replies {
             match reply {
-                Ok(text) => (self.sink)(Event::Reply { text, to }),
+                Ok(Reply { text, details }) => (self.sink)(Event::Reply { text, to, details }),
                 Err(message) => (self.sink)(Event::Error {
                     message: format!("brain: {message}"),
                 }),
@@ -322,7 +331,7 @@ impl Worker {
 
     fn run(mut self, mut input: Box<dyn AudioInput>) {
         loop {
-            let (window, window_start, finishing, errors, replies) = {
+            let (window, window_start, finishing, errors, replies, idle) = {
                 let mut state = self.shared.lock();
                 let available = |s: &State| s.end() / VAD_FRAME;
                 while !state.stop
@@ -352,9 +361,16 @@ impl Worker {
                 let mut window = state.slice(window_start, window_end);
                 window.resize(window_end.saturating_sub(window_start), 0.0);
                 let replies = std::mem::take(&mut state.replies);
-                (window, window_start, finishing, errors, replies)
+                // Woken only by an answer: no new audio worth a detector run.
+                let idle = !finishing
+                    && errors.is_empty()
+                    && available(&state) < self.endpointer.next_frame() + HOP_FRAMES;
+                (window, window_start, finishing, errors, replies, idle)
             };
             self.deliver_replies(replies);
+            if idle {
+                continue;
+            }
             // Events go out with the lock released: the host may stop the
             // session from its callback, which takes the lock.
             for message in errors {
@@ -463,9 +479,11 @@ impl Worker {
         let audio = self.shared.lock().slice(from, to);
         self.last_preview = None;
         match self.engine.transcribe(&audio, &self.config.options) {
-            // Breath, a cough, a door: the detector heard something, whisper
-            // found no words.
-            Ok(t) if t.text.is_empty() => {}
+            // Breath, a cough, a door: the detector heard something, and
+            // whisper found no words, says itself it heard no speech, or
+            // wrote one of its noise phantoms ("[Musik]", subtitle
+            // credits). Such text must not fire a command or reach a brain.
+            Ok(t) if t.no_speech > NO_SPEECH || is_non_speech(&t.text) => {}
             Ok(transcript) => {
                 let text = transcript.text.clone();
                 (self.sink)(Event::Utterance {

@@ -160,7 +160,7 @@ pub enum HkEventKind {
     /// utterance as `text`.
     Command = 5,
     /// Listening: the brain's answer as `text`, to the utterance in
-    /// `utterance`.
+    /// `utterance`; `details` holds anything else it returned (JSON).
     Reply = 6,
     /// `text`: what went wrong.
     Error = 7,
@@ -191,6 +191,10 @@ pub struct HkEvent {
     pub confidence: f32,
     /// For a reply: the utterance it answers. NULL otherwise.
     pub utterance: *const c_char,
+    /// For a reply: whatever else the brain returned, as a JSON object
+    /// (Claudio's proposed experiment or desktop actions), or NULL. hushkey
+    /// does not act on it; the host may.
+    pub details: *const c_char,
 }
 
 /// Receives events. `event` and everything it points to are valid only
@@ -857,6 +861,7 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
         let mut language = None;
         let mut name = None;
         let mut utterance = None;
+        let mut details = None;
         let mut args: Vec<CString> = Vec::new();
         let (mut start_ms, mut end_ms, mut confidence) = (0, 0, 0.0f32);
         let kind = match event {
@@ -891,7 +896,12 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
                 confidence = command.confidence;
                 HkEventKind::Command
             }
-            Event::Reply { text: t, to } => {
+            Event::Reply {
+                text: t,
+                to,
+                details: d,
+            } => {
+                details = d.as_deref().map(c_string);
                 text = Some(c_string(&t));
                 utterance = Some(c_string(&to));
                 HkEventKind::Reply
@@ -920,6 +930,7 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
             n_args: arg_ptrs.len(),
             confidence,
             utterance: ptr_of(&utterance),
+            details: ptr_of(&details),
         };
         unsafe { callback(&event, user.0) };
     })

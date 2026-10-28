@@ -328,7 +328,8 @@ fn parse_numbers(tokens: &[String]) -> Vec<(u64, usize)> {
             out.push((n, 1));
         }
     }
-    for used in 1..=tokens.len().min(4) {
+    // "one hundred and twenty one" is five words.
+    for used in 1..=tokens.len().min(6) {
         if let Some(n) = english_number(&tokens[..used]) {
             out.push((n, used));
         }
@@ -525,6 +526,10 @@ mod tests {
         assert_eq!(
             matched("channel one hundred and five"),
             cmd("channel", &["105"])
+        );
+        assert_eq!(
+            matched("Channel one hundred and twenty one."),
+            cmd("channel", &["121"])
         );
         assert_eq!(matched("Channel 42"), cmd("channel", &["42"]));
     }

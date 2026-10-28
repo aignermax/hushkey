@@ -32,7 +32,7 @@ enum HkEventKind
   // utterance as `text`.
   HK_EVENT_KIND_COMMAND = 5,
   // Listening: the brain's answer as `text`, to the utterance in
-  // `utterance`.
+  // `utterance`; `details` holds anything else it returned (JSON).
   HK_EVENT_KIND_REPLY = 6,
   // `text`: what went wrong.
   HK_EVENT_KIND_ERROR = 7,
@@ -138,6 +138,10 @@ typedef struct {
   float confidence;
   // For a reply: the utterance it answers. NULL otherwise.
   const char *utterance;
+  // For a reply: whatever else the brain returned, as a JSON object
+  // (Claudio's proposed experiment or desktop actions), or NULL. hushkey
+  // does not act on it; the host may.
+  const char *details;
 } HkEvent;
 
 // Receives events. `event` and everything it points to are valid only

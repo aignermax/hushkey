@@ -23,8 +23,13 @@ pub enum Event {
     },
     /// Listening: the utterance just reported is a command.
     Command { command: CommandMatch, text: String },
-    /// Listening: the brain's answer to the utterance `to`.
-    Reply { text: String, to: String },
+    /// Listening: the brain's answer to the utterance `to`; `details` is
+    /// whatever else it returned, as JSON (proposed actions, say).
+    Reply {
+        text: String,
+        to: String,
+        details: Option<String>,
+    },
     /// Something went wrong; the session continues if it can.
     Error { message: String },
     /// The session is over; nothing follows.

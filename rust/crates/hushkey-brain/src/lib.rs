@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use hushkey_core::Brain;
+use hushkey_core::{Brain, Reply};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -50,28 +50,40 @@ fn base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-/// Post `body`, retrying while the server answers 429 (busy).
+/// How long a busy server (429) is waited for. Claudio answers one chat at
+/// a time, and a planning turn with tools can hold it for minutes.
+const BUSY_PATIENCE: Duration = Duration::from_secs(180);
+
+/// Post `body`, retrying while the server answers 429 (busy): honouring
+/// Retry-After, else backing off up to 10 s, for at most [`BUSY_PATIENCE`].
 fn post(
     agent: &ureq::Agent,
     url: &str,
     token: Option<&str>,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
     let mut wait = Duration::from_millis(500);
-    for attempt in 0.. {
+    loop {
         let mut request = agent.post(url);
         if let Some(token) = token {
             request = request.header("Authorization", &format!("Bearer {token}"));
         }
         let mut response = request.send_json(body).map_err(|e| format!("{url}: {e}"))?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|s| Duration::from_secs(s.min(30)));
         let text = response
             .body_mut()
             .read_to_string()
             .map_err(|e| format!("{url}: {e}"))?;
-        if status == 429 && attempt < 5 {
-            std::thread::sleep(wait);
-            wait *= 2;
+        if status == 429 && started.elapsed() < BUSY_PATIENCE {
+            std::thread::sleep(retry_after.unwrap_or(wait));
+            wait = (wait * 2).min(Duration::from_secs(10));
             continue;
         }
         if !(200..300).contains(&status) {
@@ -83,11 +95,15 @@ fn post(
         }
         return serde_json::from_str(&text).map_err(|e| format!("{url}: not JSON: {e}"));
     }
-    unreachable!()
+}
+
+/// `Some("<hidden>")` for a set secret: Debug output must not leak tokens.
+fn redacted(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "<hidden>")
 }
 
 /// Settings for [`Claudio`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ClaudioConfig {
     /// e.g. `https://192.168.1.112:8766` (the Thor) or
     /// `http://127.0.0.1:8766` (Claudio on this PC).
@@ -101,9 +117,33 @@ pub struct ClaudioConfig {
     pub ca_cert_pem: Option<Vec<u8>>,
 }
 
+impl std::fmt::Debug for ClaudioConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudioConfig")
+            .field("url", &self.url)
+            .field("profile_id", &self.profile_id)
+            .field("token", &redacted(&self.token))
+            .field("ca_cert_pem", &self.ca_cert_pem.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
 /// Claudio's limits on a chat request (LabService/operator_chat.py).
 const CLAUDIO_MAX_MESSAGES: usize = 16;
 const CLAUDIO_MAX_BYTES: usize = 24 * 1024;
+const CLAUDIO_MAX_MESSAGE_BYTES: usize = 4096;
+
+/// `text` cut to at most `max` UTF-8 bytes, on a character boundary.
+fn clip(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 pub struct Claudio {
     agent: ureq::Agent,
@@ -169,9 +209,10 @@ impl Claudio {
     /// last, alternating, at most 16 messages and 24 KiB, oldest dropped.
     fn request_messages(&self, utterance: &str) -> Vec<Message> {
         let mut messages = self.history.clone();
+        // Claudio refuses any single message over 4 KiB (a long dictation).
         messages.push(Message {
             role: "user",
-            content: utterance.to_string(),
+            content: clip(utterance, CLAUDIO_MAX_MESSAGE_BYTES).to_string(),
         });
         let bytes = |m: &[Message]| m.iter().map(|m| m.content.len()).sum::<usize>();
         while messages.len() > 1
@@ -184,7 +225,10 @@ impl Claudio {
 }
 
 impl Brain for Claudio {
-    fn reply(&mut self, utterance: &str) -> Result<String, String> {
+    fn reply(&mut self, utterance: &str) -> Result<Reply, String> {
+        if utterance.trim().is_empty() {
+            return Err("nothing to ask".into());
+        }
         let profile = self.profile()?;
         let messages = self.request_messages(utterance);
         let url = format!("{}/v1/chat", self.url);
@@ -194,22 +238,37 @@ impl Brain for Claudio {
             self.token.as_deref(),
             &json!({"profile_id": profile, "messages": messages}),
         )?;
-        let reply = response
-            .get("reply")
-            .and_then(|r| r.as_str())
-            .ok_or_else(|| format!("{url}: no reply in {response}"))?
-            .to_string();
+        let mut response = match response {
+            serde_json::Value::Object(map) => map,
+            other => return Err(format!("{url}: no reply in {other}")),
+        };
+        let reply = match response.remove("reply") {
+            Some(serde_json::Value::String(text)) => text,
+            _ => {
+                return Err(format!(
+                    "{url}: no reply in {}",
+                    serde_json::Value::Object(response)
+                ))
+            }
+        };
+        // Claudio may propose actions next to its text (an experiment, a
+        // desktop task) that hushkey does not run; the host gets them.
+        let details =
+            (!response.is_empty()).then(|| serde_json::Value::Object(response).to_string());
         self.history = messages;
         self.history.push(Message {
             role: "assistant",
-            content: reply.clone(),
+            content: clip(&reply, CLAUDIO_MAX_MESSAGE_BYTES).to_string(),
         });
-        Ok(reply)
+        Ok(Reply {
+            text: reply,
+            details,
+        })
     }
 }
 
 /// Settings for [`OpenAiChat`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct OpenAiConfig {
     /// Base URL without `/v1`, e.g. `http://127.0.0.1:8080` (llama.cpp),
     /// `http://127.0.0.1:11434` (Ollama), `https://api.openai.com`.
@@ -218,9 +277,22 @@ pub struct OpenAiConfig {
     pub api_key: Option<String>,
     /// Instructions sent first with every request.
     pub system_prompt: Option<String>,
-    /// Earlier messages kept as context.
+    /// Earlier messages kept as context, in user/assistant pairs (an odd
+    /// number is rounded down).
     pub max_history: usize,
     pub ca_cert_pem: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiConfig")
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .field("api_key", &redacted(&self.api_key))
+            .field("system_prompt", &self.system_prompt)
+            .field("max_history", &self.max_history)
+            .finish()
+    }
 }
 
 pub struct OpenAiChat {
@@ -244,8 +316,18 @@ impl OpenAiChat {
     }
 }
 
+impl OpenAiChat {
+    /// Drop the oldest pairs beyond `max_history`, keeping user/assistant
+    /// alternation: strict chat templates reject a leading assistant turn.
+    fn trim_history(&mut self) {
+        let keep = self.config.max_history / 2 * 2;
+        let excess = self.history.len().saturating_sub(keep);
+        self.history.drain(..excess / 2 * 2 + excess % 2 * 2);
+    }
+}
+
 impl Brain for OpenAiChat {
-    fn reply(&mut self, utterance: &str) -> Result<String, String> {
+    fn reply(&mut self, utterance: &str) -> Result<Reply, String> {
         let mut messages = Vec::new();
         if let Some(system) = &self.config.system_prompt {
             messages.push(Message {
@@ -253,8 +335,8 @@ impl Brain for OpenAiChat {
                 content: system.clone(),
             });
         }
-        let keep = self.history.len().saturating_sub(self.config.max_history);
-        messages.extend(self.history[keep..].iter().cloned());
+        self.trim_history();
+        messages.extend(self.history.iter().cloned());
         messages.push(Message {
             role: "user",
             content: utterance.to_string(),
@@ -278,9 +360,11 @@ impl Brain for OpenAiChat {
             role: "assistant",
             content: reply.clone(),
         });
-        let keep = self.history.len().saturating_sub(self.config.max_history);
-        self.history.drain(..keep);
-        Ok(reply)
+        self.trim_history();
+        Ok(Reply {
+            text: reply,
+            details: None,
+        })
     }
 }
 
@@ -360,8 +444,11 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(claudio.reply("Welche Geräte gibt es?").unwrap(), "answer 1");
-        assert_eq!(claudio.reply("Und das zweite?").unwrap(), "answer 2");
+        assert_eq!(
+            claudio.reply("Welche Geräte gibt es?").unwrap().text,
+            "answer 1"
+        );
+        assert_eq!(claudio.reply("Und das zweite?").unwrap().text, "answer 2");
         let requests: Vec<_> = seen.try_iter().collect();
         assert_eq!(requests[0].0, "/v1/profiles");
         assert_eq!(requests[0].2.as_deref(), Some("Bearer secret"));
@@ -394,7 +481,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(claudio.reply("x").unwrap(), "done");
+        assert_eq!(claudio.reply("x").unwrap().text, "done");
         let err = claudio.reply("y").unwrap_err();
         assert!(
             err.contains("400") && err.contains("invalid chat message"),
@@ -447,9 +534,9 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(chat.reply("a").unwrap(), "2 messages"); // system + user
-        assert_eq!(chat.reply("b").unwrap(), "4 messages"); // + one pair
-        assert_eq!(chat.reply("c").unwrap(), "4 messages"); // history capped at 2
+        assert_eq!(chat.reply("a").unwrap().text, "2 messages"); // system + user
+        assert_eq!(chat.reply("b").unwrap().text, "4 messages"); // + one pair
+        assert_eq!(chat.reply("c").unwrap().text, "4 messages"); // history capped at 2
         let (path, body, auth) = seen.try_iter().last().unwrap();
         assert_eq!(path, "/v1/chat/completions");
         assert_eq!(body["model"], "qwen");
@@ -467,5 +554,102 @@ mod tests {
         .err()
         .unwrap();
         assert!(err.contains("CA certificate"), "{err}");
+    }
+
+    #[test]
+    fn claudio_hands_over_proposed_actions_and_clips_long_messages() {
+        let (url, seen) = server(|_, _| {
+            (
+                200,
+                r#"{"reply":"Sending your request to Odyssey.","suite_action":{"kind":"open"}}"#
+                    .into(),
+            )
+        });
+        let mut claudio = Claudio::new(ClaudioConfig {
+            url,
+            profile_id: Some("p".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let long = "ä".repeat(3000); // 6000 bytes
+        let reply = claudio.reply(&long).unwrap();
+        assert_eq!(reply.text, "Sending your request to Odyssey.");
+        assert_eq!(
+            reply.details.as_deref(),
+            Some(r#"{"suite_action":{"kind":"open"}}"#)
+        );
+        let (_, body, _) = seen.try_iter().last().unwrap();
+        let sent = body["messages"][0]["content"].as_str().unwrap();
+        assert!(sent.len() <= CLAUDIO_MAX_MESSAGE_BYTES && sent.starts_with("ää"));
+        assert!(claudio.reply("   ").is_err());
+    }
+
+    #[test]
+    fn claudio_waits_as_long_as_retry_after_says() {
+        let mut calls = 0;
+        let (url, _) = server(move |_, _| {
+            calls += 1;
+            if calls < 3 {
+                (429, r#"{"error":"busy"}"#.into())
+            } else {
+                (200, r#"{"reply":"finally"}"#.into())
+            }
+        });
+        let mut claudio = Claudio::new(ClaudioConfig {
+            url,
+            profile_id: Some("p".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(claudio.reply("x").unwrap().text, "finally");
+    }
+
+    #[test]
+    fn openai_history_keeps_pairs_with_an_odd_limit() {
+        let (url, seen) = server(|_, _| {
+            (
+                200,
+                r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.into(),
+            )
+        });
+        let mut chat = OpenAiChat::new(OpenAiConfig {
+            url,
+            model: "m".into(),
+            max_history: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        for q in ["a", "b", "c", "d"] {
+            chat.reply(q).unwrap();
+        }
+        let (_, body, _) = seen.try_iter().last().unwrap();
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let claudio = format!(
+            "{:?}",
+            ClaudioConfig {
+                url: "u".into(),
+                token: Some("team-secret".into()),
+                ..Default::default()
+            }
+        );
+        let openai = format!(
+            "{:?}",
+            OpenAiConfig {
+                api_key: Some("sk-secret".into()),
+                ..Default::default()
+            }
+        );
+        assert!(!claudio.contains("team-secret") && claudio.contains("<hidden>"));
+        assert!(!openai.contains("sk-secret") && openai.contains("<hidden>"));
     }
 }
