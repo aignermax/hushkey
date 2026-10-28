@@ -1,8 +1,8 @@
 //! A loaded whisper.cpp model and the transcription call.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
 use whisper_rs::{
@@ -16,6 +16,8 @@ use crate::error::{Error, Result};
 /// Below this level a recording is treated as "nothing was said": a muted
 /// or unplugged microphone. Matches the Python hushkey.
 const SILENT_RMS: f32 = 0.001;
+/// Samples per voice activity probability (Silero's window at 16 kHz).
+pub const VAD_FRAME: usize = 512;
 /// whisper.cpp rejects very short input; pad to at least this.
 const MIN_SAMPLES: usize = SAMPLE_RATE as usize + SAMPLE_RATE as usize / 10;
 
@@ -58,6 +60,10 @@ pub struct TranscribeOptions {
     pub prompt: Option<String>,
     /// Beam search width; 0 or 1 decodes greedily (faster, for previews).
     pub beam_size: u32,
+    /// Transcribe pauses as they are instead of masking them with the VAD
+    /// model: for audio already cut to speech (listening), where a second
+    /// pass would blank its soft onsets and drop short words.
+    pub keep_pauses: bool,
 }
 
 impl TranscribeOptions {
@@ -130,9 +136,22 @@ pub unsafe fn init_process() {
     }
 }
 
-/// whisper.cpp's abort hook: `user` points to the caller's cancel flag.
+/// What whisper.cpp's abort hook consults: the caller's condition, and
+/// whether it ever answered yes (a condition like a deadline may turn true
+/// after decoding finished, which must not discard the result).
+struct AbortHook<'a> {
+    abort: &'a dyn Fn() -> bool,
+    fired: Cell<bool>,
+}
+
+/// whisper.cpp's abort hook: `user` points to an [`AbortHook`].
 unsafe extern "C" fn abort_requested(user: *mut c_void) -> bool {
-    (*(user as *const AtomicBool)).load(Ordering::Relaxed)
+    let hook = &*(user as *const AbortHook);
+    let abort = (hook.abort)();
+    if abort {
+        hook.fired.set(true);
+    }
+    abort
 }
 
 impl Engine {
@@ -230,23 +249,45 @@ impl Engine {
         ))
     }
 
+    /// Speech probability for each [`VAD_FRAME`] samples of `audio`, or
+    /// `None` without a VAD model. The detector starts fresh on every call,
+    /// so give it some context before the samples that matter.
+    pub fn speech_probabilities(&self, audio: &[f32]) -> Result<Option<Vec<f32>>> {
+        let Some(vad) = &self.vad else {
+            return Ok(None);
+        };
+        if audio.len() < VAD_FRAME {
+            return Ok(Some(Vec::new()));
+        }
+        let mut vad = vad.lock().unwrap_or_else(|p| p.into_inner());
+        vad.detect_speech(audio)
+            .map_err(|e| Error::Transcribe(format!("voice activity detection: {e}")))?;
+        Ok(Some(vad.probabilities().to_vec()))
+    }
+
     /// Transcribe 16 kHz mono audio.
     pub fn transcribe(&self, audio: &[f32], options: &TranscribeOptions) -> Result<Transcript> {
         self.transcribe_cancellable(audio, options, None)
     }
 
     /// [`Self::transcribe`], abandoned with [`Error::Cancelled`] soon after
-    /// `cancel` becomes true.
+    /// `abort` answers true (asked repeatedly while decoding: a stop flag,
+    /// a deadline).
     pub fn transcribe_cancellable(
         &self,
         audio: &[f32],
         options: &TranscribeOptions,
-        cancel: Option<&AtomicBool>,
+        abort: Option<&dyn Fn() -> bool>,
     ) -> Result<Transcript> {
         if audio.is_empty() || rms(audio) < SILENT_RMS {
             return Ok(Transcript::default());
         }
-        let mut input = match self.speech_regions(audio)? {
+        let regions = if options.keep_pauses {
+            None
+        } else {
+            self.speech_regions(audio)?
+        };
+        let mut input = match regions {
             None => audio.to_vec(),
             Some(regions) if regions.is_empty() => return Ok(Transcript::default()),
             Some(regions) => {
@@ -295,18 +336,22 @@ impl Engine {
         if let Some(tokens) = &prompt {
             params.set_tokens(tokens);
         }
-        if let Some(flag) = cancel {
-            // SAFETY: `flag` outlives `full` below, which is the only time
-            // whisper.cpp calls the hook.
+        let hook = abort.map(|abort| AbortHook {
+            abort,
+            fired: Cell::new(false),
+        });
+        if let Some(hook) = &hook {
+            // SAFETY: `hook` outlives `full` below, which is the only time
+            // whisper.cpp calls the hook, on this thread.
             unsafe {
                 params.set_abort_callback(Some(abort_requested));
-                params.set_abort_callback_user_data(flag as *const AtomicBool as *mut c_void);
+                params.set_abort_callback_user_data(hook as *const AbortHook as *mut c_void);
             }
         }
 
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let result = state.full(params, &input);
-        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if hook.is_some_and(|h| h.fired.get()) {
             return Err(Error::Cancelled);
         }
         result.map_err(|e| Error::Transcribe(e.to_string()))?;

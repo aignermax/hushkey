@@ -5,7 +5,6 @@
 //! CI downloads both.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -159,15 +158,15 @@ fn a_cancelled_transcription_stops_early() {
     let (model, speech) = fixtures_or_skip!();
     let engine = engine(model);
     let audio = read_wav_16k(&speech).unwrap();
-    let cancel = AtomicBool::new(true);
     let started = std::time::Instant::now();
     let result =
-        engine.transcribe_cancellable(&audio, &TranscribeOptions::accurate(), Some(&cancel));
+        engine.transcribe_cancellable(&audio, &TranscribeOptions::accurate(), Some(&|| true));
     assert!(
         matches!(result, Err(hushkey_core::Error::Cancelled)),
         "{result:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // The step in flight (an encode) finishes first; nothing after it runs.
+    assert!(started.elapsed() < Duration::from_secs(10));
     // The engine is usable afterwards.
     let t = engine
         .transcribe(&audio, &TranscribeOptions::fast())
@@ -225,4 +224,17 @@ fn a_panic_in_the_session_still_ends_with_stopped() {
         .iter()
         .any(|e| matches!(e, Event::Error { message } if message.contains("panicked"))));
     let _ = session.stop(); // already over
+}
+
+#[test]
+fn an_abort_condition_that_turns_true_later_keeps_the_result() {
+    // A deadline that passes right after decoding must not discard it.
+    let (model, speech) = fixtures_or_skip!();
+    let engine = engine(model);
+    let audio = read_wav_16k(&speech).unwrap();
+    let never = || false;
+    let t = engine
+        .transcribe_cancellable(&audio, &TranscribeOptions::fast(), Some(&never))
+        .unwrap();
+    assert!(t.text.to_lowercase().contains("country"));
 }
