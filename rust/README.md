@@ -22,6 +22,7 @@ static void on_event(const HkEvent *e, void *user) {
     if (e->kind == HK_EVENT_KIND_FINAL)   printf("%s\n", e->text);
 }
 
+hk_process_init();                        /* first, before other threads */
 HkEngineConfig cfg = {.size = sizeof cfg};
 hk_engine_config_init(&cfg);
 cfg.model = "large-v3-turbo";            /* or a path to a ggml-*.bin */
@@ -63,12 +64,15 @@ cargo build --release --features metal      # macOS
 cargo build --release --features cuda       # + CUDA toolkit
 ```
 
-A Vulkan build sets `VK_LOADER_LAYERS_DISABLE=~implicit~` for the process
-before the first model loads, unless the host set it or
-`WHISPER_CPP_ALLOW_LAYERS=1`: capture and overlay layers that inject
+On a Vulkan build, call `hk_process_init()` (Rust: `init_process()`) at
+program start, before other threads: it sets
+`VK_LOADER_LAYERS_DISABLE=~implicit~` unless the host set it or
+`WHISPER_CPP_ALLOW_LAYERS=1`. Capture and overlay layers that inject
 themselves into every Vulkan app stalled inference for minutes on an
-RX 7600 XT (2 s for 11 s of speech with large-v3-turbo without them).
-`HUSHKEY_WHISPER_LOG=1` shows whisper.cpp's own log on stderr.
+RX 7600 XT (2 s for 11 s of speech with large-v3-turbo without them). It is a
+separate call because changing the environment while other threads read it
+is undefined behaviour on Linux and macOS; a host can also set the variable
+itself. `HUSHKEY_WHISPER_LOG=1` shows whisper.cpp's own log on stderr.
 
 On Windows, build the Vulkan variant with a short `--target-dir` (e.g.
 `C:\hkt`): whisper.cpp's nested shader-generator build otherwise exceeds the

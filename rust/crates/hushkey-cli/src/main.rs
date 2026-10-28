@@ -70,6 +70,8 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // SAFETY: first thing in main, before any other thread exists.
+    unsafe { hushkey_core::init_process() };
     let cli = Cli::parse();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,

@@ -21,6 +21,9 @@ jobs:
     env:
       HUSHKEY_TEST_MODEL: ${{ github.workspace }}/testdata/ggml-tiny.bin
       HUSHKEY_TEST_SPEECH: ${{ github.workspace }}/testdata/jfk.wav
+      # Real-model tests each load a model and decode on the CPU; in parallel
+      # on a hosted runner's few cores a single preview outlasts any timeout.
+      RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 

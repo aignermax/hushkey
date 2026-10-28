@@ -14,6 +14,8 @@ pub enum Error {
     InvalidArgument(String),
     #[error("the session has already stopped")]
     Stopped,
+    #[error("cancelled")]
+    Cancelled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

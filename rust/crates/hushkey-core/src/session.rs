@@ -1,5 +1,7 @@
 //! Push-to-talk: record until stopped, with a live preview.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 use std::time::Duration;
@@ -43,6 +45,9 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     wake: Condvar,
+    /// Set by stop(); also aborts a preview transcription in flight, so the
+    /// final one is not delayed by it.
+    stopping: AtomicBool,
 }
 
 impl Shared {
@@ -69,6 +74,7 @@ impl RecordSession {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
+            stopping: AtomicBool::new(false),
         });
         let (for_samples, for_errors) = (shared.clone(), shared.clone());
         input.start(AudioSink {
@@ -86,7 +92,22 @@ impl RecordSession {
         let worker_shared = shared.clone();
         let worker = std::thread::Builder::new()
             .name("hushkey-record".into())
-            .spawn(move || run(engine, input, config, sink, worker_shared))
+            .spawn(move || {
+                let on_panic = sink.clone();
+                // The host waits for Stopped (it may have stopped from its
+                // callback and can only free its state then): a panic must
+                // still end with it.
+                catch_unwind(AssertUnwindSafe(|| {
+                    run(engine, input, config, sink, worker_shared)
+                }))
+                .unwrap_or_else(|_| {
+                    on_panic(Event::Error {
+                        message: "internal error: the recording thread panicked".into(),
+                    });
+                    on_panic(Event::Stopped);
+                    None
+                })
+            })
             .map_err(Error::Io)?;
         let worker_id = worker.thread().id();
         Ok(RecordSession {
@@ -101,10 +122,8 @@ impl RecordSession {
     /// from inside the session's own event callback: the stop then completes
     /// as soon as that callback returns.
     pub fn stop(&mut self) -> Result<Option<Transcript>> {
-        {
-            let mut state = self.shared.lock();
-            state.stop = true;
-        }
+        self.shared.stopping.store(true, Ordering::Relaxed);
+        self.shared.lock().stop = true;
         self.shared.wake.notify_all();
         if std::thread::current().id() == self.worker_id {
             return Ok(None);
@@ -166,18 +185,16 @@ fn run(
             break;
         }
         if let Some(audio) = snapshot {
-            match engine.transcribe(
-                &audio,
-                &TranscribeOptions {
-                    beam_size: 1,
-                    ..config.options.clone()
-                },
-            ) {
+            let options = TranscribeOptions {
+                beam_size: 1,
+                ..config.options.clone()
+            };
+            match engine.transcribe_cancellable(&audio, &options, Some(&shared.stopping)) {
                 Ok(t) if t.text != last_preview => {
                     last_preview = t.text.clone();
                     sink(Event::Preview { text: t.text });
                 }
-                Ok(_) => {}
+                Ok(_) | Err(Error::Cancelled) => {}
                 Err(e) => sink(Event::Error {
                     message: e.to_string(),
                 }),

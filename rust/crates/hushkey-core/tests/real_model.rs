@@ -5,6 +5,7 @@
 //! CI downloads both.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -141,7 +142,7 @@ fn stopping_from_inside_the_callback_does_not_deadlock() {
     let mut saw_final = false;
     loop {
         match rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(120))
             .expect("the session stops")
         {
             Event::Final { .. } => saw_final = true,
@@ -151,4 +152,77 @@ fn stopping_from_inside_the_callback_does_not_deadlock() {
     }
     assert!(saw_final);
     drop(slot.lock().unwrap().take()); // dropping after the stop is fine
+}
+
+#[test]
+fn a_cancelled_transcription_stops_early() {
+    let (model, speech) = fixtures_or_skip!();
+    let engine = engine(model);
+    let audio = read_wav_16k(&speech).unwrap();
+    let cancel = AtomicBool::new(true);
+    let started = std::time::Instant::now();
+    let result =
+        engine.transcribe_cancellable(&audio, &TranscribeOptions::accurate(), Some(&cancel));
+    assert!(
+        matches!(result, Err(hushkey_core::Error::Cancelled)),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // The engine is usable afterwards.
+    let t = engine
+        .transcribe(&audio, &TranscribeOptions::fast())
+        .unwrap();
+    assert!(t.text.to_lowercase().contains("country"));
+}
+
+#[test]
+fn a_prompt_is_honoured_and_reused() {
+    let (model, speech) = fixtures_or_skip!();
+    let engine = engine(model);
+    let audio = read_wav_16k(&speech).unwrap();
+    let options = TranscribeOptions {
+        prompt: Some("Kennedy, inaugural address.".into()),
+        ..TranscribeOptions::accurate()
+    };
+    for _ in 0..3 {
+        let t = engine.transcribe(&audio, &options).unwrap();
+        assert!(t.text.to_lowercase().contains("country"), "{:?}", t.text);
+    }
+}
+
+#[test]
+fn a_panic_in_the_session_still_ends_with_stopped() {
+    let (model, speech) = fixtures_or_skip!();
+    let (tx, rx) = mpsc::channel();
+    let sink: hushkey_core::EventSink = Arc::new(move |e| {
+        let preview = matches!(e, Event::Preview { .. });
+        let _ = tx.send(e);
+        if preview {
+            panic!("host callback bug");
+        }
+    });
+    let config = RecordConfig {
+        preview_interval: Duration::from_millis(300),
+        ..RecordConfig::default()
+    };
+    let mut session = RecordSession::start(
+        engine(model),
+        Box::new(WavReplay::new(speech, true)),
+        config,
+        sink,
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
+        let done = e == Event::Stopped;
+        events.push(e);
+        if done {
+            break;
+        }
+    }
+    assert_eq!(events.last(), Some(&Event::Stopped), "{events:?}");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Error { message } if message.contains("panicked"))));
+    let _ = session.stop(); // already over
 }

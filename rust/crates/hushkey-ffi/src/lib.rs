@@ -180,6 +180,20 @@ macro_rules! read_field {
     }};
 }
 
+/// [`read_field!`] for a `bool` field: reads the byte and tests it, since a
+/// host (C# marshaling, uninitialized memory) may store values other than
+/// 0 and 1, which are not valid Rust `bool`s.
+macro_rules! read_bool {
+    ($cfg:expr, $ty:ty, $field:ident, $default:expr) => {{
+        let end = offset_of!($ty, $field) + field_size(|c: &$ty| &c.$field);
+        if (*$cfg).size >= end {
+            ptr::addr_of!((*$cfg).$field).cast::<u8>().read_unaligned() != 0
+        } else {
+            $default
+        }
+    }};
+}
+
 /// Write `$value` to `$field` of `*$cfg` if the caller's struct holds it.
 macro_rules! write_field {
     ($cfg:expr, $ty:ty, $field:ident, $value:expr) => {{
@@ -188,6 +202,21 @@ macro_rules! write_field {
             ptr::addr_of_mut!((*$cfg).$field).write_unaligned($value);
         }
     }};
+}
+
+/// Prepare the process for hushkey. Call it once at program start, before
+/// other threads run and before the first `hk_engine_new`. On a Vulkan build
+/// it sets `VK_LOADER_LAYERS_DISABLE=~implicit~` (unless already set, or
+/// `WHISPER_CPP_ALLOW_LAYERS=1`): capture and overlay layers that inject
+/// themselves into every Vulkan program stalled inference for minutes on an
+/// AMD GPU. Hosts that cannot call it early can set the variable in their
+/// environment instead. Safe to skip on CPU, Metal and CUDA builds.
+///
+/// # Safety
+/// No other thread may read or write the environment during the call.
+#[no_mangle]
+pub unsafe extern "C" fn hk_process_init() {
+    hushkey_core::init_process();
 }
 
 /// The ABI version the library implements (`HK_ABI_VERSION`).
@@ -253,7 +282,7 @@ pub unsafe extern "C" fn hk_engine_new(cfg: *const HkEngineConfig) -> *mut HkEng
         )?
         .ok_or("model is required")?;
         let mut config = EngineConfig::new(resolve_model(&model_arg)?);
-        config.use_gpu = read_field!(cfg, HkEngineConfig, use_gpu, true);
+        config.use_gpu = read_bool!(cfg, HkEngineConfig, use_gpu, true);
         config.gpu_device = read_field!(cfg, HkEngineConfig, gpu_device, 0);
         config.threads = read_field!(cfg, HkEngineConfig, threads, 0) as usize;
         config.language = opt_str(
@@ -415,7 +444,7 @@ pub unsafe extern "C" fn hk_record_start(
         let mut input: Box<dyn AudioInput> = Box::new(Microphone::new(None));
         if !cfg.is_null() {
             let defaults = RecordConfig::default();
-            config.preview = read_field!(cfg, HkRecordConfig, preview, defaults.preview);
+            config.preview = read_bool!(cfg, HkRecordConfig, preview, defaults.preview);
             let interval = read_field!(cfg, HkRecordConfig, preview_interval_ms, 0);
             if interval > 0 {
                 config.preview_interval = Duration::from_millis(interval as u64);
@@ -440,7 +469,7 @@ pub unsafe extern "C" fn hk_record_start(
                 read_field!(cfg, HkRecordConfig, input_wav, ptr::null()),
                 "input_wav",
             )?;
-            let realtime = read_field!(cfg, HkRecordConfig, input_realtime, true);
+            let realtime = read_bool!(cfg, HkRecordConfig, input_realtime, true);
             input = match wav {
                 Some(path) => Box::new(WavReplay::new(path, realtime)),
                 None => Box::new(Microphone::new(device)),
@@ -520,4 +549,43 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
         };
         unsafe { callback(&event, user.0) };
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bool_byte_other_than_0_or_1_reads_as_true() {
+        for (byte, expected) in [(0u8, false), (1, true), (2, true), (0xFF, true)] {
+            let mut cfg: HkRecordConfig = unsafe { std::mem::zeroed() };
+            cfg.size = size_of::<HkRecordConfig>();
+            unsafe {
+                ptr::addr_of_mut!(cfg.preview).cast::<u8>().write(byte);
+                assert_eq!(
+                    read_bool!(
+                        &cfg as *const HkRecordConfig,
+                        HkRecordConfig,
+                        preview,
+                        false
+                    ),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bool_beyond_the_callers_size_gets_the_default() {
+        let mut cfg: HkRecordConfig = unsafe { std::mem::zeroed() };
+        cfg.size = offset_of!(HkRecordConfig, input_realtime);
+        unsafe {
+            assert!(read_bool!(
+                &cfg as *const HkRecordConfig,
+                HkRecordConfig,
+                input_realtime,
+                true
+            ));
+        }
+    }
 }

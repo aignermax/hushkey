@@ -1,7 +1,9 @@
 //! A loaded whisper.cpp model and the transcription call.
 
+use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::{Mutex, Once};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once};
 
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
@@ -93,34 +95,54 @@ pub struct Transcript {
 
 /// A loaded model. Thread-safe: calls from several threads are serialized.
 pub struct Engine {
-    _ctx: WhisperContext,
+    ctx: WhisperContext,
     state: Mutex<WhisperState>,
     vad: Option<Mutex<WhisperVadContext>>,
     config: EngineConfig,
+    /// The last prompt and its tokens: sessions reuse one prompt for every
+    /// call, and passing tokens (borrowed by whisper-rs) avoids the copy
+    /// `set_initial_prompt` leaks on each call.
+    prompt_tokens: Mutex<Option<(String, Arc<Vec<i32>>)>>,
 }
 
-static PROCESS_SETUP: Once = Once::new();
+static QUIET_LOGS: Once = Once::new();
+
+/// Prepare the process for hushkey; call it at program start, before other
+/// threads run and before the first [`Engine`] loads.
+///
+/// With the `vulkan` feature it sets `VK_LOADER_LAYERS_DISABLE=~implicit~`:
+/// capture and overlay layers that inject themselves into every Vulkan app
+/// stalled inference for minutes on an RX 7600 XT (2 s for 11 s of speech
+/// without them). The Vulkan loader reads the variable when whisper.cpp first
+/// creates its instance. A value the host already set, or
+/// `WHISPER_CPP_ALLOW_LAYERS=1` (as for the Python hushkey), is respected.
+/// It is a separate call because changing the environment while other
+/// threads may read it is undefined behaviour on Linux and macOS.
+///
+/// # Safety
+/// No other thread may read or write the environment during the call.
+pub unsafe fn init_process() {
+    #[cfg(feature = "vulkan")]
+    if std::env::var_os("VK_LOADER_LAYERS_DISABLE").is_none()
+        && std::env::var("WHISPER_CPP_ALLOW_LAYERS").as_deref() != Ok("1")
+    {
+        std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
+    }
+}
+
+/// whisper.cpp's abort hook: `user` points to the caller's cancel flag.
+unsafe extern "C" fn abort_requested(user: *mut c_void) -> bool {
+    (*(user as *const AtomicBool)).load(Ordering::Relaxed)
+}
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Engine> {
-        PROCESS_SETUP.call_once(|| {
+        QUIET_LOGS.call_once(|| {
             // whisper.cpp prints its model and backend details to stderr; a
             // library must not write to the host's console unless asked to
             // (HUSHKEY_WHISPER_LOG=1, for diagnosing a backend).
             if std::env::var_os("HUSHKEY_WHISPER_LOG").is_none() {
                 whisper_rs::install_logging_hooks();
-            }
-            // Capture/overlay layers injected into every Vulkan app stalled
-            // inference for minutes on an RX 7600 XT (0.05 s without them).
-            // The Vulkan loader reads this when whisper.cpp first creates its
-            // instance, so it must be set before the first model loads. A host
-            // that sets VK_LOADER_LAYERS_DISABLE itself, or opts out with
-            // WHISPER_CPP_ALLOW_LAYERS=1 like the Python hushkey, is respected.
-            #[cfg(feature = "vulkan")]
-            if std::env::var_os("VK_LOADER_LAYERS_DISABLE").is_none()
-                && std::env::var("WHISPER_CPP_ALLOW_LAYERS").as_deref() != Ok("1")
-            {
-                std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
             }
         });
         let model = config.model.to_str().ok_or_else(|| {
@@ -166,10 +188,11 @@ impl Engine {
             }
         };
         Ok(Engine {
-            _ctx: ctx,
+            ctx,
             state: Mutex::new(state),
             vad,
             config,
+            prompt_tokens: Mutex::new(None),
         })
     }
 
@@ -209,6 +232,17 @@ impl Engine {
 
     /// Transcribe 16 kHz mono audio.
     pub fn transcribe(&self, audio: &[f32], options: &TranscribeOptions) -> Result<Transcript> {
+        self.transcribe_cancellable(audio, options, None)
+    }
+
+    /// [`Self::transcribe`], abandoned with [`Error::Cancelled`] soon after
+    /// `cancel` becomes true.
+    pub fn transcribe_cancellable(
+        &self,
+        audio: &[f32],
+        options: &TranscribeOptions,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Transcript> {
         if audio.is_empty() || rms(audio) < SILENT_RMS {
             return Ok(Transcript::default());
         }
@@ -239,26 +273,43 @@ impl Engine {
             SamplingStrategy::Greedy { best_of: 1 }
         };
         let mut params = FullParams::new(strategy);
+        // None detects the language. whisper-rs copies a Some(..) into a
+        // string it never frees (a few bytes per call); detection costs
+        // nothing that way.
         let language = options
             .language
             .as_deref()
             .or(self.config.language.as_deref())
-            .unwrap_or("auto");
-        params.set_language(Some(language));
+            .filter(|l| !l.is_empty() && *l != "auto");
+        params.set_language(language);
         params.set_n_threads(threads(self.config.threads) as i32);
         params.set_no_context(true);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);
         params.set_print_timestamps(false);
-        if let Some(prompt) = options.prompt.as_deref().filter(|p| !p.is_empty()) {
-            params.set_initial_prompt(prompt);
+        let prompt = match options.prompt.as_deref().filter(|p| !p.is_empty()) {
+            Some(prompt) => Some(self.prompt_tokens(prompt)?),
+            None => None,
+        };
+        if let Some(tokens) = &prompt {
+            params.set_tokens(tokens);
+        }
+        if let Some(flag) = cancel {
+            // SAFETY: `flag` outlives `full` below, which is the only time
+            // whisper.cpp calls the hook.
+            unsafe {
+                params.set_abort_callback(Some(abort_requested));
+                params.set_abort_callback_user_data(flag as *const AtomicBool as *mut c_void);
+            }
         }
 
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state
-            .full(params, &input)
-            .map_err(|e| Error::Transcribe(e.to_string()))?;
+        let result = state.full(params, &input);
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(Error::Cancelled);
+        }
+        result.map_err(|e| Error::Transcribe(e.to_string()))?;
         let duration_ms = (audio.len() as i64 * 1000) / SAMPLE_RATE as i64;
         let mut segments = Vec::new();
         for segment in state.as_iter() {
@@ -288,6 +339,29 @@ impl Engine {
             segments,
             language,
         })
+    }
+}
+
+impl Engine {
+    fn prompt_tokens(&self, prompt: &str) -> Result<Arc<Vec<i32>>> {
+        let mut cache = self.prompt_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((text, tokens)) = cache.as_ref() {
+            if text == prompt {
+                return Ok(tokens.clone());
+            }
+        }
+        // whisper keeps at most half its text context of prompt, from the end.
+        let limit = (self.ctx.n_text_ctx() / 2).max(1) as usize;
+        let mut tokens = self
+            .ctx
+            .tokenize(prompt, prompt.len() + 16)
+            .map_err(|e| Error::InvalidArgument(format!("prompt: {e}")))?;
+        if tokens.len() > limit {
+            tokens.drain(..tokens.len() - limit);
+        }
+        let tokens = Arc::new(tokens);
+        *cache = Some((prompt.to_string(), tokens.clone()));
+        Ok(tokens)
     }
 }
 

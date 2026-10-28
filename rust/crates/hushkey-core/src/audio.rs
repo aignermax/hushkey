@@ -23,7 +23,9 @@ pub type SamplesFn = Box<dyn FnMut(&[f32]) + Send>;
 pub struct AudioSink {
     /// 16 kHz mono samples, in order, in blocks of any size.
     pub on_samples: SamplesFn,
-    /// The input failed; no more samples will follow.
+    /// The input failed for good (device unplugged, access revoked); no
+    /// more samples will follow. Glitches the input recovers from, such as
+    /// a buffer overrun or a rerouted default device, are not reported.
     pub on_error: Box<dyn FnMut(String) + Send>,
     /// A finite input (a file) delivered everything it had.
     pub on_end: Box<dyn FnOnce() + Send>,
@@ -154,24 +156,42 @@ fn open_stream(device_name: Option<String>, sink: AudioSink) -> Result<cpal::Str
         mut on_error,
         ..
     } = sink;
-    let err_fn = move |e: cpal::Error| on_error(e.to_string());
+    let err_fn = move |e: cpal::Error| {
+        if is_fatal(e.kind()) {
+            on_error(e.to_string());
+        }
+    };
+    macro_rules! stream {
+        ($t:ty) => {
+            build::<$t>(&device, config.into(), channels, rate, on_samples, err_fn)
+        };
+    }
     let stream = match config.sample_format() {
-        SampleFormat::F32 => {
-            build::<f32>(&device, config.into(), channels, rate, on_samples, err_fn)
-        }
-        SampleFormat::I16 => {
-            build::<i16>(&device, config.into(), channels, rate, on_samples, err_fn)
-        }
-        SampleFormat::I32 => {
-            build::<i32>(&device, config.into(), channels, rate, on_samples, err_fn)
-        }
-        SampleFormat::U16 => {
-            build::<u16>(&device, config.into(), channels, rate, on_samples, err_fn)
-        }
-        SampleFormat::I8 => build::<i8>(&device, config.into(), channels, rate, on_samples, err_fn),
+        SampleFormat::F32 => stream!(f32),
+        SampleFormat::F64 => stream!(f64),
+        SampleFormat::I8 => stream!(i8),
+        SampleFormat::I16 => stream!(i16),
+        SampleFormat::I24 => stream!(cpal::I24),
+        SampleFormat::I32 => stream!(i32),
+        SampleFormat::I64 => stream!(i64),
+        SampleFormat::U8 => stream!(u8),
+        SampleFormat::U16 => stream!(u16),
+        SampleFormat::U24 => stream!(cpal::U24),
+        SampleFormat::U32 => stream!(u32),
+        SampleFormat::U64 => stream!(u64),
         other => return Err(Error::Audio(format!("unsupported sample format {other}"))),
     };
     stream.map_err(|e| Error::Audio(e.to_string()))
+}
+
+/// Whether a stream error ends the input. cpal recovers from overruns
+/// (Xrun), a rerouted default device and a denied real-time priority by
+/// itself; the stream keeps delivering.
+fn is_fatal(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied
+    )
 }
 
 fn build<T>(
@@ -187,7 +207,9 @@ where
     f32: FromSample<T>,
 {
     let mut resampler = (rate != SAMPLE_RATE).then(|| Resampler::new(rate, SAMPLE_RATE));
-    let mut mono = Vec::new();
+    // Reused across callbacks: the real-time audio thread must not allocate
+    // once the buffers have grown to the block size.
+    let (mut mono, mut resampled) = (Vec::new(), Vec::new());
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -196,7 +218,11 @@ where
                 frame.iter().map(|&s| f32::from_sample(s)).sum::<f32>() / channels as f32
             }));
             match resampler.as_mut() {
-                Some(r) => on_samples(&r.process(&mono)),
+                Some(r) => {
+                    resampled.clear();
+                    r.process_into(&mono, &mut resampled);
+                    on_samples(&resampled);
+                }
                 None => on_samples(&mono),
             }
         },
@@ -335,6 +361,22 @@ mod tests {
             w.write_sample(s).unwrap();
         }
         w.finalize().unwrap();
+    }
+
+    #[test]
+    fn only_lasting_stream_errors_end_the_input() {
+        use cpal::ErrorKind::*;
+        for kind in [Xrun, DeviceChanged, RealtimeDenied] {
+            assert!(!is_fatal(kind), "{kind:?}");
+        }
+        for kind in [
+            DeviceNotAvailable,
+            StreamInvalidated,
+            PermissionDenied,
+            HostUnavailable,
+        ] {
+            assert!(is_fatal(kind), "{kind:?}");
+        }
     }
 
     #[test]

@@ -106,6 +106,18 @@ typedef void (*HkEventCallback)(const HkEvent *event, void *user_data);
 extern "C" {
 #endif // __cplusplus
 
+// Prepare the process for hushkey. Call it once at program start, before
+// other threads run and before the first `hk_engine_new`. On a Vulkan build
+// it sets `VK_LOADER_LAYERS_DISABLE=~implicit~` (unless already set, or
+// `WHISPER_CPP_ALLOW_LAYERS=1`): capture and overlay layers that inject
+// themselves into every Vulkan program stalled inference for minutes on an
+// AMD GPU. Hosts that cannot call it early can set the variable in their
+// environment instead. Safe to skip on CPU, Metal and CUDA builds.
+//
+// # Safety
+// No other thread may read or write the environment during the call.
+void hk_process_init(void);
+
 // The ABI version the library implements (`HK_ABI_VERSION`).
 uint32_t hk_abi_version(void);
 

@@ -8,9 +8,21 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-/// Repository and file of a named whisper model.
-pub fn whisper_model_file(name: &str) -> (&'static str, String) {
-    ("ggerganov/whisper.cpp", format!("ggml-{name}.bin"))
+/// Repository and file of a named whisper model. Names are letters,
+/// digits, `.`, `-` and `_` only, so a name can never point outside the
+/// model folders.
+pub fn whisper_model_file(name: &str) -> Result<(&'static str, String)> {
+    let valid = !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !valid {
+        return Err(Error::ModelNotFound(format!(
+            "{name} (neither a file nor a model name)"
+        )));
+    }
+    Ok(("ggerganov/whisper.cpp", format!("ggml-{name}.bin")))
 }
 
 /// Repository and file of the Silero voice activity model.
@@ -24,7 +36,7 @@ pub fn resolve_whisper_model(name_or_path: &str) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
-    let (repo, file) = whisper_model_file(name_or_path);
+    let (repo, file) = whisper_model_file(name_or_path)?;
     find_cached(repo, &file).ok_or_else(|| Error::ModelNotFound(name_or_path.to_string()))
 }
 
@@ -77,23 +89,60 @@ fn find_cached(repo: &str, file: &str) -> Option<PathBuf> {
 #[cfg(feature = "download")]
 pub fn ensure(repo: &str, file: &str) -> Result<PathBuf> {
     use std::io::Write;
+    use std::time::Duration;
     if let Some(found) = find_cached(repo, file) {
         return Ok(found);
     }
     let dir = model_dir();
     std::fs::create_dir_all(&dir)?;
     let target = dir.join(file);
-    let partial = dir.join(format!("{file}.part"));
+    // One partial file per download: two processes fetching the same model
+    // at once must not interleave their writes into one file.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let partial = dir.join(format!("{file}.{}-{stamp}.part", std::process::id()));
+    let failed =
+        |reason: String| Error::ModelNotFound(format!("{file}: download failed: {reason}"));
+    // No overall limit (a 1.6 GB model takes long on a slow line), but a
+    // connection that stops delivering is given up on.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_per_read(Some(Duration::from_secs(60)))
+        .build()
+        .into();
     let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
-    let response = ureq::get(&url)
-        .call()
-        .map_err(|e| Error::ModelNotFound(format!("{file}: download failed: {e}")))?;
-    let mut body = response.into_body().into_reader();
-    let mut out = std::fs::File::create(&partial)?;
-    std::io::copy(&mut body, &mut out)?;
-    out.flush()?;
-    drop(out);
-    std::fs::rename(&partial, &target)?;
+    let response = agent.get(&url).call().map_err(|e| failed(e.to_string()))?;
+    let expected: Option<u64> = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let result = (|| -> Result<()> {
+        let mut body = response.into_body().into_reader();
+        let mut out = std::fs::File::create(&partial)?;
+        let written = std::io::copy(&mut body, &mut out)?;
+        out.flush()?;
+        if expected.is_some_and(|n| n != written) {
+            return Err(failed(format!(
+                "got {written} of {} bytes",
+                expected.unwrap_or(0)
+            )));
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+    if target.is_file() {
+        // Another process finished the same download first.
+        let _ = std::fs::remove_file(&partial);
+    } else {
+        std::fs::rename(&partial, &target)?;
+    }
     Ok(target)
 }
 
@@ -103,7 +152,7 @@ pub fn ensure_whisper_model(name_or_path: &str) -> Result<PathBuf> {
     if Path::new(name_or_path).is_file() {
         return Ok(PathBuf::from(name_or_path));
     }
-    let (repo, file) = whisper_model_file(name_or_path);
+    let (repo, file) = whisper_model_file(name_or_path)?;
     ensure(repo, &file)
 }
 
@@ -123,6 +172,17 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert_eq!(resolve_whisper_model(file.to_str().unwrap()).unwrap(), file);
         std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn a_name_cannot_point_outside_the_model_folders() {
+        for name in ["../../x", "a/b", "a\\b", "..", ".hidden", "", "c:x"] {
+            assert!(whisper_model_file(name).is_err(), "{name:?}");
+        }
+        assert_eq!(
+            whisper_model_file("large-v3-turbo").unwrap().1,
+            "ggml-large-v3-turbo.bin"
+        );
     }
 
     #[test]

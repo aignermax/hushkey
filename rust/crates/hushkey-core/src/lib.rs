@@ -16,7 +16,7 @@ mod session;
 pub use audio::{
     read_wav_16k, AudioInput, AudioSink, Microphone, SamplesFn, WavReplay, SAMPLE_RATE,
 };
-pub use engine::{Engine, EngineConfig, Segment, TranscribeOptions, Transcript};
+pub use engine::{init_process, Engine, EngineConfig, Segment, TranscribeOptions, Transcript};
 pub use error::{Error, Result};
 pub use event::{Event, EventSink};
 pub use resample::Resampler;
