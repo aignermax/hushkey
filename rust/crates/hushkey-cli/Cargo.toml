@@ -1,0 +1,23 @@
+[package]
+name = "hushkey-cli"
+description = "Command line front end for hushkey's core: transcribe, record"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hushkey-cli"
+path = "src/main.rs"
+
+[features]
+default = ["download"]
+vulkan = ["hushkey-core/vulkan"]
+metal = ["hushkey-core/metal"]
+cuda = ["hushkey-core/cuda"]
+download = ["hushkey-core/download"]
+
+[dependencies]
+hushkey-core.workspace = true
+clap.workspace = true

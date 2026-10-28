@@ -1,0 +1,25 @@
+[package]
+name = "hushkey-core"
+description = "hushkey speech recognition: microphone capture, whisper.cpp transcription, sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# GPU backends of whisper.cpp; a plain build runs on the CPU and needs no SDK.
+vulkan = ["whisper-rs/vulkan"]
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+# Fetch missing GGML models from Hugging Face on first use.
+download = ["dep:ureq"]
+
+[dependencies]
+whisper-rs.workspace = true
+cpal.workspace = true
+hound.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+ureq = { workspace = true, optional = true }
