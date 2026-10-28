@@ -1,0 +1,38 @@
+[package]
+name = "hushkey-app"
+description = "hushkey as a desktop app on the Rust core: hold a key, speak, release"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hushkey"
+path = "src/main.rs"
+
+[features]
+default = ["download"]
+vulkan = ["hushkey-core/vulkan"]
+metal = ["hushkey-core/metal"]
+cuda = ["hushkey-core/cuda"]
+download = ["hushkey-core/download"]
+
+[dependencies]
+hushkey-core.workspace = true
+hushkey-brain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }
