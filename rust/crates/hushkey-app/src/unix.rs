@@ -61,6 +61,8 @@ pub fn stop(pids: &[i32]) {
 /// Whether a command line runs the Python hushkey: its tray.py or
 /// dictate.py, in its own folder (the installer's `whisper-ptt`, a clone
 /// named `hushkey`, or the .deb's `/opt/hushkey`).
+// macOS matches the same with a pgrep pattern (macos/setup.rs).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn is_python_hushkey(args: &[String]) -> bool {
     args.iter().any(|a| {
         (a.ends_with("/tray.py") || a.ends_with("/dictate.py"))
