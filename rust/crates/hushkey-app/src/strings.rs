@@ -21,6 +21,8 @@ pub struct Strings {
     pub history_empty: &'static str,
     /// `{paste}`: the system's paste keys.
     copied: &'static str,
+    /// Ctrl+V as this language writes it (macOS: always Cmd+V).
+    paste_keys: &'static str,
     pub listen: &'static str,
     autostart_windows: &'static str,
     autostart_login: &'static str,
@@ -49,10 +51,8 @@ impl Strings {
     pub fn copied(&self) -> String {
         let keys = if cfg!(target_os = "macos") {
             "Cmd+V"
-        } else if std::ptr::eq(self, &DE) {
-            "Strg+V"
         } else {
-            "Ctrl+V"
+            self.paste_keys
         };
         fill(self.copied, &[("paste", keys)])
     }
@@ -76,6 +76,7 @@ pub static EN: Strings = Strings {
     history_menu: "Recent dictations",
     history_empty: "(none yet)",
     copied: "copied — paste with {paste}",
+    paste_keys: "Ctrl+V",
     listen: "Continuous listening",
     autostart_windows: "Start with Windows",
     autostart_login: "Start at login",
@@ -108,6 +109,7 @@ pub static DE: Strings = Strings {
     history_menu: "Letzte Diktate",
     history_empty: "(noch keine)",
     copied: "kopiert — mit {paste} einfügen",
+    paste_keys: "Strg+V",
     listen: "Dauerzuhören",
     autostart_windows: "Mit Windows starten",
     autostart_login: "Beim Anmelden starten",
@@ -140,6 +142,7 @@ pub static IT: Strings = Strings {
     history_menu: "Dettature recenti",
     history_empty: "(ancora nessuna)",
     copied: "copiato — incolla con {paste}",
+    paste_keys: "Ctrl+V",
     listen: "Ascolto continuo",
     autostart_windows: "Avvia con Windows",
     autostart_login: "Avvia all'accesso",
@@ -172,9 +175,10 @@ pub static ES: Strings = Strings {
     history_menu: "Dictados recientes",
     history_empty: "(ninguno todavía)",
     copied: "copiado — pega con {paste}",
+    paste_keys: "Ctrl+V",
     listen: "Escucha continua",
     autostart_windows: "Iniciar con Windows",
-    autostart_login: "Iniciar al iniciar sesión",
+    autostart_login: "Abrir al iniciar sesión",
     open_logs: "Abrir registros",
     quit: "Salir",
     model_loading: "cargando {model} — la primera vez descarga {size}",
@@ -203,7 +207,8 @@ pub static FR: Strings = Strings {
     insert_type: "Taper (frappes)",
     history_menu: "Dictées récentes",
     history_empty: "(aucune pour l'instant)",
-    copied: "copié — coller avec {paste}",
+    copied: "copié — collez avec {paste}",
+    paste_keys: "Ctrl+V",
     listen: "Écoute continue",
     autostart_windows: "Démarrer avec Windows",
     autostart_login: "Démarrer à l'ouverture de session",
@@ -227,7 +232,7 @@ pub static ZH: Strings = Strings {
     hearing: "正在听你说 …",
     failed: "错误",
     model_menu: "模型",
-    key_menu: "按键说话",
+    key_menu: "按住说话键",
     lang_menu: "语言",
     lang_auto: "自动检测",
     insert_menu: "插入方式",
@@ -236,6 +241,7 @@ pub static ZH: Strings = Strings {
     history_menu: "最近的听写",
     history_empty: "（暂无）",
     copied: "已复制 — 用 {paste} 粘贴",
+    paste_keys: "Ctrl+V",
     listen: "持续聆听",
     autostart_windows: "随 Windows 启动",
     autostart_login: "登录时启动",
@@ -268,6 +274,7 @@ pub static KN: Strings = Strings {
     history_menu: "ಇತ್ತೀಚಿನ ಡಿಕ್ಟೇಶನ್‌ಗಳು",
     history_empty: "(ಇನ್ನೂ ಇಲ್ಲ)",
     copied: "ನಕಲಿಸಲಾಗಿದೆ — {paste} ಮೂಲಕ ಅಂಟಿಸಿ",
+    paste_keys: "Ctrl+V",
     listen: "ನಿರಂತರ ಆಲಿಸುವಿಕೆ",
     autostart_windows: "Windows ಜೊತೆ ಪ್ರಾರಂಭಿಸಿ",
     autostart_login: "ಲಾಗಿನ್ ಆದಾಗ ಪ್ರಾರಂಭಿಸಿ",
@@ -283,65 +290,114 @@ pub static KN: Strings = Strings {
 };
 
 /// The words for a language code (`de`, `de-AT`, `zh_CN.UTF-8`, `kn`);
-/// English for any language without its own.
-pub fn for_language(code: &str) -> &'static Strings {
-    let primary: String = code
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    match primary.as_str() {
-        "de" => &DE,
-        "it" => &IT,
-        "es" => &ES,
-        "fr" => &FR,
-        "zh" => &ZH,
-        "kn" => &KN,
-        _ => &EN,
+/// English for any language without its own. Chinese means the simplified
+/// script: Traditional Chinese (Taiwan, Hong Kong, Macau, `Hant`) gets
+/// English rather than the wrong script.
+pub fn for_language(code: &str) -> Option<&'static Strings> {
+    let code = code.trim();
+    let primary = code
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    let is = |name: &str| primary.eq_ignore_ascii_case(name);
+    if is("zh") {
+        let upper = code.to_ascii_uppercase();
+        let traditional = ["HANT", "TW", "HK", "MO"].iter().any(|tag| {
+            upper
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|t| t == *tag)
+        });
+        return (!traditional).then_some(&ZH);
+    }
+    [
+        ("en", &EN),
+        ("de", &DE),
+        ("it", &IT),
+        ("es", &ES),
+        ("fr", &FR),
+        ("kn", &KN),
+    ]
+    .into_iter()
+    .find(|(name, _)| is(name))
+    .map(|(_, strings)| strings)
+}
+
+/// The words in the system's language: the first of its preferred
+/// languages that has them, else English.
+pub fn current() -> &'static Strings {
+    system_languages()
+        .iter()
+        .find_map(|code| for_language(code))
+        .unwrap_or(&EN)
+}
+
+/// The user's UI languages in order of preference, e.g. `de-DE`
+/// (names, not LCIDs: language packs may have no LCID).
+#[cfg(windows)]
+fn system_languages() -> Vec<String> {
+    use windows_sys::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    let (mut count, mut len) = (0u32, 0u32);
+    unsafe {
+        if GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            std::ptr::null_mut(),
+            &mut len,
+        ) == 0
+        {
+            return Vec::new();
+        }
+        let mut buf = vec![0u16; len as usize];
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, buf.as_mut_ptr(), &mut len)
+            == 0
+        {
+            return Vec::new();
+        }
+        // A double-null-terminated list.
+        buf.split(|&c| c == 0)
+            .filter(|name| !name.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect()
     }
 }
 
-/// The words in the system's language.
-pub fn current() -> &'static Strings {
-    for_language(&system_language())
-}
-
-/// The UI language's code, e.g. `de-DE`.
-#[cfg(windows)]
-fn system_language() -> String {
-    use windows_sys::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
-    let mut name = [0u16; 85];
-    let n = unsafe {
-        LCIDToLocaleName(
-            GetUserDefaultUILanguage() as u32,
-            name.as_mut_ptr(),
-            name.len() as i32,
-            0,
-        )
-    };
-    String::from_utf16_lossy(&name[..(n.max(1) - 1) as usize])
-}
-
-/// The first of LANGUAGE (a list of preferences), LC_ALL, LC_MESSAGES and
-/// LANG that is set, e.g. `de_DE.UTF-8`.
+/// As gettext reads the environment: the locale is the first of LC_ALL,
+/// LC_MESSAGES and LANG that is set; unless it is C/POSIX, LANGUAGE (a
+/// colon-separated list) comes first.
 #[cfg(target_os = "linux")]
-fn system_language() -> String {
-    ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+fn system_languages() -> Vec<String> {
+    linux_languages(|v| std::env::var(v).ok())
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_languages(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
-        .filter_map(|v| std::env::var(v).ok())
+        .filter_map(|v| env(v))
         .find(|v| !v.is_empty())
+        .unwrap_or_default();
+    let base = locale.split(['.', '@']).next().unwrap_or("");
+    if base.is_empty() || base == "C" || base == "POSIX" {
+        return Vec::new();
+    }
+    let mut languages: Vec<String> = env("LANGUAGE")
         .unwrap_or_default()
+        .split(':')
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    languages.push(locale);
+    languages
 }
 
 #[cfg(target_os = "macos")]
-fn system_language() -> String {
-    crate::platform::preferred_language()
+fn system_languages() -> Vec<String> {
+    crate::platform::preferred_languages()
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn system_language() -> String {
-    String::new()
+fn system_languages() -> Vec<String> {
+    Vec::new()
 }
 
 /// (model name, download size) for the Model menu, as in the Python app.
@@ -402,25 +458,47 @@ mod tests {
             "lade tiny — beim ersten Mal werden ~75 MB heruntergeladen"
         );
     }
-}
-
-#[cfg(test)]
-mod language_tests {
-    use super::*;
 
     #[test]
     fn the_system_language_picks_the_words() {
-        assert!(std::ptr::eq(for_language("de-DE"), &DE));
-        assert!(std::ptr::eq(for_language("de_AT.UTF-8"), &DE));
-        assert!(std::ptr::eq(for_language("it-IT"), &IT));
-        assert!(std::ptr::eq(for_language("es-419"), &ES));
-        assert!(std::ptr::eq(for_language("fr_CA"), &FR));
-        assert!(std::ptr::eq(for_language("zh-Hans-CN"), &ZH));
-        assert!(std::ptr::eq(for_language("kn-IN"), &KN));
-        assert!(std::ptr::eq(for_language("de:en"), &DE)); // LANGUAGE list
-        for other in ["en-US", "pt-BR", "ja", "", "C"] {
-            assert!(std::ptr::eq(for_language(other), &EN), "{other}");
+        let pick = |code: &str| for_language(code).map(|s| s as *const Strings);
+        assert_eq!(pick("de-DE"), Some(&DE as *const _));
+        assert_eq!(pick("de_AT.UTF-8"), Some(&DE as *const _));
+        assert_eq!(pick("it-IT"), Some(&IT as *const _));
+        assert_eq!(pick("es-419"), Some(&ES as *const _));
+        assert_eq!(pick("fr_CA"), Some(&FR as *const _));
+        assert_eq!(pick("zh-Hans-CN"), Some(&ZH as *const _));
+        assert_eq!(pick("zh_CN.UTF-8"), Some(&ZH as *const _));
+        assert_eq!(pick("kn-IN"), Some(&KN as *const _));
+        assert_eq!(pick("en-US"), Some(&EN as *const _));
+        for traditional in ["zh-TW", "zh-Hant-HK", "zh_HK.UTF-8", "zh-MO"] {
+            assert_eq!(pick(traditional), None, "{traditional}");
         }
+        for other in ["pt-BR", "ja", "", "C"] {
+            assert_eq!(pick(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn linux_reads_the_environment_like_gettext() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |v: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == v)
+                    .map(|(_, x)| x.to_string())
+            }
+        };
+        assert_eq!(
+            linux_languages(env(&[("LANGUAGE", "pt_BR:de"), ("LANG", "en_US.UTF-8")])),
+            ["pt_BR", "de", "en_US.UTF-8"]
+        );
+        // C ignores LANGUAGE, as gettext does.
+        assert!(linux_languages(env(&[("LANGUAGE", "de"), ("LANG", "C.UTF-8")])).is_empty());
+        assert_eq!(
+            linux_languages(env(&[("LC_ALL", "fr_FR.UTF-8"), ("LANG", "de_DE.UTF-8")])),
+            ["fr_FR.UTF-8"]
+        );
     }
 
     #[test]
@@ -430,6 +508,9 @@ mod language_tests {
             assert!(s.update_install.contains("{version}"));
             assert!(!s.copied().contains('{'));
         }
-        assert!(DE.copied().contains("Strg+V") || cfg!(target_os = "macos"));
+        if !cfg!(target_os = "macos") {
+            assert!(DE.copied().contains("Strg+V"));
+            assert!(EN.copied().contains("Ctrl+V"));
+        }
     }
 }
