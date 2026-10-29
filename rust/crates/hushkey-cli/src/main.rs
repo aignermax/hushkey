@@ -6,9 +6,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
+use hushkey_brain::{Claudio, ClaudioConfig, OpenAiChat, OpenAiConfig};
 use hushkey_core::{
-    model, read_wav_16k, AudioInput, Engine, EngineConfig, Event, EventSink, ListenConfig,
-    ListenSession, Microphone, RecordConfig, RecordSession, TranscribeOptions, WavReplay,
+    model, read_wav_16k, AudioInput, Brain, CommandSet, Engine, EngineConfig, Event, EventSink,
+    ListenConfig, ListenSession, Microphone, RecordConfig, RecordSession, TranscribeOptions,
+    WavReplay,
 };
 
 #[derive(Parser)]
@@ -44,6 +46,66 @@ struct EngineArgs {
     vad: bool,
 }
 
+/// Who answers utterances that are no command.
+#[derive(Args)]
+struct BrainArgs {
+    /// Claudio's URL, e.g. https://192.168.1.112:8766 (the Thor).
+    #[arg(long, conflicts_with = "openai")]
+    claudio: Option<String>,
+    /// Claudio chat profile; the first offered when omitted.
+    #[arg(long, requires = "claudio")]
+    claudio_profile: Option<String>,
+    /// An OpenAI-compatible server, e.g. http://127.0.0.1:8080 (llama.cpp).
+    #[arg(long)]
+    openai: Option<String>,
+    /// Model name for --openai.
+    #[arg(long, requires = "openai")]
+    openai_model: Option<String>,
+    /// System prompt for --openai.
+    #[arg(long, requires = "openai")]
+    system_prompt: Option<String>,
+    /// Bearer token (Claudio's team token or an API key), from the
+    /// HUSHKEY_BRAIN_TOKEN environment variable only: on the command line it
+    /// would show in the process list and the shell history.
+    #[arg(skip = std::env::var("HUSHKEY_BRAIN_TOKEN").ok())]
+    token: Option<String>,
+    /// PEM certificate to trust (Claudio's server.pem).
+    #[arg(long)]
+    ca_cert: Option<PathBuf>,
+}
+
+impl BrainArgs {
+    fn build(self) -> Result<Option<Box<dyn Brain>>, String> {
+        let ca_cert_pem = match &self.ca_cert {
+            Some(path) => {
+                Some(std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
+            }
+            None => None,
+        };
+        if let Some(url) = self.claudio {
+            return Ok(Some(Box::new(Claudio::new(ClaudioConfig {
+                url,
+                profile_id: self.claudio_profile,
+                token: self.token,
+                ca_cert_pem,
+            })?)));
+        }
+        if let Some(url) = self.openai {
+            return Ok(Some(Box::new(OpenAiChat::new(OpenAiConfig {
+                url,
+                model: self.openai_model.ok_or("--openai needs --openai-model")?,
+                api_key: self.token,
+                system_prompt: self.system_prompt,
+                max_history: 20,
+                ca_cert_pem,
+            })?)));
+        }
+        Ok(None)
+    }
+}
+
+// Parsed once per run: the size of the largest variant does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Transcribe a WAV file and print the text.
@@ -80,6 +142,11 @@ enum Command {
         /// Pause in milliseconds that ends an utterance.
         #[arg(long, default_value_t = 500)]
         end_silence: u32,
+        /// Voice commands (JSON, see hushkey-core's commands module).
+        #[arg(long)]
+        commands: Option<PathBuf>,
+        #[command(flatten)]
+        brain: BrainArgs,
     },
     /// List input devices.
     Devices,
@@ -160,12 +227,22 @@ fn run(cli: Cli) -> Result<(), String> {
             wav,
             prompt,
             end_silence,
+            commands,
+            brain,
         } => {
             let engine = Arc::new(load(&cli.engine, true)?);
             let ends_by_itself = wav.is_some();
             let input = input(device, wav);
             let mut config = ListenConfig::default().with_end_silence(end_silence);
             config.options.prompt = prompt;
+            if let Some(path) = commands {
+                let json = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                config.commands = Some(Arc::new(
+                    CommandSet::from_json(&json).map_err(|e| e.to_string())?,
+                ));
+            }
+            config.brain = brain.build()?;
             let sink: EventSink = Arc::new(|event| match event {
                 Event::Preview { text } => {
                     eprint!("\r\x1b[2K… {text}");
@@ -183,6 +260,20 @@ fn run(cli: Cli) -> Result<(), String> {
                         end_ms as f64 / 1000.0,
                         transcript.text
                     );
+                }
+                Event::Command { command, .. } => {
+                    println!(
+                        "  → command {}({}) [{:.2}]",
+                        command.name,
+                        command.args.join(", "),
+                        command.confidence
+                    );
+                }
+                Event::Reply { text, details, .. } => {
+                    println!("  ← {text}");
+                    if let Some(details) = details {
+                        println!("    (also proposed, not carried out: {details})");
+                    }
                 }
                 Event::Error { message } => eprintln!("\nerror: {message}"),
                 _ => {}

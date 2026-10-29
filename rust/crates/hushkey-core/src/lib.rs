@@ -8,10 +8,13 @@
 //! [`Event::Utterance`].
 
 mod audio;
+mod brain;
+pub mod commands;
 pub mod endpoint;
 mod engine;
 mod error;
 mod event;
+mod filter;
 mod listen;
 pub mod model;
 mod resample;
@@ -20,12 +23,15 @@ mod session;
 pub use audio::{
     read_wav_16k, AudioInput, AudioSink, Microphone, SamplesFn, WavReplay, SAMPLE_RATE,
 };
+pub use brain::{Brain, Reply};
+pub use commands::{CommandMatch, CommandSet};
 pub use endpoint::{EndpointConfig, Endpointer};
 pub use engine::{
     init_process, Engine, EngineConfig, Segment, TranscribeOptions, Transcript, VAD_FRAME,
 };
 pub use error::{Error, Result};
 pub use event::{Event, EventSink};
+pub use filter::is_non_speech;
 pub use listen::{ListenConfig, ListenSession};
 pub use resample::Resampler;
 pub use session::{RecordConfig, RecordSession};

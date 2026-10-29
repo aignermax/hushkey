@@ -1,15 +1,17 @@
 # hushkey core (Rust)
 
 hushkey's speech recognition as a library: microphone capture, whisper.cpp
-transcription, push-to-talk sessions with a live preview and continuous
-listening that reports every utterance, usable from Rust and, through a C
-ABI, from any language. The Python hushkey app in the
+transcription, push-to-talk sessions with a live preview, and continuous
+listening that reports every utterance, recognizes voice commands and hands
+everything else to a "brain" (Claudio, or an OpenAI-compatible server),
+usable from Rust and, through a C ABI, from any language. The Python hushkey app in the
 repository root is unaffected; see
 [the design](../docs/superpowers/specs/2026-10-28-rust-core-design.md).
 
 | Crate | What |
 | --- | --- |
-| `hushkey-core` | The library: `Engine`, `RecordSession`, audio inputs, model lookup |
+| `hushkey-core` | The library: `Engine`, `RecordSession`, `ListenSession`, `CommandSet`, the `Brain` trait, audio inputs, model lookup |
+| `hushkey-brain` | Brains: `Claudio` (`/v1/chat`), `OpenAiChat` (`/v1/chat/completions`) |
 | `hushkey-ffi` | The C ABI (`hushkey.dll` / `libhushkey.so` / `.dylib`, static lib) and [`include/hushkey.h`](include/hushkey.h) |
 | `hushkey-cli` | `hushkey-cli transcribe file.wav`, `record`, `listen`, `devices` |
 
@@ -48,6 +50,46 @@ lis.prompt = "weiter, zurück, Kanal";  /* words whisper should expect */
 HkSession *s = hk_listen_start(engine, &lis, on_event, NULL);
 /* HK_EVENT_KIND_SPEECH_START, PREVIEW..., UTTERANCE per sentence ... */
 hk_listen_stop(s);             /* the last utterance is finished first */
+```
+
+### Voice commands and a brain
+
+Hands busy at a plug board: say "Kanal 6" and the test UI switches. A
+command set maps phrases to names; `{n}` is a number (digits, or German or
+English words), `{word}` one word, `{text}` the rest:
+
+```c
+lis.commands_json =
+    "{\"commands\": ["
+    "  {\"name\": \"next\",    \"phrases\": [\"weiter\", \"next\"]},"
+    "  {\"name\": \"back\",    \"phrases\": [\"zurück\", \"back\"]},"
+    "  {\"name\": \"channel\", \"phrases\": [\"kanal {n}\", \"channel {n}\"]}]}";
+/* "Kanal sechs" -> HK_EVENT_KIND_COMMAND: name "channel", args {"6"} */
+```
+
+Matching tolerates small slips ("kanall 7") but prefers no command to a
+doubtful one; the command words become whisper's prompt, which makes short
+words reliable. Utterances that are no command go to the brain, if one is
+set, and its answer arrives as `HK_EVENT_KIND_REPLY`:
+
+```c
+lis.brain = HK_BRAIN_KIND_CLAUDIO;                 /* or HK_BRAIN_KIND_OPENAI */
+lis.brain_url = "https://192.168.1.112:8766";      /* Claudio on the Thor */
+lis.brain_ca_cert = "server.pem";                  /* its self-signed certificate */
+```
+
+Brains connect through the operating system's TLS, so certificates in the
+system store work too. Nothing leaves the machine without a `brain_url`.
+
+From a terminal:
+
+```sh
+hushkey-cli -l de listen --commands lab.json \
+    --claudio https://192.168.1.112:8766 --ca-cert server.pem
+# [   3.65 -    5.02] Kanal 6
+#   → command channel(6) [1.00]
+# [  14.50 -   16.70] Wie spät ist es eigentlich?
+#   ← Ich habe leider keinen Zugriff auf die aktuelle Uhrzeit ...
 ```
 
 Rules of the ABI (also in the header): every struct starts with `size`, so it

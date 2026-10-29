@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::commands::CommandMatch;
 use crate::engine::Transcript;
 
 /// What a session reports, in order, from its worker thread.
@@ -19,6 +20,15 @@ pub enum Event {
         transcript: Transcript,
         start_ms: i64,
         end_ms: i64,
+    },
+    /// Listening: the utterance just reported is a command.
+    Command { command: CommandMatch, text: String },
+    /// Listening: the brain's answer to the utterance `to`; `details` is
+    /// whatever else it returned, as JSON (proposed actions, say).
+    Reply {
+        text: String,
+        to: String,
+        details: Option<String>,
     },
     /// Something went wrong; the session continues if it can.
     Error { message: String },

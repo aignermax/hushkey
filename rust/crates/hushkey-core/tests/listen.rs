@@ -219,3 +219,150 @@ fn stopping_from_the_error_callback_does_not_deadlock() {
     );
     drop(slot.lock().unwrap().take());
 }
+
+/// Answers by repeating; records what it was asked.
+struct EchoBrain(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl hushkey_core::Brain for EchoBrain {
+    fn reply(&mut self, utterance: &str) -> Result<hushkey_core::Reply, String> {
+        self.0.lock().unwrap().push(utterance.to_string());
+        std::thread::sleep(Duration::from_millis(300)); // thinking takes a while
+        Ok(hushkey_core::Reply {
+            text: format!("echo: {utterance}"),
+            details: None,
+        })
+    }
+}
+
+#[test]
+fn spoken_commands_become_command_events_and_the_rest_goes_to_the_brain() {
+    let (model, _, vad) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.language = Some("de".into());
+    config.vad_model = Some(vad);
+    let engine = Arc::new(Engine::new(config).unwrap());
+    let commands = hushkey_core::CommandSet::from_json(
+        r#"{"commands": [
+            {"name": "next", "phrases": ["weiter"]},
+            {"name": "back", "phrases": ["zurück"]},
+            {"name": "channel", "phrases": ["kanal {n}"]}]}"#,
+    )
+    .unwrap();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listen = ListenConfig {
+        commands: Some(Arc::new(commands)),
+        brain: Some(Box::new(EchoBrain(asked.clone()))),
+        ..ListenConfig::default()
+    };
+    let (tx, rx) = mpsc::channel();
+    let sink: EventSink = Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let wav = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/commands-de.wav");
+    let mut session =
+        ListenSession::start(engine, Box::new(WavReplay::new(&wav, false)), listen, sink).unwrap();
+    session.wait().unwrap();
+    let events: Vec<Event> = rx.try_iter().collect();
+
+    let commands: Vec<(String, Vec<String>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Command { command, .. } => Some((command.name.clone(), command.args.clone())),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = vec![
+        ("next".into(), vec![]),
+        ("channel".into(), vec!["6".into()]),
+        ("channel".into(), vec!["21".into()]),
+        ("back".into(), vec![]),
+    ];
+    assert_eq!(commands, expected, "{events:#?}");
+    // Only the question went to the brain, and its answer came before Stopped.
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "{:?}",
+        asked.lock().unwrap()
+    );
+    let reply = events
+        .iter()
+        .position(|e| matches!(e, Event::Reply { text, .. } if text.to_lowercase().starts_with("echo: wie spät")));
+    assert!(reply.is_some(), "{events:#?}");
+    assert_eq!(events.last(), Some(&Event::Stopped));
+    // Every command follows the utterance it came from.
+    for (i, e) in events.iter().enumerate() {
+        if let Event::Command { text, .. } = e {
+            assert!(
+                matches!(&events[i - 1], Event::Utterance { transcript, .. } if &transcript.text == text)
+            );
+        }
+    }
+}
+
+/// Blocks on its first question until the test opens the gate; counts
+/// what it was asked.
+struct GatedBrain {
+    asked: Arc<std::sync::atomic::AtomicUsize>,
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl hushkey_core::Brain for GatedBrain {
+    fn reply(&mut self, _utterance: &str) -> Result<hushkey_core::Reply, String> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (open, signal) = &*self.gate;
+        let _open = signal
+            .wait_while(open.lock().unwrap(), |open| !*open)
+            .unwrap();
+        Ok(hushkey_core::Reply {
+            text: "ok".into(),
+            details: None,
+        })
+    }
+}
+
+#[test]
+fn after_a_stop_queued_utterances_no_longer_reach_the_brain() {
+    let (model, _, vad) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.language = Some("de".into());
+    config.vad_model = Some(vad);
+    let engine = Arc::new(Engine::new(config).unwrap());
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let listen = ListenConfig {
+        brain: Some(Box::new(GatedBrain {
+            asked: asked.clone(),
+            gate: gate.clone(),
+        })),
+        ..ListenConfig::default()
+    };
+    let (tx, rx) = mpsc::channel();
+    let sink: EventSink = Arc::new(move |e| {
+        let _ = tx.send(e);
+    });
+    let wav = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/commands-de.wav");
+    // Without commands all five utterances go to the brain; it holds on to
+    // the first, so the other four queue up whatever the machine's speed.
+    let mut session =
+        ListenSession::start(engine, Box::new(WavReplay::new(&wav, false)), listen, sink).unwrap();
+    let mut utterances = 0;
+    while utterances < 5 {
+        let event = rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("utterances");
+        if matches!(event, Event::Utterance { .. }) {
+            utterances += 1;
+        }
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    session.stop().unwrap();
+    *gate.0.lock().unwrap() = true; // the request in flight finishes
+    gate.1.notify_all();
+    std::thread::sleep(Duration::from_secs(1));
+    let asked = asked.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        asked, 1,
+        "the brain was asked {asked} times; the queue left the machine"
+    );
+}
