@@ -9,8 +9,11 @@
 // parsing is still built and tested.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod config;
+mod history;
+mod icon;
 #[cfg(windows)]
 mod log;
+mod strings;
 #[cfg(windows)]
 mod win;
 

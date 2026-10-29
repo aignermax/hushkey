@@ -143,16 +143,16 @@ impl Config {
         Ok(config)
     }
 
-    /// Set `mode` in the settings file, keeping everything else as the file
-    /// has it now (the user may have edited it since start).
-    pub fn save_mode(mode: Mode) -> Result<(), String> {
+    /// Apply `change` to the settings file as it is now (the user may have
+    /// edited it since start), keeping everything else.
+    pub fn update(change: impl FnOnce(&mut Config)) -> Result<(), String> {
         let path = state_dir().join("config.json");
         let mut current = match std::fs::read_to_string(&path) {
             Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
         };
-        current.mode = mode;
+        change(&mut current);
         current.save()
     }
 
