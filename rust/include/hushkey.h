@@ -31,6 +31,9 @@ enum HkEventKind
   // (`n_args` slot values, numbers as digits), `confidence`, and the
   // utterance as `text`.
   HK_EVENT_KIND_COMMAND = 5,
+  // Listening: the utterance since the last `SPEECH_START` is done, at
+  // `end_ms`; its `UTTERANCE` came before unless it was noise.
+  HK_EVENT_KIND_SPEECH_END = 9,
   // Listening: the brain's answer as `text`, to the utterance in
   // `utterance`; `details` holds anything else it returned (JSON).
   HK_EVENT_KIND_REPLY = 6,

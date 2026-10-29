@@ -159,6 +159,9 @@ pub enum HkEventKind {
     /// (`n_args` slot values, numbers as digits), `confidence`, and the
     /// utterance as `text`.
     Command = 5,
+    /// Listening: the utterance since the last `SPEECH_START` is done, at
+    /// `end_ms`; its `UTTERANCE` came before unless it was noise.
+    SpeechEnd = 9,
     /// Listening: the brain's answer as `text`, to the utterance in
     /// `utterance`; `details` holds anything else it returned (JSON).
     Reply = 6,
@@ -878,6 +881,10 @@ fn event_sink(callback: HkEventCallback, user_data: *mut c_void) -> EventSink {
             Event::SpeechStart { at_ms } => {
                 (start_ms, end_ms) = (at_ms, at_ms);
                 HkEventKind::SpeechStart
+            }
+            Event::SpeechEnd { at_ms } => {
+                (start_ms, end_ms) = (at_ms, at_ms);
+                HkEventKind::SpeechEnd
             }
             Event::Utterance {
                 transcript,

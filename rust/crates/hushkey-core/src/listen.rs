@@ -497,6 +497,9 @@ impl Worker {
                 message: e.to_string(),
             }),
         }
+        // Also when the utterance was dropped as noise: whoever showed
+        // "someone is speaking" since SpeechStart can stop now.
+        (self.sink)(Event::SpeechEnd { at_ms: ms(to) });
     }
 
     /// A command, or else a question for the brain.

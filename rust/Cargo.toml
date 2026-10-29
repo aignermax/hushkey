@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hushkey-core", "crates/hushkey-brain", "crates/hushkey-ffi", "crates/hushkey-cli"]
+members = ["crates/hushkey-core", "crates/hushkey-brain", "crates/hushkey-ffi", "crates/hushkey-cli", "crates/hushkey-app"]
 
 [workspace.package]
 version = "0.1.0"
