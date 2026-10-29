@@ -24,6 +24,12 @@ hushkey-brain.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+png = "0.18"
+
+[build-dependencies]
+png = "0.18"
+ico = "0.4"
+winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26"
@@ -35,4 +41,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
 ] }

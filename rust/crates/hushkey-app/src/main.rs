@@ -5,14 +5,29 @@
 // A tray app: no console window on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-// Only the Windows app loads and saves settings so far; elsewhere the
-// parsing is still built and tested.
+// Only the Windows app uses these so far; elsewhere they are still built
+// and tested.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod config;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod history;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod icon;
 #[cfg(windows)]
 mod log;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod strings;
 #[cfg(windows)]
 mod win;
+
+/// A log line where there is a log (the Windows app).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn log_line(message: &str) {
+    #[cfg(windows)]
+    log::line(message);
+    #[cfg(not(windows))]
+    eprintln!("{message}");
+}
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
