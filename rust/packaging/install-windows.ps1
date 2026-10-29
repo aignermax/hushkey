@@ -13,10 +13,18 @@ $ErrorActionPreference = "Stop"
 $Dir = Join-Path $env:LOCALAPPDATA "Programs\hushkey-rs"
 $MenuLnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\hushkey (Rust).lnk"
 
-# A running copy keeps hushkey.exe locked.
-Get-Process hushkey -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) } |
-    ForEach-Object { Stop-Process -Id $_.Id -Force; Write-Host "stopped the running hushkey (Rust)" }
+# A running copy keeps hushkey.exe locked. CIM, as Get-Process often
+# leaves Path empty for a process started elsewhere.
+Get-CimInstance Win32_Process -Filter "Name = 'hushkey.exe'" |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir, [StringComparison]::OrdinalIgnoreCase) } |
+    ForEach-Object {
+        $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+        if ($process) {
+            $process.Kill()
+            $process.WaitForExit(5000) | Out-Null  # the file stays locked until it has exited
+            Write-Host "stopped the running hushkey (Rust)"
+        }
+    }
 
 if ($Uninstall) {
     Remove-Item -LiteralPath $MenuLnk -Force -ErrorAction SilentlyContinue
@@ -40,4 +48,4 @@ $Lnk.Save()
 
 Write-Host "installed: $Dir\hushkey.exe"
 Write-Host "Start Menu: hushkey (Rust)"
-Write-Host "settings:   $env:LOCALAPPDATA\hushkey-rs\config.json (tray menu: Open settings)"
+Write-Host "settings:   $env:LOCALAPPDATA\hushkey-rs\config.json (most are in the tray menu)"
