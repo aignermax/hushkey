@@ -169,6 +169,15 @@ pub fn current() -> &'static Strings {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn current() -> &'static Strings {
+    if crate::platform::prefers_german() {
+        &DE
+    } else {
+        &EN
+    }
+}
+
 /// `template` with `{name}` replaced by `value`.
 pub fn fill(template: &str, pairs: &[(&str, &str)]) -> String {
     pairs
