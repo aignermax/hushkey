@@ -13,10 +13,8 @@ mod overlay;
 pub mod setup;
 
 use std::ffi::c_void;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::{Command, ExitCode};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use objc2::rc::autoreleasepool;
@@ -84,36 +82,6 @@ pub fn fatal(message: &str) -> ExitCode {
         ])
         .status();
     ExitCode::FAILURE
-}
-
-/// The lock file once this process holds its lock, kept for the process's
-/// life (the kernel drops the lock when the process ends, however).
-static LOCK: Mutex<Option<std::fs::File>> = Mutex::new(None);
-
-/// True if another hushkey (Rust) already runs for this user: it holds the
-/// lock on `hushkey.lock` in the state folder. Otherwise the lock is now
-/// ours; asking again (an update waits for its predecessor) neither locks
-/// twice nor leaves a file open.
-pub fn already_running() -> bool {
-    let mut lock = LOCK.lock().unwrap();
-    if lock.is_some() {
-        return false;
-    }
-    let dir = config::state_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("hushkey.lock"))
-    else {
-        return false; // no lock to be had: run rather than not at all
-    };
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK);
-    }
-    *lock = Some(file);
-    false
 }
 
 /// Hand one waiting event to AppKit, if `until` brings one.
@@ -214,4 +182,10 @@ pub fn prefers_german() -> bool {
     NSLocale::preferredLanguages()
         .firstObject()
         .is_some_and(|lang| lang.to_string().starts_with("de"))
+}
+
+/// True if another hushkey (Rust) already runs for this user: it holds the
+/// lock on `hushkey.lock` in the state folder.
+pub fn already_running() -> bool {
+    crate::unix::already_running(&config::state_dir().join("hushkey.lock"))
 }

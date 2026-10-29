@@ -42,6 +42,8 @@ mod setup;
 mod strings;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod tray;
+#[cfg(unix)]
+mod unix;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod update;
 #[cfg(windows)]
@@ -100,7 +102,8 @@ fn main() -> std::process::ExitCode {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn main() -> std::process::ExitCode {
     eprintln!(
-        "hushkey (Rust) supports Windows and Linux so far; on this system use the Python          hushkey, or hushkey-cli for the recognition alone."
+        "hushkey runs on Windows, Linux and macOS; on this system hushkey-cli \
+         does the recognition alone."
     );
     std::process::ExitCode::from(2)
 }

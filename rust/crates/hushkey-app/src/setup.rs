@@ -79,9 +79,13 @@ pub fn install(from_python: bool) -> Result<(), String> {
             ));
         }
     }
+    // A fresh install starts at login; a reinstall keeps the user's choice.
+    let fresh = !setup::installed_exe().exists();
     let installed = setup::place(&exe)?;
     setup::register(&installed)?;
-    autostart::set(true)?;
+    if fresh {
+        autostart::set(true)?;
+    }
     log::line(&format!("installed: {}", installed.display()));
     setup::launch(&installed, &[])
 }
@@ -93,8 +97,15 @@ pub fn uninstall() -> Result<(), String> {
     setup::unregister()?;
     let installed = setup::installed_exe();
     let me = std::env::current_exe().ok();
-    if me.as_deref() != Some(installed.as_path()) && installed.exists() {
-        std::fs::remove_file(&installed).map_err(|e| format!("{}: {e}", installed.display()))?;
+    // Windows cannot remove the running program (uninstall.ps1 runs a
+    // copy); Linux and macOS can.
+    if cfg!(unix) || me.as_deref() != Some(installed.as_path()) {
+        match std::fs::remove_file(&installed) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {e}", installed.display()));
+            }
+            _ => {}
+        }
     }
     log::line("uninstalled");
     Ok(())
@@ -133,27 +144,36 @@ fn key_from_python(name: &str) -> Option<&'static str> {
     Some(ours)
 }
 
-/// Our settings from the Python ones (defaults where they have none, or
-/// one we do not know).
-fn config_from_python(text: &str) -> Config {
+/// Our settings from the Python ones, as the Python app resolved them: its
+/// environment variables (`PTT_KEY`, `WHISPER_MODEL`, `WHISPER_LANG`,
+/// `PTT_INSERT`) first, then its config file, then its own defaults (Right
+/// Ctrl, German). Names we do not know keep ours.
+fn config_from_python(text: &str, env: impl Fn(&str) -> Option<String>) -> Config {
     let python: PythonConfig = serde_json::from_str(text).unwrap_or_default();
     let mut config = Config::default();
-    if let Some(model) = python
-        .model
-        .filter(|m| crate::strings::MODELS.iter().any(|(name, _)| name == m))
+    let model = env("WHISPER_MODEL")
+        .filter(|m| !m.is_empty())
+        .or(python.model);
+    if let Some(model) = model.filter(|m| crate::strings::MODELS.iter().any(|(name, _)| name == m))
     {
         config.model = model;
     }
-    if let Some(key) = python.ptt_key.as_deref().and_then(key_from_python) {
+    let key = env("PTT_KEY")
+        .filter(|k| !k.is_empty())
+        .or(python.ptt_key.filter(|k| !k.is_empty()))
+        .unwrap_or_else(|| "ctrl_r".into());
+    if let Some(key) = key_from_python(&key) {
         config.key = key.to_string();
     }
-    if python.insert.as_deref() == Some("type") {
+    let insert = env("PTT_INSERT").map(|i| i.trim().to_ascii_lowercase());
+    if insert.or(python.insert).as_deref() == Some("type") {
         config.insert = Insert::Type;
     }
-    config.language = python
-        .lang
-        .filter(|l| !l.is_empty() && l != "auto")
-        .map(|l| l.to_ascii_lowercase());
+    // WHISPER_LANG set (even empty) wins; "" and "auto" detect.
+    let lang = env("WHISPER_LANG")
+        .or(python.lang.filter(|l| !l.is_empty()))
+        .unwrap_or_else(|| "de".into());
+    config.language = Some(lang.to_ascii_lowercase()).filter(|l| !l.is_empty() && l != "auto");
     config
 }
 
@@ -162,12 +182,13 @@ fn config_from_python(text: &str) -> Config {
 fn import_python(dir: &Path) {
     let ours = config::state_dir();
     let _ = std::fs::create_dir_all(&ours);
-    if !ours.join("config.json").exists() {
-        if let Ok(text) = std::fs::read_to_string(dir.join("config.json")) {
-            match config_from_python(&text).save() {
-                Ok(()) => log::line("install: settings taken over from the Python hushkey"),
-                Err(e) => log::line(&format!("install: settings not taken over: {e}")),
-            }
+    // Without a config file the Python app ran on its defaults; those carry
+    // over too (where it was installed at all).
+    if !ours.join("config.json").exists() && dir.is_dir() {
+        let text = std::fs::read_to_string(dir.join("config.json")).unwrap_or_default();
+        match config_from_python(&text, |v| std::env::var(v).ok()).save() {
+            Ok(()) => log::line("install: settings taken over from the Python hushkey"),
+            Err(e) => log::line(&format!("install: settings not taken over: {e}")),
         }
     }
     let history = ours.join("history.json");
@@ -221,22 +242,50 @@ mod tests {
 
     #[test]
     fn python_settings_carry_over() {
+        let none = |_: &str| None;
         let config = config_from_python(
-            r#"{"model": "large-v3-turbo", "ptt_key": "ctrl_r", "lang": "de", "insert": "type"}"#,
+            r#"{"model": "large-v3-turbo", "ptt_key": "ctrl_r", "lang": "en", "insert": "type"}"#,
+            none,
         );
         assert_eq!(config.model, "large-v3-turbo");
         assert_eq!(config.key, "right_ctrl");
-        assert_eq!(config.language.as_deref(), Some("de"));
+        assert_eq!(config.language.as_deref(), Some("en"));
         assert_eq!(config.insert, Insert::Type);
 
-        let config = config_from_python(r#"{"ptt_key": "caps_lock", "lang": "auto"}"#);
+        let config = config_from_python(r#"{"ptt_key": "caps_lock", "lang": "auto"}"#, none);
         assert_eq!(config.key, "caps_lock");
         assert_eq!(config.language, None);
 
-        // Unknown names and a broken file leave the defaults.
-        let config = config_from_python(r#"{"model": "distil-whatever", "ptt_key": "menu"}"#);
-        assert_eq!(config, Config::default());
-        assert_eq!(config_from_python("not json"), Config::default());
+        // The Python defaults: Right Ctrl, German.
+        for text in ["{}", "not json", ""] {
+            let config = config_from_python(text, none);
+            assert_eq!(config.key, "right_ctrl", "{text}");
+            assert_eq!(config.language.as_deref(), Some("de"), "{text}");
+            assert_eq!(config.model, Config::default().model);
+        }
+        // Names we do not know keep ours.
+        let config = config_from_python(r#"{"model": "distil-whatever", "ptt_key": "menu"}"#, none);
+        assert_eq!(config.model, Config::default().model);
+        assert_eq!(config.key, Config::default().key);
+    }
+
+    #[test]
+    fn the_python_environment_wins_over_its_file() {
+        let env = |v: &str| match v {
+            "PTT_KEY" => Some("f9".to_string()),
+            "WHISPER_MODEL" => Some("small".to_string()),
+            "WHISPER_LANG" => Some(String::new()),
+            "PTT_INSERT" => Some("TYPE".to_string()),
+            _ => None,
+        };
+        let config = config_from_python(
+            r#"{"model": "medium", "ptt_key": "ctrl_r", "lang": "de", "insert": "paste"}"#,
+            env,
+        );
+        assert_eq!(config.key, "f9");
+        assert_eq!(config.model, "small");
+        assert_eq!(config.language, None); // empty: detect
+        assert_eq!(config.insert, Insert::Type);
     }
 
     #[test]

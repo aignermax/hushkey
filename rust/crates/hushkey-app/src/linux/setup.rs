@@ -7,7 +7,6 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// The release asset with this system's program.
 #[cfg(target_arch = "x86_64")]
@@ -163,22 +162,6 @@ fn processes() -> Vec<(i32, PathBuf, Vec<String>)> {
         .collect()
 }
 
-/// Ask `pids` to quit (hushkey quits cleanly on SIGTERM), and end those
-/// still there after a few seconds.
-fn stop(pids: &[i32]) {
-    for pid in pids {
-        unsafe { libc::kill(*pid, libc::SIGTERM) };
-    }
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let alive = |pid: &i32| Path::new(&format!("/proc/{pid}")).exists();
-    while pids.iter().any(alive) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    for pid in pids.iter().filter(|p| alive(p)) {
-        unsafe { libc::kill(*pid, libc::SIGKILL) };
-    }
-}
-
 /// Stop other hushkey (Rust) processes of this user, not this one. A
 /// running program renamed over shows as "hushkey (deleted)".
 pub fn stop_others() {
@@ -191,7 +174,7 @@ pub fn stop_others() {
         })
         .map(|(pid, _, _)| pid)
         .collect();
-    stop(&pids);
+    crate::unix::stop(&pids);
 }
 
 /// Start `exe` with `args` on its own (own session, no terminal), not
@@ -221,15 +204,6 @@ pub fn python_state_dir() -> PathBuf {
         .join("whisper-ptt")
 }
 
-/// Whether a command line runs the Python hushkey: its tray.py or
-/// dictate.py, from its own folder or the .deb's.
-fn is_python_hushkey(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        (a.ends_with("/tray.py") || a.ends_with("/dictate.py"))
-            && (a.contains("whisper-ptt") || a.starts_with("/opt/hushkey/"))
-    })
-}
-
 /// The Python hushkey off for good: its service disabled and stopped, its
 /// autostart entry (if any) removed, its processes stopped. Its files stay.
 pub fn retire_python() -> Result<(), String> {
@@ -249,10 +223,10 @@ pub fn retire_python() -> Result<(), String> {
     }
     let pids: Vec<i32> = processes()
         .into_iter()
-        .filter(|(_, _, args)| is_python_hushkey(args))
+        .filter(|(_, _, args)| crate::unix::is_python_hushkey(args))
         .map(|(pid, _, _)| pid)
         .collect();
-    stop(&pids);
+    crate::unix::stop(&pids);
     Ok(())
 }
 
@@ -281,15 +255,18 @@ mod tests {
     #[test]
     fn python_processes_are_told_by_their_script() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(is_python_hushkey(&args(&[
+        assert!(crate::unix::is_python_hushkey(&args(&[
             "/home/a/.local/share/whisper-ptt/.venv/bin/python",
             "/home/a/.local/share/whisper-ptt/tray.py"
         ])));
-        assert!(is_python_hushkey(&args(&[
+        assert!(crate::unix::is_python_hushkey(&args(&[
             "python3",
             "/opt/hushkey/dictate.py"
         ])));
-        assert!(!is_python_hushkey(&args(&["python3", "/home/a/tray.py"])));
+        assert!(!crate::unix::is_python_hushkey(&args(&[
+            "python3",
+            "/home/a/tray.py"
+        ])));
     }
 
     #[test]

@@ -12,13 +12,10 @@ pub mod setup;
 mod uinput;
 
 use std::cell::Cell;
-use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use gtk::prelude::*;
@@ -67,32 +64,6 @@ pub fn fatal(message: &str) -> ExitCode {
     dialog.close();
     pump();
     ExitCode::FAILURE
-}
-
-/// True if another hushkey (Rust) already runs for this user: it holds the
-/// lock on `hushkey-rs.lock` in the runtime folder. The lock is kept for
-/// the process's life (the kernel drops it when the process ends).
-pub fn already_running() -> bool {
-    static LOCK: OnceLock<File> = OnceLock::new();
-    let dir = dirs::runtime_dir().unwrap_or_else(config::state_dir);
-    let _ = std::fs::create_dir_all(&dir);
-    let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("hushkey-rs.lock"))
-    {
-        Ok(file) => file,
-        Err(e) => {
-            log::line(&format!("single-instance lock unavailable: {e}"));
-            return false;
-        }
-    };
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK);
-    }
-    let _ = LOCK.set(file);
-    false
 }
 
 /// Handle the GTK events that are waiting (the tray and its menu live on
@@ -182,4 +153,11 @@ fn on_path(program: &str) -> bool {
             })
         })
     })
+}
+
+/// True if another hushkey (Rust) already runs for this user: it holds the
+/// lock on `hushkey-rs.lock` in the runtime folder.
+pub fn already_running() -> bool {
+    let dir = dirs::runtime_dir().unwrap_or_else(config::state_dir);
+    crate::unix::already_running(&dir.join("hushkey-rs.lock"))
 }

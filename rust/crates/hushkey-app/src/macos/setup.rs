@@ -5,7 +5,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// The release asset for this system: a zip holding `hushkey.app`.
 pub const ASSET: &str = if cfg!(target_arch = "aarch64") {
@@ -174,24 +173,9 @@ fn others_named(name: &str) -> Vec<i32> {
         .collect()
 }
 
-/// End `pids` politely (SIGTERM), then for good after a few seconds.
-fn stop(pids: &[i32]) {
-    for pid in pids {
-        unsafe { libc::kill(*pid, libc::SIGTERM) };
-    }
-    let until = Instant::now() + Duration::from_secs(3);
-    let alive = |pid: &i32| unsafe { libc::kill(*pid, 0) } == 0;
-    while pids.iter().any(alive) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    for pid in pids.iter().filter(|p| alive(p)) {
-        unsafe { libc::kill(*pid, libc::SIGKILL) };
-    }
-}
-
 /// Stop other running hushkey (Rust) processes of this user.
 pub fn stop_others() {
-    stop(&others_named("hushkey"));
+    crate::unix::stop(&others_named("hushkey"));
 }
 
 /// Start `exe` with `args`, detached from this process: through Launch
@@ -261,7 +245,8 @@ pub fn retire_python() -> Result<(), String> {
             "-U",
             &uid.to_string(),
             "-f",
-            r"python[0-9.]* .*(tray|dictate)\.py",
+            // Only the Python hushkey's own folder (see unix::is_python_hushkey).
+            r"python[0-9.]* .*(whisper-ptt|/hushkey/)[^ ]*/(tray|dictate)\.py",
         ])
         .stdin(Stdio::null())
         .output()
@@ -274,7 +259,7 @@ pub fn retire_python() -> Result<(), String> {
         .filter_map(|line| line.trim().parse().ok())
         .filter(|pid| *pid != me)
         .collect();
-    stop(&pids);
+    crate::unix::stop(&pids);
     Ok(())
 }
 

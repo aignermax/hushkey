@@ -84,8 +84,10 @@ case "$ASSET" in
     RULE=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
     if [ ! -f "$RULE" ] || ! id -nG | tr ' ' '\n' | grep -qx input; then
       echo "==> one-time setup: 'input' group and /dev/uinput access (asks for your password)"
-      # Not without a terminal (the Python updater runs this unattended).
-      if [ -t 0 ] && sudo -v; then
+      # The password comes from the terminal, also under `curl | bash`
+      # (stdin is the script then); not at all without one (the Python
+      # updater runs this unattended).
+      if (: </dev/tty) 2>/dev/null && sudo -v </dev/tty; then
         printf '%s\n' 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
           | sudo tee "$RULE" >/dev/null
         sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput || true

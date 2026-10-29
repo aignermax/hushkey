@@ -70,16 +70,19 @@ enum Msg {
 pub fn run(after_update: bool) -> ExitCode {
     platform::init();
     log::open();
+    let mut running = platform::already_running();
     if after_update {
         // The updated program starts while the old one is still quitting.
         let deadline = Instant::now() + Duration::from_secs(15);
-        while platform::already_running() && Instant::now() < deadline {
+        while running && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(200));
+            running = platform::already_running();
         }
         platform::setup::clean_after_update();
         log::line(&format!("updated to {}", env!("CARGO_PKG_VERSION")));
     }
-    if platform::already_running() {
+    // Asked once more it would find our own lock (Windows, Linux).
+    if running {
         log::line("already running; this start does nothing");
         return ExitCode::SUCCESS;
     }
@@ -400,6 +403,7 @@ impl App {
                         log::line(&format!("update: could not start it: {e}"));
                         self.updating = false;
                         self.notice(GREY, self.s.update_failed);
+                        self.idle();
                     }
                 }
             }
