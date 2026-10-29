@@ -176,12 +176,13 @@ pub fn open_folder(path: &Path) {
     let _ = Command::new("open").arg(path).spawn();
 }
 
-/// Whether the user's first preferred language is German (the tray's
-/// words follow it).
-pub fn prefers_german() -> bool {
+/// The user's first preferred language, e.g. `de-DE` (the tray's words
+/// follow it).
+pub fn preferred_language() -> String {
     NSLocale::preferredLanguages()
         .firstObject()
-        .is_some_and(|lang| lang.to_string().starts_with("de"))
+        .map(|lang| lang.to_string())
+        .unwrap_or_default()
 }
 
 /// True if another hushkey (Rust) already runs for this user: it holds the

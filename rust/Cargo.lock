@@ -1091,7 +1091,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hushkey-app"
-version = "0.11.0-rc.1"
+version = "0.11.0-rc.2"
 dependencies = [
  "arboard",
  "dirs",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "hushkey-brain"
-version = "0.11.0-rc.1"
+version = "0.11.0-rc.2"
 dependencies = [
  "hushkey-core",
  "serde",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "hushkey-cli"
-version = "0.11.0-rc.1"
+version = "0.11.0-rc.2"
 dependencies = [
  "clap",
  "hushkey-brain",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "hushkey-core"
-version = "0.11.0-rc.1"
+version = "0.11.0-rc.2"
 dependencies = [
  "cpal",
  "dirs",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "hushkey-ffi"
-version = "0.11.0-rc.1"
+version = "0.11.0-rc.2"
 dependencies = [
  "cbindgen",
  "hushkey-brain",

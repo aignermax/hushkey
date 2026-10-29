@@ -97,7 +97,7 @@ impl Tray {
             ),
         ];
         let listen = check(s.listen, Action::Listen);
-        let autostart_item = check(s.autostart, Action::Autostart);
+        let autostart_item = check(s.autostart(), Action::Autostart);
         let open_logs = MenuItem::new(s.open_logs, true, None);
         let update = MenuItem::new(s.update_check, true, None);
         actions.insert(update.id().clone(), Action::Update);
