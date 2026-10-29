@@ -116,8 +116,24 @@ pub fn tapped(key: &str) {
 }
 
 /// Put `text` into the focused window: pasted (typed if that fails), or
-/// typed.
+/// typed. Caps Lock is off meanwhile: with it on, some windows (Windows
+/// Terminal among them) do not take the paste chord as one, and typed
+/// letters would come out inverted.
 pub fn insert(text: &str, paste: bool, restore: bool) -> Result<Restore, String> {
+    let caps = insert::caps_lock_on();
+    if caps {
+        insert::tap_key(VK_CAPITAL as u16);
+    }
+    let result = insert_as_is(text, paste, restore);
+    if caps {
+        // Queued after the chord (or the typing): it applies once the
+        // target has seen them.
+        insert::tap_key(VK_CAPITAL as u16);
+    }
+    result
+}
+
+fn insert_as_is(text: &str, paste: bool, restore: bool) -> Result<Restore, String> {
     if paste {
         insert::paste(text, restore).or_else(|e| {
             log::line(&format!("paste failed ({e}); typing instead"));

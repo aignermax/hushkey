@@ -7,8 +7,8 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    VIRTUAL_KEY, VK_CONTROL, VK_INSERT, VK_RETURN, VK_SHIFT,
+    GetKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CAPITAL, VK_CONTROL, VK_INSERT, VK_RETURN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
 
@@ -56,6 +56,12 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
 /// through).
 pub fn tap_key(vk: VIRTUAL_KEY) {
     let _ = send(&[key(vk, 0, 0), key(vk, 0, KEYEVENTF_KEYUP)]);
+}
+
+/// Whether Caps Lock is on. GetKeyState answers for the calling thread's
+/// input state, but toggle states are shared, so any thread may ask.
+pub fn caps_lock_on() -> bool {
+    unsafe { GetKeyState(VK_CAPITAL as i32) & 1 != 0 }
 }
 
 /// Type `text` as Unicode key events.
@@ -211,4 +217,24 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
         Ok(()) => Restore::Restored,
         Err(e) => Restore::Failed(e),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Toggles the real Caps Lock twice (and back); run by hand:
+    /// `cargo test -p hushkey-app caps_lock -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_caps_lock_state_is_seen_from_any_thread() {
+        let before = std::thread::spawn(caps_lock_on).join().unwrap();
+        tap_key(VK_CAPITAL);
+        std::thread::sleep(Duration::from_millis(100));
+        let after = std::thread::spawn(caps_lock_on).join().unwrap();
+        tap_key(VK_CAPITAL);
+        std::thread::sleep(Duration::from_millis(100));
+        let restored = std::thread::spawn(caps_lock_on).join().unwrap();
+        assert_eq!((after, restored), (!before, before));
+    }
 }
