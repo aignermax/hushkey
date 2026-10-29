@@ -24,6 +24,18 @@ pub enum Mode {
     Listen,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Updates {
+    /// Releases; pre-releases too while running one.
+    #[default]
+    Auto,
+    /// Pre-releases too.
+    Pre,
+    /// No checks.
+    Off,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrainSettings {
@@ -60,6 +72,7 @@ pub struct Config {
     /// utterances not inserted.
     pub brain: Option<BrainSettings>,
     pub use_gpu: bool,
+    pub updates: Updates,
 }
 
 impl Default for Config {
@@ -75,6 +88,7 @@ impl Default for Config {
             commands: None,
             brain: None,
             use_gpu: true,
+            updates: Updates::Auto,
         }
     }
 }

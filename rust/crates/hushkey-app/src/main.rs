@@ -17,10 +17,14 @@ mod history;
 mod icon;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod log;
+#[cfg(windows)]
+mod setup;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod strings;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod update;
 #[cfg(windows)]
 mod win;
 
@@ -43,7 +47,23 @@ pub fn log_line(message: &str) {
 fn main() -> std::process::ExitCode {
     // SAFETY: first thing in main, before any other thread exists.
     unsafe { hushkey_core::init_process() };
-    app::run()
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match setup::Start::from_args(&args) {
+        Ok(setup::Start::App { after_update }) => return app::run(after_update),
+        Ok(setup::Start::Install { from_python }) => {
+            log::open();
+            setup::install(from_python)
+        }
+        Ok(setup::Start::Uninstall) => {
+            log::open();
+            setup::uninstall()
+        }
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => platform::fatal(&e),
+    }
 }
 
 #[cfg(not(windows))]

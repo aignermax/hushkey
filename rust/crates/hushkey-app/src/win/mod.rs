@@ -7,13 +7,14 @@ mod clipboard;
 mod hotkey;
 mod insert;
 mod overlay;
+pub mod setup;
 
 use std::path::Path;
 use std::process::ExitCode;
 use std::ptr;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -54,13 +55,19 @@ pub fn fatal(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// True if another hushkey (Rust) already runs in this session. The mutex
-/// handle is kept for the process's life.
+/// True if another hushkey (Rust) already runs in this session. Otherwise
+/// the mutex is now ours, its handle kept for the process's life; asking
+/// again (an update waits for its predecessor) leaves no handle behind
+/// that would keep the mutex alive.
 pub fn already_running() -> bool {
     let name: Vec<u16> = "Local\\hushkey-rs".encode_utf16().chain(Some(0)).collect();
     unsafe {
         let handle = CreateMutexW(ptr::null(), 0, name.as_ptr());
-        !handle.is_null() && GetLastError() == ERROR_ALREADY_EXISTS
+        let exists = !handle.is_null() && GetLastError() == ERROR_ALREADY_EXISTS;
+        if exists {
+            CloseHandle(handle);
+        }
+        exists
     }
 }
 

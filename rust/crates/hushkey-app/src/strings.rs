@@ -25,6 +25,44 @@ pub struct Strings {
     pub quit: &'static str,
     pub model_loading: &'static str,
     pub nothing_heard: &'static str,
+    pub update_check: &'static str,
+    pub update_install: &'static str,
+    pub update_running: &'static str,
+    pub up_to_date: &'static str,
+    pub update_failed: &'static str,
+}
+
+/// "Start with Windows" and the like, per system.
+const fn autostart_en() -> &'static str {
+    if cfg!(windows) {
+        "Start with Windows"
+    } else {
+        "Start at login"
+    }
+}
+
+const fn autostart_de() -> &'static str {
+    if cfg!(windows) {
+        "Mit Windows starten"
+    } else {
+        "Beim Anmelden starten"
+    }
+}
+
+const fn copied_en() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "copied — paste with Cmd+V"
+    } else {
+        "copied — paste with Ctrl+V"
+    }
+}
+
+const fn copied_de() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "kopiert — mit Cmd+V einfügen"
+    } else {
+        "kopiert — mit Strg+V einfügen"
+    }
 }
 
 pub const EN: Strings = Strings {
@@ -44,13 +82,18 @@ pub const EN: Strings = Strings {
     insert_type: "Type (keystrokes)",
     history_menu: "Recent dictations",
     history_empty: "(none yet)",
-    copied: "copied — paste with Ctrl+V",
+    copied: copied_en(),
     listen: "Continuous listening",
-    autostart: "Start with Windows",
+    autostart: autostart_en(),
     open_logs: "Open logs",
     quit: "Quit",
     model_loading: "loading {model} — the first time downloads {size}",
     nothing_heard: "nothing heard",
+    update_check: "Check for updates",
+    update_install: "Install update: v{version}",
+    update_running: "installing the update …",
+    up_to_date: "hushkey is up to date",
+    update_failed: "update failed",
 };
 
 pub const DE: Strings = Strings {
@@ -70,13 +113,18 @@ pub const DE: Strings = Strings {
     insert_type: "Tippen (Tastenanschläge)",
     history_menu: "Letzte Diktate",
     history_empty: "(noch keine)",
-    copied: "kopiert — mit Strg+V einfügen",
+    copied: copied_de(),
     listen: "Dauerzuhören",
-    autostart: "Mit Windows starten",
+    autostart: autostart_de(),
     open_logs: "Logs öffnen",
     quit: "Beenden",
     model_loading: "lade {model} — beim ersten Mal werden {size} heruntergeladen",
     nothing_heard: "nichts gehört",
+    update_check: "Nach Updates suchen",
+    update_install: "Update installieren: v{version}",
+    update_running: "das Update wird installiert …",
+    up_to_date: "hushkey ist aktuell",
+    update_failed: "Update fehlgeschlagen",
 };
 
 /// (model name, download size) for the Model menu, as in the Python app.

@@ -25,6 +25,8 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 png = "0.18"
+sha2 = "0.10"
+ureq.workspace = true
 
 [build-dependencies]
 png = "0.18"

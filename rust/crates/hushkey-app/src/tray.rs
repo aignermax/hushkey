@@ -10,7 +10,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use crate::config::{self, Config, Insert, Mode};
 use crate::history::{self, Entry};
 use crate::icon::{self, Badge};
-use crate::strings::{Strings, KEY_LABELS, LANGUAGES, MODELS};
+use crate::strings::{self, Strings, KEY_LABELS, LANGUAGES, MODELS};
 
 /// What a menu entry does.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +23,8 @@ pub enum Action {
     Listen,
     Autostart,
     OpenLogs,
+    /// Install the offered update, or look for one.
+    Update,
     Quit,
 }
 
@@ -30,6 +32,7 @@ pub struct Tray {
     icon: TrayIcon,
     s: &'static Strings,
     status: MenuItem,
+    update: MenuItem,
     listen: CheckMenuItem,
     autostart: CheckMenuItem,
     models: Vec<(CheckMenuItem, &'static str)>,
@@ -96,6 +99,8 @@ impl Tray {
         let listen = check(s.listen, Action::Listen);
         let autostart_item = check(s.autostart, Action::Autostart);
         let open_logs = MenuItem::new(s.open_logs, true, None);
+        let update = MenuItem::new(s.update_check, true, None);
+        actions.insert(update.id().clone(), Action::Update);
         let quit = MenuItem::new(s.quit, true, None);
         actions.insert(open_logs.id().clone(), Action::OpenLogs);
         actions.insert(quit.id().clone(), Action::Quit);
@@ -127,6 +132,7 @@ impl Tray {
             &listen,
             &autostart_item,
             &open_logs,
+            &update,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -141,6 +147,7 @@ impl Tray {
             icon,
             s,
             status,
+            update,
             listen,
             autostart: autostart_item,
             models,
@@ -162,6 +169,15 @@ impl Tray {
 
     /// Tick the entries that match `config` (a click toggles a check item
     /// by itself; this puts the radio-like groups right again).
+    /// The update entry: an offered version, or "check for updates".
+    pub fn offer_update(&mut self, version: Option<&str>) {
+        let text = match version {
+            Some(v) => strings::fill(self.s.update_install, &[("version", v)]),
+            None => self.s.update_check.to_string(),
+        };
+        self.update.set_text(menu_text(&text));
+    }
+
     pub fn sync(&mut self, config: &Config, autostart: bool) {
         for (item, name) in &self.models {
             item.set_checked(*name == config.model);

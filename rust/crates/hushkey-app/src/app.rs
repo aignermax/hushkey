@@ -22,13 +22,14 @@ use hushkey_core::{
 };
 use tray_icon::menu::MenuEvent;
 
-use crate::config::{self, Config, Insert, Mode};
+use crate::config::{self, Config, Insert, Mode, Updates};
 use crate::history::History;
 use crate::icon::Badge;
 use crate::log;
 use crate::platform::{self, autostart, Hotkey, KeyEvent, Overlay, Restore};
 use crate::strings::{self, Strings, MODELS};
 use crate::tray::{Action, Tray};
+use crate::update::{self, Release};
 
 /// A press shorter than this is a tap: no dictation, and Caps Lock keeps
 /// its normal job of toggling.
@@ -40,6 +41,8 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
 /// How long a notice ("copied …") stays in the overlay.
 const NOTICE: Duration = Duration::from_secs(2);
+/// Updates are looked for at start and then this often.
+const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// Overlay dot colours, as the Python app's.
 const RED: [u8; 3] = [0xe5, 0x3e, 0x3e];
@@ -58,11 +61,24 @@ enum Msg {
     Listen(u64, Event),
     /// The inserter finished one text.
     Inserted(Result<Restore, String>),
+    /// An update check found this (`.1`: asked for from the menu).
+    UpdateChecked(Result<Option<Release>, String>, bool),
+    /// An update was put in place: the program to start, or why not.
+    UpdateInstalled(Result<std::path::PathBuf, String>),
 }
 
-pub fn run() -> ExitCode {
+pub fn run(after_update: bool) -> ExitCode {
     platform::init();
     log::open();
+    if after_update {
+        // The updated program starts while the old one is still quitting.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while platform::already_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        platform::setup::clean_after_update();
+        log::line(&format!("updated to {}", env!("CARGO_PKG_VERSION")));
+    }
     if platform::already_running() {
         log::line("already running; this start does nothing");
         return ExitCode::SUCCESS;
@@ -115,6 +131,10 @@ pub fn run() -> ExitCode {
         load_generation: 0,
         busy: false,
         notice_until: None,
+        update: None,
+        updating: false,
+        quit_requested: false,
+        next_update_check: Instant::now() + Duration::from_secs(30),
     };
     app.load_engine();
     app.run(rx)
@@ -173,6 +193,13 @@ struct App {
     busy: bool,
     /// A notice is in the overlay until then.
     notice_until: Option<Instant>,
+    /// A newer release, offered in the tray.
+    update: Option<Release>,
+    /// An update is being downloaded and put in place.
+    updating: bool,
+    /// The updated program is starting; this one goes.
+    quit_requested: bool,
+    next_update_check: Instant,
 }
 
 impl App {
@@ -193,11 +220,20 @@ impl App {
             while let Ok(msg) = rx.try_recv() {
                 self.handle(msg);
             }
+            if self.quit_requested {
+                return self.quit();
+            }
             if platform::since_last_seen().is_some_and(|quiet| quiet > RELEASE_UNSEEN) {
                 platform::forget_press();
                 if self.recording.is_some() {
                     log::line("the key's release was not seen; ending the dictation");
                     self.key_up();
+                }
+            }
+            if Instant::now() > self.next_update_check {
+                self.next_update_check = Instant::now() + UPDATE_CHECK;
+                if self.config.updates != Updates::Off {
+                    self.check_update(false);
                 }
             }
             if self
@@ -337,6 +373,41 @@ impl App {
                 if !self.busy && self.recording.is_none() && !self.hearing {
                     self.idle();
                 }
+            }
+            Msg::UpdateChecked(result, asked) => match result {
+                Ok(release) => {
+                    if let Some(r) = &release {
+                        log::line(&format!("update available: v{}", r.version));
+                    } else if asked {
+                        self.notice(GREY, self.s.up_to_date);
+                    }
+                    let version = release.as_ref().map(|r| r.version.to_string());
+                    self.tray.offer_update(version.as_deref());
+                    self.update = release;
+                }
+                Err(e) => {
+                    log::line(&format!("update check: {e}"));
+                    if asked {
+                        self.notice(GREY, self.s.update_failed);
+                    }
+                }
+            },
+            Msg::UpdateInstalled(Ok(exe)) => {
+                log::line(&format!("update in place, restarting: {}", exe.display()));
+                match platform::setup::launch(&exe, &["--after-update"]) {
+                    Ok(()) => self.quit_requested = true,
+                    Err(e) => {
+                        log::line(&format!("update: could not start it: {e}"));
+                        self.updating = false;
+                        self.notice(GREY, self.s.update_failed);
+                    }
+                }
+            }
+            Msg::UpdateInstalled(Err(e)) => {
+                log::line(&format!("update failed: {e}"));
+                self.updating = false;
+                self.notice(GREY, self.s.update_failed);
+                self.idle();
             }
             Msg::Listen(generation, event) => {
                 if generation == self.listen_generation && self.listening.is_some() {
@@ -509,9 +580,33 @@ impl App {
                 }
             }
             Action::OpenLogs => platform::open_folder(&config::state_dir()),
+            Action::Update => match self.update.clone() {
+                Some(release) if !self.updating => self.install_update(release),
+                Some(_) => {}
+                None => self.check_update(true),
+            },
             Action::Quit => {}
         }
         self.tray.sync(&self.config, autostart::enabled());
+    }
+
+    fn check_update(&self, asked: bool) {
+        let (tx, pre) = (self.tx.clone(), update::wants_pre(self.config.updates));
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::UpdateChecked(update::check(pre), asked));
+        });
+    }
+
+    fn install_update(&mut self, release: Release) {
+        log::line(&format!("installing the update to v{}", release.version));
+        self.updating = true;
+        self.notice_until = None;
+        self.overlay.show(GREY, self.s.update_running);
+        self.tray.show(Badge::Loading, self.s.update_running);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::UpdateInstalled(update::install(&release)));
+        });
     }
 
     /// Change the settings file as it is now (the user may have edited it),
