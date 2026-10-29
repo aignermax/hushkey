@@ -17,6 +17,14 @@ mod strings;
 #[cfg(windows)]
 mod win;
 
+/// A log line where there is a log (the Windows app).
+pub fn log_line(message: &str) {
+    #[cfg(windows)]
+    log::line(message);
+    #[cfg(not(windows))]
+    eprintln!("{message}");
+}
+
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
     // SAFETY: first thing in main, before any other thread exists.

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use crate::config::{Config, Insert, Mode};
+use crate::config::{self, Config, Insert, Mode};
 use crate::history::{self, Entry};
 use crate::icon::{self, Badge};
 use crate::strings::{Strings, KEY_LABELS, LANGUAGES, MODELS};
@@ -44,6 +44,11 @@ pub struct Tray {
 
 fn image(badge: Badge) -> Icon {
     Icon::from_rgba(icon::tray(badge), icon::SIZE, icon::SIZE).expect("a square RGBA icon")
+}
+
+/// Menu text shows `&` only when doubled; a single one marks a shortcut.
+fn menu_text(text: &str) -> String {
+    text.replace('&', "&&")
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -161,8 +166,10 @@ impl Tray {
         for (item, name) in &self.models {
             item.set_checked(*name == config.model);
         }
+        // By key code: the file may spell it "F9" or "Caps Lock".
+        let key = config::virtual_key(&config.key);
         for (item, name) in &self.keys {
-            item.set_checked(*name == config.key);
+            item.set_checked(config::virtual_key(name) == key);
         }
         for (item, code) in &self.languages {
             item.set_checked(*code == config.language.as_deref());
@@ -180,7 +187,7 @@ impl Tray {
             let _ = self.icon.set_icon(Some(image(badge)));
             self.badge = Some(badge);
         }
-        self.status.set_text(text);
+        self.status.set_text(menu_text(text));
         // Windows limits tooltips to 127 characters.
         let tooltip: String = text.chars().take(127).collect();
         let _ = self.icon.set_tooltip(Some(tooltip));
@@ -198,7 +205,7 @@ impl Tray {
             return;
         }
         for (i, entry) in entries.iter().enumerate() {
-            let item = MenuItem::new(history::label(&entry.text), true, None);
+            let item = MenuItem::new(menu_text(&history::label(&entry.text)), true, None);
             self.actions.insert(item.id().clone(), Action::Copy(i));
             let _ = self.history.append(&item);
             self.history_items.push(item);

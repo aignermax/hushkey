@@ -86,7 +86,6 @@ pub const KEYS: &[(&str, u32)] = &[
     ("right_ctrl", 0xA3),
     ("right_alt", 0xA5),
     ("scroll_lock", 0x91),
-    ("pause", 0x13),
     ("insert", 0x2D),
     ("f8", 0x77),
     ("f9", 0x78),
@@ -112,7 +111,25 @@ impl Config {
     pub fn load() -> Result<Config, String> {
         let path = state_dir().join("config.json");
         match std::fs::read_to_string(&path) {
-            Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(text) => match Config::parse(&text) {
+                Ok(config) => Ok(config),
+                Err(e) => {
+                    // A broken file must not keep hushkey from starting (it
+                    // may be starting with Windows): put it aside, start
+                    // with defaults, and keep it for the user to look at.
+                    let aside = path.with_extension("json.broken");
+                    std::fs::rename(&path, &aside).map_err(|r| {
+                        format!("{}: {e} (and moving it failed: {r})", path.display())
+                    })?;
+                    crate::log_line(&format!(
+                        "settings unreadable ({e}); moved to {} and started with defaults",
+                        aside.display()
+                    ));
+                    let config = Config::default();
+                    config.save()?;
+                    Ok(config)
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let config = Config::default();
                 config.save()?;
@@ -161,7 +178,10 @@ impl Config {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join("config.json");
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
+        // Write a sibling, then rename: a crash mid-write leaves the old file.
+        let partial = path.with_extension("json.part");
+        std::fs::write(&partial, text + "\n").map_err(|e| format!("{}: {e}", partial.display()))?;
+        std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 

@@ -108,7 +108,6 @@ pub const KEY_LABELS: &[(&str, &str)] = &[
     ("f8", "F8"),
     ("f9", "F9"),
     ("scroll_lock", "Scroll Lock"),
-    ("pause", "Pause"),
 ];
 
 #[cfg(windows)]

@@ -84,10 +84,18 @@ pub fn shrink(rgba: &[u8], size: u32, factor: u32) -> Vec<u8> {
     result
 }
 
+/// The logo at tray size, decoded once.
+fn small_logo() -> &'static [u8] {
+    static LOGO_SMALL: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    LOGO_SMALL.get_or_init(|| {
+        let (logo, width, _) = decode_png(LOGO);
+        shrink(&logo, width, width / SIZE)
+    })
+}
+
 /// The tray image for `badge`, `SIZE`x`SIZE` RGBA.
 pub fn tray(badge: Badge) -> Vec<u8> {
-    let (logo, width, _) = decode_png(LOGO);
-    let mut image = shrink(&logo, width, width / SIZE);
+    let mut image = small_logo().to_vec();
     if let Some(colour) = badge.colour() {
         // A disc in the lower right corner with a dark ring, like the
         // Python app's badge at (36, 36)..(62, 62) on 64 px.

@@ -66,8 +66,8 @@ const GREY: [u8; 3] = [0x71, 0x80, 0x96];
 
 enum Msg {
     Key(KeyEvent),
-    /// The engine for model `.0` loaded (or not).
-    Loaded(String, Result<Arc<Engine>, String>),
+    /// Engine load number `.0` finished (or failed).
+    Loaded(u64, Result<Arc<Engine>, String>),
     /// What the recording has heard so far.
     Preview(String),
     /// A push-to-talk dictation finished: its text (or why not).
@@ -159,6 +159,9 @@ pub fn run() -> ExitCode {
         pressed_at: None,
         listening: None,
         listen_generation: 0,
+        draining: None,
+        hearing: false,
+        load_generation: 0,
         busy: false,
         notice_until: None,
     };
@@ -215,6 +218,14 @@ struct App {
     /// Numbers listening sessions, so events of one already stopped are
     /// told apart from those of the current one.
     listen_generation: u64,
+    /// A session stopped for a model or language switch: its last
+    /// utterance still counts (one stopped by switching listening off
+    /// does not).
+    draining: Option<u64>,
+    /// Someone is speaking (between SpeechStart and SpeechEnd).
+    hearing: bool,
+    /// Numbers engine loads; only the newest one's result is used.
+    load_generation: u64,
     /// A dictation is being transcribed.
     busy: bool,
     /// A notice is in the overlay until then.
@@ -292,6 +303,8 @@ impl App {
 
     fn load_engine(&mut self) {
         self.engine = None;
+        self.load_generation += 1;
+        let generation = self.load_generation;
         let size = MODELS
             .iter()
             .find(|(name, _)| *name == self.config.model)
@@ -313,7 +326,7 @@ impl App {
                 engine.vad_model = Some(model::ensure_vad_model().map_err(|e| e.to_string())?);
                 Engine::new(engine).map(Arc::new).map_err(|e| e.to_string())
             })();
-            let _ = tx.send(Msg::Loaded(config.model, result));
+            let _ = tx.send(Msg::Loaded(generation, result));
         });
     }
 
@@ -333,8 +346,8 @@ impl App {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::Loaded(name, result) if name != self.config.model => {
-                // A model switched away from while it loaded.
+            Msg::Loaded(generation, result) if generation != self.load_generation => {
+                // Superseded by a later switch while it loaded.
                 drop(result);
             }
             Msg::Loaded(_, Ok(engine)) => {
@@ -385,13 +398,22 @@ impl App {
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
                     Err(e) => log::line(&format!("insert failed: {e}")),
                 }
-                if !self.busy && self.recording.is_none() {
+                if !self.busy && self.recording.is_none() && !self.hearing {
                     self.idle();
                 }
             }
             Msg::Listen(generation, event) => {
                 if generation == self.listen_generation && self.listening.is_some() {
                     self.listen_event(event);
+                } else if Some(generation) == self.draining {
+                    match event {
+                        Event::Utterance { transcript, .. } => self.utterance(&transcript.text),
+                        Event::Stopped => {
+                            self.draining = None;
+                            self.history.close();
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -499,7 +521,7 @@ impl App {
             Action::Model(name) => {
                 if self.config.model != name {
                     // Listening, if on, resumes once the new model loaded.
-                    self.stop_listening();
+                    self.stop_listening(true);
                     self.config.model = name.to_string();
                     self.save(|c| c.model = name.to_string());
                     self.load_engine();
@@ -527,7 +549,7 @@ impl App {
                 self.save(|c| c.language = code.map(str::to_string));
                 if self.listening.is_some() {
                     // A session keeps its language: restart it.
-                    self.stop_listening();
+                    self.stop_listening(true);
                     self.set_listening(true);
                 }
             }
@@ -569,23 +591,28 @@ impl App {
         }
     }
 
-    /// End the listening session, if any, keeping the mode (a model or
-    /// language switch restarts it).
-    fn stop_listening(&mut self) {
+    /// End the listening session, if any. Stopping finishes an utterance in
+    /// progress, off the UI thread; with `keep_last` (a model or language
+    /// switch, listening goes on) that utterance is still inserted,
+    /// without (listening switched off) it is dropped.
+    fn stop_listening(&mut self, keep_last: bool) {
         if let Some(mut session) = self.listening.take() {
-            // Stopping finishes an utterance in progress: off the UI
-            // thread, and its events are ignored (another generation).
             std::thread::spawn(move || {
                 let _ = session.stop();
             });
-            self.history.close();
+            if keep_last {
+                self.draining = Some(self.listen_generation);
+            } else {
+                self.history.close();
+            }
+            self.hearing = false;
             self.overlay.hide();
         }
     }
 
     fn set_listening(&mut self, on: bool) {
         if !on {
-            self.stop_listening();
+            self.stop_listening(false);
             if self.config.mode != Mode::PushToTalk {
                 self.config.mode = Mode::PushToTalk;
                 self.save(|c| c.mode = Mode::PushToTalk);
@@ -614,6 +641,7 @@ impl App {
             Err(e) => {
                 log::line(&format!("could not listen: {e}"));
                 self.config.mode = Mode::PushToTalk;
+                self.save(|c| c.mode = Mode::PushToTalk);
                 self.tray.sync(&self.config, autostart::enabled());
                 self.tray
                     .show(Badge::Failed, &format!("{}: {e}", self.s.failed));
@@ -646,34 +674,28 @@ impl App {
     fn listen_event(&mut self, event: Event) {
         match event {
             Event::SpeechStart { .. } => {
+                self.hearing = true;
+                self.notice_until = None; // speech replaces an older notice
                 self.overlay.show(RED, self.s.hearing);
                 self.tray.show(Badge::Recording, self.s.hearing);
             }
-            Event::Preview { text } => self.overlay.show(RED, &text),
-            Event::Utterance { transcript, .. } => {
-                // With commands or a brain configured, utterances are meant
-                // for them, not for the focused window.
-                if self.config.commands.is_none() && self.config.brain.is_none() {
-                    // One listening session is one entry in the history.
-                    self.history.extend(&transcript.text);
-                    self.tray.set_history(self.history.entries());
-                    self.insert(transcript.text.clone() + " ");
-                }
-                log::line(&format!(
-                    "utterance: {} chars",
-                    transcript.text.chars().count()
-                ));
+            Event::Preview { text } => {
+                self.notice_until = None;
+                self.overlay.show(RED, &text);
             }
+            Event::Utterance { transcript, .. } => self.utterance(&transcript.text),
             Event::SpeechEnd { .. } => {
-                self.overlay.hide();
+                self.hearing = false;
+                // A command's or reply's notice stays for its time.
+                if self.notice_until.is_none() {
+                    self.overlay.hide();
+                }
                 self.idle();
             }
             Event::Command { command, .. } => {
-                log::line(&format!(
-                    "command {}({})",
-                    command.name,
-                    command.args.join(", ")
-                ));
+                // The name only: arguments are spoken words, which the log
+                // never keeps.
+                log::line(&format!("command {}", command.name));
                 let text = format!("{} {}", command.name, command.args.join(" "));
                 self.notice(GREY, &text);
             }
@@ -683,13 +705,28 @@ impl App {
                 if self.listening.take().is_some() {
                     // Ended by itself (the microphone went away).
                     self.history.close();
+                    self.hearing = false;
+                    self.overlay.hide();
                     self.config.mode = Mode::PushToTalk;
+                    self.save(|c| c.mode = Mode::PushToTalk);
                     self.tray.sync(&self.config, autostart::enabled());
                     self.idle();
                 }
             }
             Event::Final { .. } => {}
         }
+    }
+
+    fn utterance(&mut self, text: &str) {
+        // With commands or a brain configured, utterances are meant for
+        // them, not for the focused window.
+        if self.config.commands.is_none() && self.config.brain.is_none() {
+            // One listening session is one entry in the history.
+            self.history.extend(text);
+            self.tray.set_history(self.history.entries());
+            self.insert(text.to_string() + " ");
+        }
+        log::line(&format!("utterance: {} chars", text.chars().count()));
     }
 }
 
