@@ -169,6 +169,22 @@ pub fn current() -> &'static Strings {
     }
 }
 
+/// German if the locale says so (the first of LC_ALL, LC_MESSAGES, LANG
+/// that is set; LANGUAGE lists preferences first).
+#[cfg(target_os = "linux")]
+pub fn current() -> &'static Strings {
+    let lang = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .find(|v| !v.is_empty())
+        .unwrap_or_default();
+    if lang.starts_with("de") {
+        &DE
+    } else {
+        &EN
+    }
+}
+
 /// `template` with `{name}` replaced by `value`.
 pub fn fill(template: &str, pairs: &[(&str, &str)]) -> String {
     pairs

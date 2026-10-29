@@ -33,8 +33,20 @@ png = "0.18"
 ico = "0.4"
 winresource = "0.1"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tray-icon = "0.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tray-icon's menu needs GTK on the main thread; the overlay is a GTK window
+# too. Same version as tray-icon's.
+gtk = "0.18"
+# The key from /dev/input, and a uinput keyboard for the paste chord.
+evdev = "0.13"
+arboard = { version = "3", default-features = false }
+x11rb = "0.13"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
