@@ -52,6 +52,12 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
     }
 }
 
+/// Press and release `vk` (as an injected event: hushkey's own hook lets it
+/// through).
+pub fn tap_key(vk: VIRTUAL_KEY) {
+    let _ = send(&[key(vk, 0, 0), key(vk, 0, KEYEVENTF_KEYUP)]);
+}
+
 /// Type `text` as Unicode key events.
 pub fn type_text(text: &str) -> Result<(), String> {
     let mut inputs = Vec::new();

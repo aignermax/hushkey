@@ -120,21 +120,27 @@ fn two_sentences_with_a_pause_become_separate_utterances() {
         utterances.iter().all(|u| u.2 <= gap.0 || u.1 >= gap.1),
         "{utterances:#?}"
     );
-    // Every utterance was announced by a SpeechStart.
-    let mut open = false;
+    // Every utterance sits between a SpeechStart and its SpeechEnd, and
+    // every SpeechStart gets its SpeechEnd.
+    let (mut open, mut heard) = (false, false);
     for e in &events {
         match e {
             Event::SpeechStart { .. } => {
                 assert!(!open, "{events:#?}");
-                open = true;
+                (open, heard) = (true, false);
             }
             Event::Utterance { .. } => {
+                assert!(open && !heard, "{events:#?}");
+                heard = true;
+            }
+            Event::SpeechEnd { .. } => {
                 assert!(open, "{events:#?}");
                 open = false;
             }
             _ => {}
         }
     }
+    assert!(!open, "{events:#?}");
 }
 
 #[test]

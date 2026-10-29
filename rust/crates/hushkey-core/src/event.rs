@@ -21,6 +21,10 @@ pub enum Event {
         start_ms: i64,
         end_ms: i64,
     },
+    /// Listening: the utterance that began with the last `SpeechStart` is
+    /// done, `at_ms` after the session began. Its `Utterance` (and
+    /// `Command`) came before, unless it turned out to be noise.
+    SpeechEnd { at_ms: i64 },
     /// Listening: the utterance just reported is a command.
     Command { command: CommandMatch, text: String },
     /// Listening: the brain's answer to the utterance `to`; `details` is

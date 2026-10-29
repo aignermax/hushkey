@@ -5,7 +5,9 @@
 //! tool's) pass through untouched.
 
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -31,6 +33,38 @@ struct Watch {
 /// One hook per process: the hook procedure has no user data.
 static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
 
+/// When the held key was last seen going down (auto-repeat included), in
+/// ms since [`epoch`]; 0 while it is up.
+static LAST_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn now_ms() -> u64 {
+    epoch().elapsed().as_millis() as u64 + 1 // never 0, which means "up"
+}
+
+/// How long the held key has been silent (no repeat), or None when up.
+pub fn since_last_seen() -> Option<Duration> {
+    match LAST_SEEN.load(Ordering::SeqCst) {
+        0 => None,
+        seen => Some(Duration::from_millis(now_ms().saturating_sub(seen))),
+    }
+}
+
+/// Treat the key as released (its release happened out of the hook's
+/// sight), so the next press starts a new dictation.
+pub fn forget_press() {
+    LAST_SEEN.store(0, Ordering::SeqCst);
+    if let Ok(mut watch) = WATCH.lock() {
+        if let Some(watch) = watch.as_mut() {
+            watch.down = false;
+        }
+    }
+}
+
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let event = &*(lparam as *const KBDLLHOOKSTRUCT);
@@ -44,9 +78,11 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
                                 watch.down = true;
                                 (watch.on_key)(KeyEvent::Down);
                             }
+                            LAST_SEEN.store(now_ms(), Ordering::SeqCst);
                         }
                         WM_KEYUP | WM_SYSKEYUP => {
                             watch.down = false;
+                            LAST_SEEN.store(0, Ordering::SeqCst);
                             (watch.on_key)(KeyEvent::Up);
                         }
                         _ => {}

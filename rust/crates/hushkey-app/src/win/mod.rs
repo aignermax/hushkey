@@ -14,6 +14,8 @@ use std::process::ExitCode;
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use hushkey_brain::{Claudio, ClaudioConfig, OpenAiChat, OpenAiConfig};
 use hushkey_core::{
@@ -32,13 +34,23 @@ use hotkey::{Hotkey, KeyEvent};
 use insert::Restore;
 use tray::{Look, Tray};
 
+/// A press shorter than this is a tap: no dictation, and Caps Lock keeps
+/// its normal job of toggling.
+const MIN_HOLD: Duration = Duration::from_millis(400);
+/// While a key is held, Windows repeats its key-down every ~30 ms after the
+/// initial delay (at most 1 s). Silence longer than this means the release
+/// happened where the hook cannot see it (UAC, Ctrl+Alt+Del, a locked
+/// screen).
+const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
+const VK_CAPITAL: u32 = 0x14;
+
 enum Msg {
     Key(KeyEvent),
     Loaded(Result<Arc<Engine>, String>),
     /// A push-to-talk dictation finished: its text (or why not).
     Dictated(Result<String, String>),
-    /// Listening reported something.
-    Listen(Event),
+    /// Listening session number `.0` reported something.
+    Listen(u64, Event),
     /// The inserter finished one text.
     Inserted(Result<Restore, String>),
 }
@@ -80,17 +92,22 @@ pub fn run() -> ExitCode {
         Ok(t) => t,
         Err(e) => return fatal(&e),
     };
-    let inserter = spawn_inserter(config.insert, config.restore_clipboard, tx.clone());
+    let (inserter, inserter_thread) =
+        spawn_inserter(config.insert, config.restore_clipboard, tx.clone());
     load_engine(&config, tx.clone());
     log::line(&format!("started, key {}", config.key));
     App {
+        vk,
         config,
         tx,
         tray,
-        inserter,
+        inserter: Some(inserter),
+        inserter_thread: Some(inserter_thread),
         engine: None,
         recording: None,
+        pressed_at: None,
         listening: None,
+        listen_generation: 0,
         busy: false,
     }
     .run(rx)
@@ -114,9 +131,9 @@ fn load_engine(config: &Config, tx: Sender<Msg>) {
 }
 
 /// One thread inserts, so dictations never interleave.
-fn spawn_inserter(how: Insert, restore: bool, tx: Sender<Msg>) -> Sender<String> {
+fn spawn_inserter(how: Insert, restore: bool, tx: Sender<Msg>) -> (Sender<String>, JoinHandle<()>) {
     let (text_tx, text_rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         for text in text_rx {
             let result = match how {
                 Insert::Paste => insert::paste(&text, restore).or_else(|e| {
@@ -128,17 +145,23 @@ fn spawn_inserter(how: Insert, restore: bool, tx: Sender<Msg>) -> Sender<String>
             let _ = tx.send(Msg::Inserted(result));
         }
     });
-    text_tx
+    (text_tx, thread)
 }
 
 struct App {
+    vk: u32,
     config: Config,
     tx: Sender<Msg>,
     tray: Tray,
-    inserter: Sender<String>,
+    inserter: Option<Sender<String>>,
+    inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
     recording: Option<RecordSession>,
+    pressed_at: Option<Instant>,
     listening: Option<ListenSession>,
+    /// Numbers listening sessions, so events of one already stopped are
+    /// told apart from those of the current one.
+    listen_generation: u64,
     /// A dictation is being transcribed.
     busy: bool,
 }
@@ -169,6 +192,13 @@ impl App {
             while let Ok(msg) = rx.try_recv() {
                 self.handle(msg);
             }
+            if hotkey::since_last_seen().is_some_and(|quiet| quiet > RELEASE_UNSEEN) {
+                hotkey::forget_press();
+                if self.recording.is_some() {
+                    log::line("the key's release was not seen; ending the dictation");
+                    self.key_up();
+                }
+            }
             // Sleep until a window message arrives, or poll the channels
             // again soon.
             unsafe { MsgWaitForMultipleObjects(0, ptr::null(), 0, 50, QS_ALLINPUT) };
@@ -182,8 +212,20 @@ impl App {
         if let Some(mut session) = self.listening.take() {
             let _ = session.stop();
         }
+        // A paste in progress owns the clipboard; let it finish (render,
+        // restore) rather than leave an entry nobody can render.
+        self.inserter = None;
+        if let Some(thread) = self.inserter_thread.take() {
+            let _ = thread.join();
+        }
         log::line("quit");
         ExitCode::SUCCESS
+    }
+
+    fn insert(&self, text: String) {
+        if let Some(inserter) = &self.inserter {
+            let _ = inserter.send(text);
+        }
     }
 
     fn handle(&mut self, msg: Msg) {
@@ -211,7 +253,7 @@ impl App {
                     self.idle();
                 } else {
                     log::line(&format!("dictation: {} chars", text.chars().count()));
-                    let _ = self.inserter.send(text + " ");
+                    self.insert(text + " ");
                 }
             }
             Msg::Dictated(Err(e)) => {
@@ -228,7 +270,11 @@ impl App {
                     self.idle();
                 }
             }
-            Msg::Listen(event) => self.listen_event(event),
+            Msg::Listen(generation, event) => {
+                if generation == self.listen_generation && self.listening.is_some() {
+                    self.listen_event(event);
+                }
+            }
         }
     }
 
@@ -245,6 +291,7 @@ impl App {
     }
 
     fn key_down(&mut self) {
+        self.pressed_at = Some(Instant::now());
         if self.listening.is_some() || self.recording.is_some() || self.busy {
             return;
         }
@@ -275,9 +322,25 @@ impl App {
     }
 
     fn key_up(&mut self) {
+        let tap = self
+            .pressed_at
+            .take()
+            .is_some_and(|t| t.elapsed() < MIN_HOLD);
+        if tap && self.vk == VK_CAPITAL {
+            // The hook swallowed the press; a tap still toggles Caps Lock.
+            insert::tap_key(VK_CAPITAL as u16);
+        }
         let Some(mut session) = self.recording.take() else {
             return;
         };
+        if tap {
+            // Too short to be a dictation: end the recording, insert nothing.
+            std::thread::spawn(move || {
+                let _ = session.stop();
+            });
+            self.idle();
+            return;
+        }
         self.busy = true;
         self.tray.show(Look::Transcribing, "Transcribing…");
         let tx = self.tx.clone();
@@ -290,19 +353,33 @@ impl App {
         });
     }
 
+    /// Remember the mode in the settings file without overwriting what the
+    /// user changed there since start.
+    fn remember_mode(&mut self, mode: Mode) {
+        if self.config.mode == mode {
+            return;
+        }
+        self.config.mode = mode;
+        if let Err(e) = Config::save_mode(mode) {
+            log::line(&format!("mode not saved: {e}"));
+        }
+    }
+
     fn set_listening(&mut self, on: bool) {
         self.tray.listen.set_checked(on);
         if !on {
             if let Some(mut session) = self.listening.take() {
-                let _ = session.stop();
+                // Stopping finishes an utterance in progress: off the UI
+                // thread, and its events are ignored (another generation).
+                std::thread::spawn(move || {
+                    let _ = session.stop();
+                });
             }
-            self.config.mode = Mode::PushToTalk;
-            let _ = self.config.save();
+            self.remember_mode(Mode::PushToTalk);
             self.idle();
             return;
         }
-        self.config.mode = Mode::Listen;
-        let _ = self.config.save();
+        self.remember_mode(Mode::Listen);
         let Some(engine) = self.engine.clone() else {
             return; // starts once the model is loaded
         };
@@ -324,7 +401,7 @@ impl App {
         }
     }
 
-    fn start_listening(&self, engine: Arc<Engine>) -> Result<ListenSession, String> {
+    fn start_listening(&mut self, engine: Arc<Engine>) -> Result<ListenSession, String> {
         let mut listen = ListenConfig::default().with_end_silence(self.config.end_silence_ms);
         if let Some(path) = &self.config.commands {
             let json =
@@ -335,11 +412,14 @@ impl App {
         }
         listen.brain = brain(&self.config)?;
         let tx = self.tx.clone();
+        let generation = self.listen_generation + 1;
         let sink: EventSink = Arc::new(move |event| {
-            let _ = tx.send(Msg::Listen(event));
+            let _ = tx.send(Msg::Listen(generation, event));
         });
-        ListenSession::start(engine, Box::new(Microphone::new(None)), listen, sink)
-            .map_err(|e| e.to_string())
+        let session = ListenSession::start(engine, Box::new(Microphone::new(None)), listen, sink)
+            .map_err(|e| e.to_string())?;
+        self.listen_generation = generation;
+        Ok(session)
     }
 
     fn listen_event(&mut self, event: Event) {
@@ -349,7 +429,7 @@ impl App {
                 // With commands or a brain configured, utterances are meant
                 // for them, not for the focused window.
                 if self.config.commands.is_none() && self.config.brain.is_none() {
-                    let _ = self.inserter.send(transcript.text.clone() + " ");
+                    self.insert(transcript.text.clone() + " ");
                 }
                 log::line(&format!(
                     "utterance: {} chars",
@@ -368,6 +448,7 @@ impl App {
                     &format!("Command: {} {}", command.name, command.args.join(" ")),
                 );
             }
+            Event::SpeechEnd { .. } => self.idle(),
             Event::Reply { text, .. } => self.tray.show(Look::Listening, &text),
             Event::Error { message } => log::line(&format!("listening: {message}")),
             Event::Stopped => {

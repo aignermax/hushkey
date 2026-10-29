@@ -20,7 +20,9 @@ use windows_sys::Win32::System::DataExchange::{
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows_sys::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowThreadProcessId, PostMessageW,
@@ -129,21 +131,21 @@ pub fn read_text() -> Option<String> {
     open(ptr::null_mut()).ok()?;
     let text = unsafe {
         let handle = GetClipboardData(CF_UNICODETEXT);
-        if handle.is_null() {
+        let p = if handle.is_null() {
+            ptr::null_mut()
+        } else {
+            GlobalLock(handle).cast::<u16>()
+        };
+        if p.is_null() {
             None
         } else {
-            let p = GlobalLock(handle).cast::<u16>();
-            if p.is_null() {
-                None
-            } else {
-                let mut len = 0;
-                while *p.add(len) != 0 {
-                    len += 1;
-                }
-                let text = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
-                GlobalUnlock(handle);
-                Some(text)
-            }
+            // Up to the NUL, but never past the block: another program's
+            // text may lack the terminator.
+            let units = std::slice::from_raw_parts(p, GlobalSize(handle) / 2);
+            let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+            let text = String::from_utf16_lossy(&units[..len]);
+            GlobalUnlock(handle);
+            Some(text)
         }
     };
     unsafe { CloseClipboard() };
@@ -223,8 +225,17 @@ impl Drop for MessageWindow {
     }
 }
 
+#[derive(Default)]
+struct Setup {
+    /// The offer thread reported back.
+    ready: bool,
+    /// The caller gave up waiting: the thread must not take the clipboard.
+    abandoned: bool,
+}
+
 struct OfferShared {
     data: Vec<u8>,
+    setup: Mutex<Setup>,
     armed: AtomicBool,
     targets: Mutex<Vec<u32>>,
     fetched: Mutex<bool>,
@@ -248,6 +259,7 @@ impl Offer {
     pub fn new(text: &str) -> Result<Offer, String> {
         let shared = Arc::new(OfferShared {
             data: utf16_bytes(text),
+            setup: Mutex::new(Setup::default()),
             armed: AtomicBool::new(false),
             targets: Mutex::new(Vec::new()),
             fetched: Mutex::new(false),
@@ -259,7 +271,21 @@ impl Offer {
             .name("hushkey-clipboard".into())
             .spawn(move || offer_thread(for_thread, ready_tx))
             .map_err(|e| e.to_string())?;
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        let mut answer = ready_rx.recv_timeout(Duration::from_secs(5));
+        if answer.is_err() {
+            // Give up, unless the thread finished just now: it reports
+            // under the same lock, so either it sees `abandoned` before
+            // taking the clipboard, or its answer is already sent.
+            let mut setup = shared.setup.lock().unwrap();
+            if setup.ready {
+                drop(setup);
+                answer = ready_rx.recv_timeout(Duration::ZERO);
+            } else {
+                setup.abandoned = true;
+                return Err("the clipboard did not answer".into());
+            }
+        }
+        match answer {
             Ok(Ok(hwnd)) => Ok(Offer {
                 shared,
                 hwnd,
@@ -269,8 +295,6 @@ impl Offer {
                 let _ = thread.join();
                 Err(e)
             }
-            // The thread may still take the clipboard; it cannot be stopped
-            // from here, but its window closes when it gets there.
             Err(_) => Err("the clipboard did not answer".into()),
         }
     }
@@ -327,8 +351,15 @@ fn offer_thread(shared: Arc<OfferShared>, ready: mpsc::Sender<Result<usize, Stri
         }
     };
     let hwnd = window.hwnd;
+    let mut state = None;
     let setup = (|| {
         open(hwnd)?;
+        let guard = shared.setup.lock().unwrap();
+        if guard.abandoned {
+            unsafe { CloseClipboard() };
+            return Err("abandoned".to_string());
+        }
+        state = Some(guard);
         let result = (|| {
             if unsafe { EmptyClipboard() } == 0 {
                 return Err("EmptyClipboard failed".to_string());
@@ -349,6 +380,8 @@ fn offer_thread(shared: Arc<OfferShared>, ready: mpsc::Sender<Result<usize, Stri
             Err("the clipboard did not take the dictation".to_string())
         }
     })();
+    let mut state = state.unwrap_or_else(|| shared.setup.lock().unwrap());
+    state.ready = true;
     if let Err(e) = setup {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
         drop(window);
@@ -356,6 +389,7 @@ fn offer_thread(shared: Arc<OfferShared>, ready: mpsc::Sender<Result<usize, Stri
         return;
     }
     let _ = ready.send(Ok(hwnd as usize));
+    drop(state);
     std::mem::forget(window); // WM_CLOSE destroys it inside the loop
     unsafe {
         let mut msg: MSG = std::mem::zeroed();

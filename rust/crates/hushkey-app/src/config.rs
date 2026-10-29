@@ -143,6 +143,19 @@ impl Config {
         Ok(config)
     }
 
+    /// Set `mode` in the settings file, keeping everything else as the file
+    /// has it now (the user may have edited it since start).
+    pub fn save_mode(mode: Mode) -> Result<(), String> {
+        let path = state_dir().join("config.json");
+        let mut current = match std::fs::read_to_string(&path) {
+            Ok(text) => Config::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        current.mode = mode;
+        current.save()
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let dir = state_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
