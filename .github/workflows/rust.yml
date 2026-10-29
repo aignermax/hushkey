@@ -25,6 +25,9 @@ jobs:
       # Real-model tests each load a model and decode on the CPU; in parallel
       # on a hosted runner's few cores a single preview outlasts any timeout.
       RUST_TEST_THREADS: "1"
+      # Portable whisper.cpp: a build cached on one runner must run on the
+      # next, whose CPU may lack the first one's instruction sets.
+      GGML_NATIVE: "OFF"
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +38,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+          # whisper-rs-sys does not rebuild when GGML_* changes
+          key: ggml-portable
 
       - name: ALSA (cpal) and OpenSSL (native TLS for brains) headers
         if: runner.os == 'Linux'
