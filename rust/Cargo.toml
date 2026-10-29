@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/hushkey-core", "crates/hushkey-brain", "crates/hushkey-ffi", "crates/hushkey-cli", "crates/hushkey-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.11.0-rc.1"
 edition = "2021"
 rust-version = "1.85"
 publish = false

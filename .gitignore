@@ -13,3 +13,8 @@ native/
 debug-audio/
 debug-audio.json
 debug-audio.lock
+
+# local tool state
+.claude/
+.codegraph/
+.cursor/

@@ -25,14 +25,28 @@ serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 png = "0.18"
+sha2 = "0.10"
+ureq.workspace = true
 
 [build-dependencies]
 png = "0.18"
 ico = "0.4"
 winresource = "0.1"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tray-icon = "0.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tray-icon's menu needs GTK on the main thread; the overlay is a GTK window
+# too. Same version as tray-icon's.
+gtk = "0.18"
+# The key from /dev/input, and a uinput keyboard for the paste chord.
+evdev = "0.13"
+arboard = { version = "3", default-features = false }
+x11rb = "0.13"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -46,3 +60,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
 ] }
+
+# The versions tray-icon already uses, so there is one objc2 in the build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+libc = "0.2"

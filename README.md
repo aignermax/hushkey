@@ -2,502 +2,122 @@
   <img src="assets/logo.png" width="200" alt="hushkey logo — a winking husky holding a key">
 </p>
 <h1 align="center">hushkey</h1>
-<p align="center"><em>formerly whisper-ptt</em></p>
 
-Local, offline push-to-talk dictation for **Linux (X11 and Wayland), Windows and
-macOS** — hold <kbd>Right Ctrl</kbd>, speak, release, and the transcript lands
-in whatever window has focus. Terminal, editor, browser, chat: any app. Powered by
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper), CUDA-accelerated
-when an NVIDIA GPU is present (Linux/Windows). Installers automatically set up
-**Vulkan for AMD and other supported GPUs on Windows/Linux**, **Metal on macOS**,
-or CPU inference when no supported GPU is available. No separate GPU setup is needed.
+Local, offline push-to-talk dictation for **Windows, Linux (X11 and Wayland)
+and macOS**: hold <kbd>Caps Lock</kbd>, speak, release, and the transcript
+lands in whatever window has focus. Terminal, editor, browser, chat: any app.
 
+One small native program (Rust, [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+inside): GPU-accelerated through **Vulkan** on Windows and Linux (AMD, NVIDIA,
+Intel) and **Metal** on macOS, CPU where there is no GPU. No Python, no setup.
 Nothing leaves your machine after the one-time model download.
 
 ## Install
 
-Grab the installer from the
-**[latest release](https://github.com/aignermax/hushkey/releases/latest)**:
-
-- **Windows:** `hushkey-setup-….exe` — per-user (no admin), installs Python 3.12
-  if missing, sets up autostart. Uninstall via Windows' app list (leaves the
-  model cache in `~/.cache/huggingface` and the logs in
-  `%LOCALAPPDATA%\whisper-ptt` in place).
-- **Linux (Debian/Ubuntu):** `hushkey_…_all.deb` — `sudo apt install ./hushkey_…_all.deb`
-  resolves the dependencies and sets up everything (venv, systemd user
-  service, a *hushkey* entry in the app search); `apt purge hushkey` removes
-  it again, including the udev rule.
-
-Prefer the terminal — or are on macOS? The one-liners do the same job, and
-re-running them updates in place:
-
-**Linux / macOS:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
-```
-
-**Windows (PowerShell):**
+**Windows** (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/aignermax/hushkey/master/install.ps1 | iex
 ```
 
-Both fetch the sources (into `~/.local/share/whisper-ptt` on Linux/macOS,
-`%LOCALAPPDATA%\Programs\whisper-ptt` on Windows), install all dependencies and
-set up autostart. From your own checkout, `./install.sh` /
-`powershell -ExecutionPolicy Bypass -File install.ps1` work the same way
-(`install.ps1 -NoAutostart` or `./install.sh --no-autostart` skips autostart if you prefer to run
-`.venv\Scripts\python.exe dictate.py` manually).
+**Linux and macOS**:
 
-That's it: the daemon is running and starts on every login. The one exception is
-Linux/Wayland — if the installer had to add you to the `input` group, it says so
-and you need to log out once; the service is already enabled and comes up by
-itself afterwards.
+```bash
+curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
+```
 
-The first dictation downloads the whisper model (~0.5–1.5 GB) into
-`~/.cache/huggingface`; after that everything is offline.
+The installer downloads the program for your system from the
+[latest release](https://github.com/aignermax/hushkey/releases/latest), checks
+it against `SHA256SUMS`, and the program installs itself: a menu entry, start
+at login, a tray icon. Add `-Pre` (PowerShell) or `--pre` (bash) for
+pre-releases. You can also download the program from the release yourself and
+run it with `--install`.
 
-## Why hushkey?
+| | program | settings, history, log |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\Programs\hushkey\hushkey.exe` | `%LOCALAPPDATA%\hushkey-rs` |
+| Linux | `~/.local/bin/hushkey` | `~/.local/share/hushkey-rs` |
+| macOS | `~/Applications/hushkey.app` | `~/Library/Application Support/hushkey-rs` |
 
-**Speaking is ~3× faster than typing** — and hushkey works in virtually every
-app: it types into the focused window. No plugin, no integration, no account.
+**Linux:** the key is read from `/dev/input` and text is inserted through a
+virtual keyboard (`/dev/uinput`); both need the `input` group. The installer
+sets this up once (it asks for your password; log out and in once
+afterwards).
 
-- **Prompt AI at the speed of thought.** Long prompts are the bottleneck when
-  working with AI — and many AI tools have no voice input at all. Hold
-  <kbd>Right Ctrl</kbd>, think out loud, release: IDE chat, web UI, terminal —
-  the words land where your cursor is.
-- **Every app becomes a dictation app.** Email, docs, chat, ticket comments,
-  commit messages, search fields — if it takes text, hushkey types into it.
-  On Windows and X11, terminals even get full-speed typing automatically.
-- **Speaks your language.** German, English, Italian, Spanish, French,
-  Kannada, Chinese — plus dozens more via `WHISPER_LANG`, with auto-detect
-  for mixed-language teams.
-- **Private by design.** Everything runs offline on your machine: no cloud,
-  no account, no telemetry — nothing you say ever leaves the box.
-- **No subscription.** MIT-licensed and free. Comparable cloud tools charge
-  $8–15/month.
-- **You see it working.** A tray icon — and on Windows a small on-screen
-  pill — shows when the mic is live and when your text is being written.
-  Switch between five model sizes (fast ↔ accurate) right from the tray.
-- **Voice memos too.** `transcribe.py` turns a whole folder of recordings into
-  Markdown notes in one go.
+**macOS:** grant hushkey **Microphone** and **Accessibility** access when asked
+(System Settings › Privacy & Security); the key and the inserting depend on
+them.
 
-Built for heavy prompters, fast thinkers, slow typists and sore wrists — for
-anyone who would rather *say* it than type it.
-
-## Requirements
-
-| | Linux | Windows | macOS |
-|---|---|---|---|
-| OS | Ubuntu 22.04+ or equivalent modern distro, X11 **or** Wayland | Windows 10 1903+ | macOS 13+ (14+ recommended) |
-| Audio | PipeWire `pw-record` (standard on Ubuntu ≥ 22.10/Fedora); fallback: `libportaudio2` | any microphone | any microphone |
-| Python | ≥ 3.10; installed automatically if missing | installed automatically if missing | compatible Python installed automatically if missing |
-| Acceleration (automatic) | NVIDIA CUDA or Vulkan GPU | NVIDIA CUDA or Vulkan GPU | Metal GPU (Apple Silicon / supported Intel Macs) |
-
-On macOS you must grant the terminal **Microphone**, **Accessibility** and
-**Input Monitoring** permissions when prompted (System Settings → Privacy &
-Security) — the global hotkey and synthetic typing depend on them.
-
-**On Linux/Wayland additionally** — the installer handles all of this and will
-ask for your password once:
-
-- `ydotool` and `wl-clipboard` packages (ydotool 0.1.x and 1.x both work —
-  the daemon detects which key syntax and socket path the installed one uses)
-- a udev rule giving the `input` group access to `/dev/uinput`
-- your user added to the `input` group (**requires one logout**)
+**Coming from the Python hushkey (whisper-ptt)?** Nothing to do: its updater
+offers this version, and installing it moves you over, keeping your model,
+key, language and recent dictations. The Python app is switched off; its
+folder stays and can be deleted.
 
 ## Use
 
-| Action | How |
+| | |
 |---|---|
-| Dictate into any app | Focus the input field, **hold <kbd>Right Ctrl</kbd>**, speak, release → text is inserted |
-| Batch-transcribe voice memos | `.venv/bin/python transcribe.py ~/path/to/audio --out ~/notes` (Windows: `.venv\Scripts\python.exe transcribe.py ...`) |
+| Dictate | Hold the key, speak, release: the text is inserted where the cursor is (nothing is sent; review and press Enter yourself) |
+| Caps Lock | A short tap still toggles capitals; only a hold dictates |
+| Continuous listening | Tray menu › *Continuous listening*: every sentence you say is inserted, no key needed; one listening session is one history entry |
+| Recent dictations | Tray menu › *Recent dictations*: click one to copy it again |
 
-Dictated text is only *inserted* — nothing is submitted; review and hit Enter.
-A trailing space is appended so consecutive dictations don't stick together.
+While you speak, a small pill at the top of the screen with the mouse shows
+what has been heard so far.
 
-**No <kbd>Right Ctrl</kbd> on your laptop?** Pick <kbd>F9</kbd> or
-<kbd>F8</kbd> instead — right in the tray menu under *Push-to-talk
-key* (no config file or env var needed).
+The tray menu holds the settings: **model** (tiny … large-v3; large-v3-turbo
+is the default and a good balance), **key** (Caps Lock, Right Ctrl, F8, F9,
+Scroll Lock), **language** (or auto-detect), **insert method** (paste via the
+clipboard, which is restored afterwards, or typed keystrokes), **start at
+login**, **logs**, and **updates**.
 
-## Configuration
+## Updates
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `WHISPER_ENGINE` | installer-selected | Expert override: `faster-whisper`, `vulkan` (Windows/Linux), or `metal` (macOS). Explicit native GPU selection fails clearly if the GPU cannot initialize |
-| `WHISPER_CPP_SERVER` | installed per-user engine, then PATH | Optional path to the Vulkan-built `whisper-server` executable; keep any required shared libraries beside a custom executable |
-| `WHISPER_CPP_DEVICE` | `0` | GPU index from whisper.cpp's startup device list; useful for choosing the dedicated GPU on machines with integrated graphics |
-| `WHISPER_CPP_ALLOW_LAYERS` | `0` | `1` allows automatically injected Vulkan capture/overlay layers in the inference process. Normally disabled for this process only to avoid stalls; explicit `VK_LOADER_LAYERS_DISABLE` settings are preserved |
-| `PTT_KEY` | `ctrl_r` | Push-to-talk key (`f9`, `caps_lock`, … or a raw evdev name like `KEY_RIGHTCTRL`); easiest via the tray menu (**Push-to-talk key**) — picking a key there replaces a user-level `PTT_KEY`; an env var set inside a service unit still wins |
-| `WHISPER_MODEL` | `medium` (GPU) / `small` (CPU) | Whisper model size; easiest via the tray menu (**Model**) — picking a model there replaces a user-level `WHISPER_MODEL`; an env var set inside a service unit still wins |
-| `WHISPER_LANG` | `de` | Language code; empty string = auto-detect. Easiest via the tray menu (**Language**: Auto/De/En/It/Es/Fr/Kn/Zh) — applies to the next dictation, no restart; an env var set inside a service unit still wins |
-| `WHISPER_ZH_PROMPT` | a Simplified-Chinese sentence | Initial prompt for Chinese dictation: whisper otherwise mixes Traditional characters into Mandarin output at random, and the prompt pins the script. Applied directly when `zh` is pinned; on auto-detect, dictations that produced Chinese **characters** are decoded a second time with it — the language guess on Mandarin is too flaky to gate on (Japanese and Cantonese are exempt; they share the characters). The Chinese decode runs at fixed temperature 0, because the fallback chain's higher temperatures repeat syllables on borderline audio. `''` disables the prompt (the temperature-0 decode stays); Traditional-Chinese users can set a Traditional prompt instead |
-| `PTT_BACKEND` | from `XDG_SESSION_TYPE` | Force `pynput` (X11/Windows/macOS; `x11` is accepted as an alias) or `wayland` |
-| `PTT_TYPE_DELAY` | `0.01` | `pynput` backend only: seconds between typed characters; raise it (e.g. `0.03`) if dictated text arrives garbled in heavy editors (Electron, browsers) |
-| `PTT_TYPE_DELAY_TERMINAL` | `0` | Windows + Linux/X11: delay used instead of `PTT_TYPE_DELAY` when the focused window is a terminal — consoles keep up with full-speed keystrokes, so dictation lands instantly there (Wayland pastes instead of typing, so no pacing applies) |
-| `PTT_PASTE_KEY` | `ctrl+v` | Wayland only: the paste chord. **Terminals need `ctrl+shift+v`** |
-| `PTT_KEEP_CLIPBOARD` | unset | `1` leaves the transcript in the clipboard instead of restoring the previous contents |
-| `PTT_CLIPBOARD_SETTLE` | `0.4` | Seconds before the previous clipboard is restored (on Windows counted from the target's first read); raise it if a slow app pastes the restored value instead of the transcript |
-| `PTT_PASTE_TIMEOUT` | `5` | Windows only: seconds to wait for the target app to fetch a pasted dictation; without a fetch the previous clipboard is given up rather than restored |
-| `PTT_UPDATE_CHECK` | `1` | Tray only: check GitHub releases at startup and every 4 h; a waiting update shows a notification + a **blue badge** on the tray icon (install is always one manual click); `0` disables the check |
-| `PTT_OVERLAY` | `1` | Show the recording/live-preview overlay on Windows, Linux and macOS. It follows the mouse to the current monitor. `0` disables it. Requires tkinter; on Wayland monitor selection and placement are best effort through Xwayland. |
-| `PTT_PREVIEW` | `1` | Show provisional recognition about every two seconds, plus inference time. `0` keeps the recording indicator without extra inference. Disabled with `PTT_OVERLAY=0` or legacy `PTT_STREAMING=1`. |
-| `PTT_STREAMING` | `0` | Experimental: while the key is held, completed speech blocks are already transcribed and inserted every few seconds instead of one big paste on release — see "Streaming mode" below |
-| `PTT_STREAM_INTERVAL` | `3.0` | Seconds between streaming ticks (streaming mode only) |
-| `PTT_CMD_TIMEOUT` | `30` | Seconds a helper (`wl-paste`, `ydotool`) may take before it is given up on. `0` waits indefinitely. Note `wl-copy` is never waited on at all — see below |
+hushkey looks for a newer release at start and every four hours and offers it
+in the tray menu (*Install update: v…*); nothing installs unasked. Installing
+downloads the new program, checks it against the release's `SHA256SUMS`,
+swaps it in and restarts. While you run a pre-release, newer pre-releases are
+offered too; `"updates": "pre"` or `"off"` in `config.json` changes that.
 
-### Automatic GPU setup
+## Advanced settings
 
-Every existing installation route runs the same acceleration setup: Windows
-`.exe` and PowerShell, Linux `.deb` and shell script, macOS shell script, and
-in-app updates. There is no additional `setup_vulkan.py` command for users.
+`config.json` in the settings folder also holds what the menu does not:
+`restore_clipboard`, `end_silence_ms` (pause that ends a sentence in
+continuous listening), `use_gpu`, `commands` (voice commands, see
+`docs/superpowers/specs/2026-10-28-rust-core-design.md`) and `brain` (an
+OpenAI-compatible or Claudio server that answers what you say in continuous
+listening).
 
-- **Windows/Linux:** prefer working NVIDIA CUDA, otherwise use a supported
-  Vulkan GPU, including AMD. On hybrid systems prefer the dedicated Vulkan GPU.
-- **macOS:** use the native Metal backend. Apple Silicon and Intel have separate
-  prebuilt engines; Vulkan is not required on the Mac.
-- **CPU-only computers:** install normally and clearly report CPU selection.
+## Uninstall
 
-The installer obtains the matching prebuilt engine, verifies its SHA-256 checksum,
-loads a tiny public test model and runs an inference probe before saving the
-backend. Windows includes the Vulkan loader; Linux installs the loader and Mesa
-runtime packages through the distribution's package manager. GPU vendor drivers
-must support the selected backend. No compiler, Visual Studio or Vulkan SDK is
-needed for a normal installation. Internet access is needed for installation,
-the probe model and each newly selected model; inference then works offline.
-Download/corruption/build errors fail setup instead of claiming GPU success.
+Windows: `powershell -ExecutionPolicy Bypass -File uninstall.ps1`, or run
+`hushkey.exe --uninstall`. Linux and macOS: `bash uninstall.sh`, or run
+`hushkey --uninstall`. Settings, history and log stay.
 
-Native release architectures are Windows x64, Linux x64/arm64, and macOS
-x64/arm64. OS permissions still apply: macOS requires Microphone, Accessibility
-and Input Monitoring approval, and Linux/Wayland may require one logout after
-input-group setup. Installation cannot bypass those operating-system controls.
+## Build from source
 
-Selection is saved in `hushkey/acceleration.json` under `%LOCALAPPDATA%` (Windows),
-`${XDG_DATA_HOME:-~/.local/share}` (Linux), or `~/Library/Application Support`
-(macOS). Autostart and updates use that file, without requiring shell environment
-variables or an extra login. Existing model, language and hotkey choices survive.
-`WHISPER_ENGINE`, `WHISPER_CPP_SERVER` and `WHISPER_CPP_DEVICE` remain explicit
-expert overrides. To repeat hardware detection, rerun the installer.
-
-While holding the key, the overlay shows provisional text from the latest 30 seconds
-of audio (up to 500 characters). Words may change as more speech becomes available.
-Release the key to transcribe the **complete recording** and insert it once, with
-its full context. Preview text never enters the target application. This is
-transcription, not an AI summary or rewrite. Preview inference shares the selected
-model; slower devices may update less frequently and finishing an in-flight preview
-can add latency on release. `PTT_PREVIEW=0` disables that extra work.
-
-The overlay stays at the top center of the monitor containing the mouse pointer.
-It follows monitor crossings while recording **and** transcribing (checked every
-200 ms); moving within the same monitor does not move it. Windows uses the
-monitor's work area and macOS its visible frame, leaving room for taskbars and
-the menu bar. Monitor origins may be negative; Retina uses logical points.
-
-On Linux/X11, monitor selection uses XRandR (or Xinerama on older servers).
-On Ubuntu/GNOME **Wayland**, Tk runs through Xwayland: the compositor may withhold
-global pointer updates over native Wayland windows or override positioning.
-Following the mouse is therefore **best effort, not guaranteed on Wayland**; the
-preview still works, but may remain on the last monitor reported by Xwayland.
-If a monitor query fails, it keeps the last known monitor (or uses Tk's default
-screen geometry if no monitor has been discovered yet).
-No compositor extensions or additional permissions are installed.
-
-The current preview is temporarily written to the local `state.json` file read by
-the overlay and cleared on release; it is not written to the dictation log. An
-abrupt crash may leave the last preview in that file until the next daemon start.
-No additional audio or text is sent to cloud services.
-
-For local debugging only, `python dictate.py --debug-audio on` enables a rolling
-archive of the **last two completed dictations** on that computer. Run this with
-the installed virtual environment's Python. The default is **off**; installers
-never enable it. The opt-in file is stored in the user's state directory and is
-bound to the local hostname and hardware address. Copying the app or that file
-to a different computer does not normally enable retention there; this binding
-is an accidental-copy guard, not a security identity mechanism.
-
-The `debug-audio` folder beside `dictate.log` contains original, unprocessed WAV
-files and JSON with the transcript, model/device, language, duration, streaming
-offset, error type, app version and audio SHA-256. Failed transcriptions are kept
-too; preview snapshots and short key taps are not. Creating a third recording
-replaces the oldest. No audio or transcripts are uploaded or committed as test
-fixtures automatically. Keep any recording you need for a regression test in a
-separate private location before two more dictations replace it.
-
-`python dictate.py --debug-audio status` shows the current status and folder.
-`python dictate.py --debug-audio off` disables retention and deletes the managed
-recording/metadata pairs. The running daemon reads the local opt-in per recording,
-so toggling it does not require a restart once this code is installed. Identical
-audio enables repeatable investigations; bit-identical GPU transcription is not
-guaranteed. Enabling capture does not change recognition settings.
-
-The model stays loaded between recordings. Logs identify the actual backend,
-for example `small/Vulkan0` or `medium/MTL0`. Native backends use a separate GGML
-model cache. The managed server binds only to `127.0.0.1` with a random request
-path; transcripts never leave the computer. Audio decoding and voice activity
-detection may still use CPU.
-
-Vulkan inference disables implicit capture/overlay layers only inside its child
-process to avoid observed AMD driver stalls. Set `WHISPER_CPP_ALLOW_LAYERS=1`
-for debugging; no registry or system driver settings are changed.
-
-#### Building engines from source (developers)
-
-`setup_vulkan.py` remains available for custom builds and CI. It pins whisper.cpp
-v1.9.4, builds Vulkan on Windows/Linux and Metal on macOS, and requires CMake,
-Git and a C++ compiler. Vulkan builds additionally need SDK headers and shader
-compiler tools. `--prefix`, `--generator`, `--cmake` and `--jobs` control the build.
-Normal installers use verified release binaries instead.
-
-### Setting other variables
-
-How to set them:
-
-- **Linux**: add `Environment=...` lines to
-  `~/.config/systemd/user/whisper-ptt.service`, then
-  `systemctl --user daemon-reload && systemctl --user restart whisper-ptt`.
-- **Windows**: `setx PTT_KEY f9` (etc.) in a terminal; the autostart entry
-  picks it up at the next logon, or immediately after restarting the daemon
-  (`schtasks /end /tn whisper-ptt` + `schtasks /run /tn whisper-ptt`, or run
-  `uninstall.ps1` + `install.ps1` again).
-- **macOS**: edit `~/Library/LaunchAgents/com.whisper-ptt.plist`
-  (`EnvironmentVariables` section is prepared), then
-  `launchctl kickstart -k gui/$(id -u)/com.whisper-ptt`.
-
-### Windows paste mode
-
-The clipboard is borrowed, not taken: hushkey offers the transcript on the
-clipboard, sends the paste shortcut, and puts your previous text back once the
-target app has fetched the transcript. Windows only reports that an app *read*
-the clipboard, not that it finished pasting, and some apps read twice — so the
-restore waits `PTT_CLIPBOARD_SETTLE` (0.4 s) after that first read. Raise it if
-an app pastes your previous text instead of the dictation.
-
-The restore is skipped, and the transcript stays on the clipboard, when the
-target does not fetch it within `PTT_PASTE_TIMEOUT` (5 s; restoring then could
-let a slow app or a Remote Desktop session paste your previous contents), when
-you copied something else in the meantime, or when the clipboard held no text
-(an image, say). Only plain text is restored. The transcript never enters the
-Win+V clipboard history or cloud synchronization. If the clipboard cannot be
-taken, hushkey types the dictation instead of pasting stale contents.
-`PTT_KEEP_CLIPBOARD=1` leaves every transcript on the clipboard.
-
-### The Wayland paste chord
-
-On Wayland the text arrives via the clipboard plus one synthetic paste
-keystroke, and `Ctrl+V` is not universal: GNOME Terminal, Ptyxis, Konsole and
-friends paste with `Ctrl+Shift+V`. There is no reliable way to ask a Wayland
-compositor which application has focus, so the daemon cannot switch chords by
-itself. Pick the one matching where you dictate most, and override it when you
-need the other:
-
-```
-Environment=PTT_PASTE_KEY=ctrl+shift+v
-```
-
-If you dictate into both terminals and GUI apps, `PTT_KEEP_CLIPBOARD=1` plus a
-manual paste is the escape hatch — the transcript is simply waiting in the
-clipboard.
-
-### Streaming mode (experimental)
-
-With `PTT_STREAMING=1` the daemon already transcribes and inserts finished
-blocks every few seconds while you are still holding the key, instead of
-pasting everything on release. A block is only inserted once a pause follows
-it in the audio — speech that runs to the edge of the current buffer is left
-for the next round, so words are never cut in half. Whatever is left over is
-transcribed on release, as before.
-
-Notes:
-
-- On CPU the inserted blocks trail your speech by a few seconds; with a GPU
-  they are close to live.
-- Each block is its own paste/typing burst, so stay in the window you are
-  dictating into (sound advice either way, but it matters more here).
-- With **AltGr** as the push-to-talk key the held modifier remaps letter
-  keysyms at the compositor (AltGr+Shift+V = ‚ on a de layout), so a letter
-  chord can never match mid-hold — and a synthetic release cannot clear a
-  *physically* held modifier (the compositor unions device state; measured,
-  not guessed). On Wayland the daemon therefore pastes mid-hold blocks with
-  `Shift+Insert` instead, which works in GTK and Qt apps. Terminals are the
-  exception: VTE (gnome-terminal & co.) only pastes via `Ctrl+Shift+V`, so
-  mid-hold blocks cannot reach them with AltGr held — the daemon leaves the
-  complete transcript on the clipboard after such a dictation, so a single
-  manual `Ctrl+Shift+V` recovers everything. If you dictate into terminals
-  a lot, use Right Ctrl, F9 or Caps Lock instead: those stream everywhere.
-- On X11 (pynput typing) a modifier as the PTT key is not supported for
-  streaming — use a plain key (F9, Menu) there. With Caps Lock as the PTT
-  key, mid-hold blocks land in ALL CAPS there too: capitals are engaged for
-  the whole hold and only restored on release (the tail block is fine).
-  Wayland pastes blocks and is unaffected.
-- On Wayland every block is a full clipboard save → paste → restore cycle, so
-  a clipboard manager records each block and the clipboard flickers briefly
-  mid-hold.
-- Off by default; enable with `Environment=PTT_STREAMING=1` (see "How to set
-  them" above).
-
-## Manage
-
-The **tray icon** (the husky) shows the live state — greyed out when the daemon
-is stopped, red badge while recording, amber while transcribing — and a blue
-badge when an update is waiting (checked at startup and every 4 h). On Windows a
-small always-on-top pill at the top of the screen shows the same state, so an
-auto-hidden taskbar cannot swallow it. The menu lets
-you switch the whisper model, restart the daemon, open the log folder, check
-for updates and install a new release with one click. If the icon cannot be
-shown (e.g. GNOME without an AppIndicator extension), the daemon keeps running
-regardless — use the commands below then. On Linux, *hushkey* in the app
-search (GNOME, KDE, …) (re)starts the service — also after it was stopped:
+The Rust workspace is in [`rust/`](rust/): the core library with a C ABI
+(`hushkey-core`, `hushkey-ffi`, header in `rust/include/hushkey.h`), the
+command-line tool (`hushkey-cli`) and the desktop app (`hushkey-app`).
 
 ```bash
-# Linux
-systemctl --user status whisper-ptt.service      # state
-journalctl --user -u whisper-ptt.service -f      # live logs
-systemctl --user stop whisper-ptt.service        # pause
-systemctl --user status ydotoold.service         # Wayland: the typing helper
-
-# Windows (PowerShell)
-schtasks /query /tn whisper-ptt                  # state (if Task Scheduler was used)
-schtasks /end /tn whisper-ptt                    # stop
-schtasks /run /tn whisper-ptt                    # start
-# If task creation is denied (restricted account), install.ps1 falls back to a
-# shortcut in the Startup folder instead — same autostart, no rights needed.
-
-# macOS
-launchctl kickstart -k gui/$(id -u)/com.whisper-ptt   # restart
-launchctl bootout gui/$(id -u)/com.whisper-ptt        # stop
-
-# any OS
-./uninstall.sh                  # or: powershell -File uninstall.ps1  (Windows)
-./uninstall.sh --purge          # also remove the venv  (Windows: -Purge)
-./uninstall.sh --purge-system   # Linux: also remove udev rule + 'input' group
+cd rust
+cargo build --release -p hushkey-app --features vulkan   # or metal, or neither for CPU
 ```
 
-Also useful when something is off: run the daemon in the foreground and it
-prints exactly which backend it picked, or refuses with the reason why:
-
-```bash
-.venv/bin/python dictate.py
-```
-
-Operational log (metadata only — durations and character counts, never
-dictated text):
-
-- Linux: `~/.local/state/whisper-ptt/dictate.log`
-- Windows: `%LOCALAPPDATA%\whisper-ptt\dictate.log`
-- macOS: `~/Library/Logs/whisper-ptt/dictate.log` (+ `launchd.log`)
-
-## Development & tests
-
-```bash
-pip install -r requirements.txt -r requirements-dev.txt
-pytest -v
-```
-
-The suite runs without a microphone or display: platform logic is unit-tested
-with fakes, and one end-to-end test transcribes a synthetic WAV with the real
-`tiny` model (downloads ~75 MB once). CI (`.github/workflows/test.yml`) runs
-it on **Ubuntu, Windows and macOS** — so macOS compatibility is verified on
-every push without owning a Mac.
-
-## How the Wayland backend works
-
-Wayland deliberately denies clients both halves of what a dictation tool needs,
-so each is solved below the compositor:
-
-**Reading the key.** There is no global key grab for clients, so the daemon
-reads the key events straight from `/dev/input/event*` via `evdev`. That needs
-membership in the `input` group.
-
-**Inserting the text.** Clients cannot synthesize input either. `ydotool`
-creates a virtual keyboard through `/dev/uinput`, which is a kernel device — the
-compositor sees an ordinary keyboard and accepts the event.
-
-**Why `wl-copy` is started and then let go.** Under Wayland the client offering
-a selection *is* its owner for as long as the content stays on the clipboard, so
-`wl-copy` cannot exit — it has to keep running. Waiting for it therefore blocks
-until some other client takes over, which may be never. Worse, waiting *with a
-timeout* kills it on the way out, and a killed owner leaves the compositor
-referring to a dead client: from then on every clipboard operation in the
-session hangs, system-wide, until you log out. So the daemon starts `wl-copy`,
-writes the transcript, checks it is still alive (an instant exit means the text
-never made it) and then leaves it alone. This is also why `PTT_CMD_TIMEOUT` does
-not apply to it.
-
-**Why the clipboard, and not just typing it out.** `ydotool type` maps
-characters to Linux keycodes assuming a US layout. On a German (`de`) keymap
-that turns `z` into `y`, and `ä ö ü ß` are not in its table at all — precisely
-the characters German dictation produces. So the transcript travels as UTF-8
-through the clipboard, where no keycode mapping happens, and only the
-layout-stable paste chord is synthesized.
-
-> **Security note.** Both steps are real privilege grants. Membership in the
-> `input` group lets any process running as you read *every* keystroke on the
-> machine, and write access to `/dev/uinput` lets it inject any input. That is
-> inherent to doing this on Wayland at all, not specific to this tool — but only
-> set it up on a machine you trust. `./uninstall.sh --purge-system` reverts both.
-
-**One ydotoold, not two.** Two ydotoold units do not coexist — the loser exits
-with `Another ydotoold is running with the same socket` and, under
-`Restart=on-failure`, retries forever. Debian/Ubuntu ship `ydotool.service` and
-enable it by preset, so it normally wins while the duplicate crash-loops in the
-background; dictation keeps working, which is what makes this easy to miss.
-
-The installer therefore uses the packaged `ydotool.service` when the
-distribution provides one, and only installs its own `ydotoold.service` when
-there is none. If a previous run left a redundant unit behind, re-running
-`./install.sh` removes it.
-
-**ydotool 0.1.x vs 1.x.** Both are supported; the daemon auto-detects which
-key syntax (`ctrl+v` vs `KEYCODE:STATE`) and which socket the installed
-version uses. Where they differ: 1.x honours `--socket-path` and defaults to
-`$XDG_RUNTIME_DIR/.ydotool_socket`; 0.1.x (the Ubuntu 24.04/Debian 12 package)
-ignores its arguments and always binds `/tmp/.ydotool_socket`, which is why the
-daemon probes both locations rather than trusting one.
+whisper.cpp is built by `whisper-rs-sys` and needs CMake, a C++ compiler and
+libclang; Vulkan needs the Vulkan SDK (Windows) or `libvulkan-dev` and
+`glslc` (Linux). Releases are built by `.github/workflows/release.yml`.
 
 ## Limitations
 
-- **Wayland: the paste chord is fixed per configuration** — see "The Wayland
-  paste chord" above. Terminals and GUI apps disagree, and the compositor won't
-  tell us which one has focus.
-- **Wayland: the clipboard is borrowed.** The previous contents are restored
-  after ~0.4 s, which is best effort — a slow application may still fetch the
-  restored value instead of the transcript. Only *text* clipboards are restored:
-  if you had an image copied, the transcript stays and the image is not put
-  back, because rewriting arbitrary bytes as `text/plain` would corrupt it.
-  `PTT_KEEP_CLIPBOARD=1` disables the restore entirely.
-- **X11: characters that are not already in the keymap go through the
-  clipboard.** Typing anything else would mean remapping a keycode at the
-  server, which races the client's keymap refresh and permutes the output
-  (every second syllable becomes a copy of the first — measured: 名字→名名).
-  Such dictations are pasted instead: previous clipboard restored after
-  ~0.4 s, `Ctrl+Shift+V` in terminals, `Ctrl+V` elsewhere.
-- Windows: synthetic typing cannot reach apps running **elevated**
-  (as Administrator) unless the daemon itself runs elevated.
-- macOS: no CUDA — CPU transcription only; the daemon needs the privacy
-  permissions listed above.
-- **The PTT key is observed, not swallowed.** The daemon watches it globally but
-  does not consume the event, so the focused application still receives it —
-  taking the key exclusively would mean grabbing the whole keyboard. With the
-  default `ctrl_r` that is unnoticeable (a lone modifier does nothing), but a
-  key that *acts* on its own will do both jobs: `f9` still triggers whatever
-  `f9` does in the focused app. `caps_lock` is the deliberate exception: a
-  short tap still toggles capitals (that is the caps function), a hold
-  dictates, and the daemon flips the caps state back on release, so dictation
-  never leaves capitals on. Custom xkb remappings of the key (e.g.
-  `caps:escape`) are replayed by that restore tap — make the key dead for the
-  desktop instead (`gsettings set org.gnome.desktop.input-sources
-  xkb-options "['caps:none']"`); the daemon still sees it. Prefer a modifier,
-  or a key the apps you dictate into ignore. (On macOS, `ctrl_r` may not
-  exist on laptop keyboards; try `f9` or `cmd_r`.)
-- Transcription quality of names/jargon can be improved by switching to a
-  larger model (`WHISPER_MODEL=large-v3`, needs ~6 GB VRAM) instead of `medium`;
-  `large-v3-turbo` (~same size as `medium`, much faster) is the middle option —
-  both are in the tray's **Model** menu. For Chinese, `large-v3-turbo` also
-  recognizes noticeably more accurately than `medium`.
-- First run performs an unauthenticated Hugging Face model download (rate
-  limits apply); after that it's fully offline.
+- Text cannot be inserted into programs running as administrator (Windows)
+  unless hushkey runs elevated too.
+- On Wayland the overlay pill cannot choose its position; the compositor
+  places it.
+- The first use of a model downloads it from Hugging Face (75 MB to 3 GB);
+  after that hushkey is fully offline.
 
 ## License
 
-MIT (personal project; do what you want).
+MIT.

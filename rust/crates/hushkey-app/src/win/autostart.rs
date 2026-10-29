@@ -13,9 +13,15 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// The command the Run key starts: this executable, quoted.
+/// The command the Run key starts: the installed program, quoted (this
+/// executable where none is installed, e.g. a development build).
 fn command() -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let installed = super::setup::installed_exe();
+    let exe = if installed.exists() {
+        installed
+    } else {
+        std::env::current_exe().map_err(|e| e.to_string())?
+    };
     Ok(format!("\"{}\"", exe.display()))
 }
 
