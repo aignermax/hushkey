@@ -571,7 +571,7 @@ impl App {
             Action::Copy(i) => {
                 if let Some(entry) = self.history.entries().get(i) {
                     match platform::copy(&entry.text) {
-                        Ok(()) => self.notice(GREY, self.s.copied),
+                        Ok(()) => self.notice(GREY, &self.s.copied()),
                         Err(e) => log::line(&format!("copy failed: {e}")),
                     }
                 }
