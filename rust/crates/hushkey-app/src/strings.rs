@@ -46,7 +46,11 @@ pub const EN: Strings = Strings {
     history_empty: "(none yet)",
     copied: "copied — paste with Ctrl+V",
     listen: "Continuous listening",
-    autostart: "Start with Windows",
+    autostart: if cfg!(windows) {
+        "Start with Windows"
+    } else {
+        "Start at login"
+    },
     open_logs: "Open logs",
     quit: "Quit",
     model_loading: "loading {model} — the first time downloads {size}",
@@ -72,7 +76,11 @@ pub const DE: Strings = Strings {
     history_empty: "(noch keine)",
     copied: "kopiert — mit Strg+V einfügen",
     listen: "Dauerzuhören",
-    autostart: "Mit Windows starten",
+    autostart: if cfg!(windows) {
+        "Mit Windows starten"
+    } else {
+        "Bei der Anmeldung starten"
+    },
     open_logs: "Logs öffnen",
     quit: "Beenden",
     model_loading: "lade {model} — beim ersten Mal werden {size} heruntergeladen",
@@ -115,6 +123,22 @@ pub fn current() -> &'static Strings {
     // 0x07: German, in the primary-language bits of the UI language id.
     let lang = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
     if lang & 0x3FF == 0x07 {
+        &DE
+    } else {
+        &EN
+    }
+}
+
+/// German if the locale says so (the first of LC_ALL, LC_MESSAGES, LANG
+/// that is set; LANGUAGE lists preferences first).
+#[cfg(target_os = "linux")]
+pub fn current() -> &'static Strings {
+    let lang = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .find(|v| !v.is_empty())
+        .unwrap_or_default();
+    if lang.starts_with("de") {
         &DE
     } else {
         &EN

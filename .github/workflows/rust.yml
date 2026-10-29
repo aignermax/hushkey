@@ -41,9 +41,10 @@ jobs:
           # whisper-rs-sys does not rebuild when GGML_* changes
           key: ggml-portable
 
-      - name: ALSA (cpal) and OpenSSL (native TLS for brains) headers
+      # The app's AppIndicator library is loaded at run time, not linked.
+      - name: ALSA (cpal), OpenSSL (native TLS for brains) and GTK 3 (tray, overlay) headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev libgtk-3-dev pkg-config
 
       - name: libclang for whisper-rs bindgen (Windows)
         if: runner.os == 'Windows'
