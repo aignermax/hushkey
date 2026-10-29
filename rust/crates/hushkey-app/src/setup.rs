@@ -23,6 +23,8 @@ pub enum Start {
         from_python: bool,
     },
     Uninstall,
+    /// Print the version (installers and CI check it).
+    Version,
 }
 
 impl Start {
@@ -34,14 +36,17 @@ impl Start {
                 "--from-python",
                 "--uninstall",
                 "--after-update",
+                "--version",
             ]
             .contains(&a.as_str())
         }) {
             return Err(format!(
-                "unknown argument {unknown:?} (known: --install [--from-python], --uninstall)"
+                "unknown argument {unknown:?} (known: --install [--from-python], --uninstall, --version)"
             ));
         }
-        Ok(if has("--install") {
+        Ok(if has("--version") {
+            Start::Version
+        } else if has("--install") {
             Start::Install {
                 from_python: has("--from-python"),
             }
@@ -58,8 +63,13 @@ impl Start {
 /// Install this program, start it with every login, and start it now.
 pub fn install(from_python: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // A running copy holds the program (Windows) and the key.
-    setup::stop_others();
+    // Run again by the installed program itself (the Python app's last
+    // tray.py does that until it is switched off): nothing to replace.
+    let reinstall = exe == setup::installed_exe();
+    if !reinstall {
+        // A running copy holds the program (Windows) and the key.
+        setup::stop_others();
+    }
     if from_python {
         import_python(&setup::python_state_dir());
         // Before register: the menu entry replaces the Python one.

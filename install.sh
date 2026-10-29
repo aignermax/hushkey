@@ -1,514 +1,107 @@
 #!/usr/bin/env bash
-# whisper-ptt installer (Linux + macOS): venv + dependencies + autostart service.
-# On Linux/Wayland it additionally sets up ydotoold (see README "How it works").
-# Idempotent — safe to re-run (e.g. after git pull). On Windows use install.ps1.
+# hushkey installer for Linux and macOS: downloads the program from the latest
+# GitHub release, checks it against SHA256SUMS, and lets it install itself
+# (menu entry, start at login). An existing Python hushkey is taken over: its
+# settings and history move along, and it is switched off.
+#
+# Usage:  bash install.sh [--pre] [--exe <file>]
+#   or:   curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
+#
+# This is also the last step of the Python hushkey's own updater, which runs
+# master's install.sh after an update.
 set -euo pipefail
-NO_AUTOSTART=0
-for arg in "$@"; do
-  case "$arg" in
-    --no-autostart) NO_AUTOSTART=1 ;;
-    *) echo "ERROR: unknown option: $arg" >&2; exit 2 ;;
+
+REPO="aignermax/hushkey"
+PRE=0
+EXE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pre) PRE=1 ;;
+    --exe) EXE="$2"; shift ;;
+    --no-autostart) ;;  # the Python installer's option; autostart is a tray setting now
+    *) echo "ERROR: unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
 
-# One-liner install straight from the web:
-#   curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash
-# Piped this way there is no script directory, so fetch the sources first.
-REPO="https://github.com/aignermax/hushkey"
-OS="$(uname -s)"
-HAS_GIT=0
-if command -v git >/dev/null; then
-  # Apple's /usr/bin/git is a developer-tools installation stub on a fresh Mac.
-  if [ "$OS" != Darwin ] || xcode-select -p >/dev/null 2>&1; then HAS_GIT=1; fi
-fi
-if [ -f "$(dirname "${BASH_SOURCE[0]:-/dev/null}")/dictate.py" ]; then
-  DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-  DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whisper-ptt"
-  echo "==> fetching whisper-ptt into $DIR"
-  if [ -d "$DIR/.git" ] && [ "$HAS_GIT" = 1 ]; then
-    git -C "$DIR" pull --ff-only
-  elif [ -e "$DIR" ] || [ "$HAS_GIT" = 0 ]; then
-    # No git (or a tarball install already present): plain download works too.
-    mkdir -p "$DIR"
-    curl -fsSL "$REPO/archive/refs/heads/master.tar.gz" | tar -xz --strip-components=1 -C "$DIR"
-  else
-    git clone "$REPO.git" "$DIR"
-  fi
-fi
-VENV="$DIR/.venv"
-# $DIR as a sed replacement: '&', '|' and '\' would otherwise be read as sed
-# syntax (a clone under ~/src/R&D/ must not yield a broken unit or icon path).
-DIR_SED="$(printf '%s' "$DIR" | sed 's/[&|\\]/\\&/g')"
-UNIT_DIR="$HOME/.config/systemd/user"
-# Only meaningful on Linux; stays empty elsewhere so the Wayland paths are skipped.
-SESSION=""
-NEEDS_LOGOUT=0
-YDOTOOLD_UNIT=""  # set in the Wayland branch; "" elsewhere keeps set -u happy
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)          ASSET=hushkey-linux-x86_64 ;;
+  Linux-aarch64)         ASSET=hushkey-linux-aarch64 ;;
+  Darwin-arm64)          ASSET=hushkey-macos-arm64.zip ;;
+  Darwin-x86_64)         ASSET=hushkey-macos-x86_64.zip ;;
+  *) echo "ERROR: no hushkey build for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
 
-SUDO=""
-if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
-  SUDO="sudo"
-fi
+sha256() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 
-install_pkg() {
-  if [ "${HUSHKEY_PACKAGE_INSTALL:-0}" = 1 ]; then
-    echo "ERROR: package dependency missing: $* (no nested package manager during dpkg)" >&2
-    return 1
-  fi
-  echo "==> installing $* (may ask for your password)"
-  if command -v apt-get >/dev/null; then
-    $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
-  elif command -v dnf >/dev/null; then
-    $SUDO dnf install -y "$@"
-  elif command -v pacman >/dev/null; then
-    $SUDO pacman -S --noconfirm "$@"
-  elif command -v brew >/dev/null; then
-    brew install "$@"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+if [ -z "$EXE" ]; then
+  if [ "$PRE" = 1 ]; then
+    API="https://api.github.com/repos/$REPO/releases?per_page=30"
   else
-    echo "ERROR: install $* manually (no apt/dnf/pacman/brew found)" >&2
+    API="https://api.github.com/repos/$REPO/releases/latest"
+  fi
+  # The newest listed release with this system's asset (no JSON tool needed:
+  # the download URLs name both the tag and the asset).
+  URL="$(curl -fsSL -H "User-Agent: hushkey-installer" "$API" \
+    | grep -o "https://github.com/$REPO/releases/download/[^\"]*/$ASSET\"" \
+    | head -n1 | tr -d '"')" || true
+  if [ -z "$URL" ]; then
+    echo "ERROR: no release of $REPO carries $ASSET" >&2
     exit 1
   fi
-}
-
-debian_packages_installed() {
-  local pkg
-  for pkg in "$@"; do
-    [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null)" = 'install ok installed' ] || return 1
-  done
-}
-
-echo "==> checking prerequisites"
-bootstrap_macos_python() {
-  if command -v brew >/dev/null; then
-    brew install python@3.12 python-tk@3.12
-    PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
-  else
-    local pkg
-    pkg="$(mktemp -d)/python.pkg"
-    curl -fSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$pkg"
-    echo "8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4  $pkg" | shasum -a 256 -c -
-    $SUDO installer -pkg "$pkg" -target /
-    rm -f "$pkg"
-    rmdir "$(dirname "$pkg")"
-    PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-  fi
-}
-PYTHON="$(command -v python3 || true)"
-if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
-  PYTHON="$VENV/bin/python"
-fi
-# Apple's stub otherwise opens the Command Line Tools installation dialog.
-if [ "$OS" = Darwin ] && [ "$PYTHON" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then
-  PYTHON=""
-fi
-if [ -z "$PYTHON" ] || ! "$PYTHON" -c 'import sys; sys.exit(not ((3, 10) <= sys.version_info < (3, 14)))' 2>/dev/null; then
-  case "$OS" in
-    Linux)
-      if command -v apt-get >/dev/null; then install_pkg python3 python3-venv
-      elif command -v pacman >/dev/null; then install_pkg python
-      else install_pkg python3; fi
-      PYTHON="$(command -v python3)" ;;
-    Darwin) bootstrap_macos_python ;;
-  esac
-fi
-if [ "$OS" = "Linux" ]; then
-  SESSION="${XDG_SESSION_TYPE:-x11}"
-  command -v pw-record >/dev/null || echo "WARNING: pw-record missing (install pipewire) — recording falls back to sounddevice (needs libportaudio2)"
-  echo "    session type: $SESSION"
-  if [ "$SESSION" != "x11" ] && [ "$SESSION" != "wayland" ]; then
-    echo "WARNING: session is '$SESSION' — dictation needs a graphical X11 or Wayland session"
-  fi
-elif [ "$OS" = "Darwin" ]; then
-  echo "note: on macOS, grant your terminal Microphone + Accessibility/Input Monitoring when prompted"
-else
-  echo "ERROR: unsupported OS '$OS' — on Windows use install.ps1"
-  exit 1
-fi
-
-echo "==> creating venv at $VENV"
-# --system-site-packages is required on Linux, not a convenience: the tray
-# icon needs PyGObject and an AppIndicator typelib, and both only exist as
-# distro packages (there is no usable PyGObject wheel). A sealed venv cannot
-# see them, so pystray silently falls back to its Xorg backend — which on
-# GNOME/Wayland draws an icon into a tray that does not exist.
-# Linux only: on macOS it would merely expose brew's site-packages to pip,
-# where an outdated system package can shadow a fresh wheel.
-VENV_FLAGS=""
-[ "$OS" = "Linux" ] && VENV_FLAGS="--system-site-packages"
-if [ ! -x "$VENV/bin/python" ]; then
-  # Debian/Ubuntu split ensurepip into a versioned package, so name the exact one.
-  pyver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  "$PYTHON" -m venv $VENV_FLAGS "$VENV" 2>/dev/null || {
-    echo "    ensurepip unavailable — installing python${pyver}-venv"
-    install_pkg "python${pyver}-venv"
-    "$PYTHON" -m venv $VENV_FLAGS "$VENV"
-  }
-fi
-"$VENV/bin/pip" -q install --upgrade pip
-
-pyver_of() {
-  "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true
-}
-
-# Rebuild the venv on the given interpreter and install into it. Probe first:
-# a candidate that cannot make a venv (e.g. an inactive pyenv shim) must not
-# cost us the one we have.
-reinstall_venv_with() {
-  "$1" -c 'import venv, ensurepip' 2>/dev/null || return 1
-  rm -rf "$VENV"
-  "$1" -m venv "$VENV" || return 1
-  "$VENV/bin/pip" -q install --upgrade pip || return 1
-  "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
-}
-
-# macOS: a failed resolve is not a missing compiler — it means faster-whisper's
-# binary deps publish no wheel for this Python/arch/OS combination, and pip
-# reports that as ResolutionImpossible. onnxruntime is the usual culprit: since
-# 1.24 it ships Apple Silicon wheels for macOS 14+ only, and its last Intel
-# wheels (1.23.x) stop at Python 3.13 and need macOS 13 — on an older Intel Mac
-# only 3.12 and below resolve. Homebrew's current python3 is newer than all of
-# that, so fall back to an older interpreter, 3.12 first since it resolves on
-# every Mac: one already present, else brew's python@3.12 (the version the
-# Windows bundle ships, too).
-retry_on_older_python() {
-  local have v py tried=""
-  have="$(pyver_of "$VENV/bin/python")"
-  # Worded so it cannot be read as "you need Python $have" — that version is
-  # the problem, not the requirement.
-  echo "    Python ${have:-?} is too new for onnxruntime on this Mac" \
-       "($(uname -m), macOS $(sw_vers -productVersion 2>/dev/null || echo '?'))" \
-       "— switching to an older Python for whisper-ptt's own venv (your python3 stays as it is)"
-  for v in 3.12 3.13 3.11 3.10; do
-    [ "$v" = "$have" ] && continue
-    py="$(command -v "python$v" || true)"
-    [ -n "$py" ] || continue
-    tried="$tried $v"
-    echo "    retrying with $py"
-    reinstall_venv_with "$py" && return 0
-  done
-  if command -v brew >/dev/null && [ "$have" != 3.12 ] \
-      && ! printf '%s' "$tried" | grep -qw 3.12; then
-    echo "==> installing python@3.12 via Homebrew"
-    brew install python@3.12 || true
-    py="$(command -v python3.12 || true)"
-    if [ -z "$py" ]; then
-      # brew does not always link a versioned python onto PATH
-      py="$(brew --prefix python@3.12 2>/dev/null || true)"
-      py="${py:+$py/bin/python3.12}"
-    fi
-    if [ -n "$py" ] && [ -x "$py" ]; then
-      echo "    retrying with $py"
-      reinstall_venv_with "$py" && return 0
-    fi
-  fi
-  echo "==> provisioning compatible Python 3.12"
-  bootstrap_macos_python
-  reinstall_venv_with "$PYTHON" && return 0
-  echo "ERROR: could not install the Python dependencies on this Mac." >&2
-  echo "       Install Python 3.12 (brew install python@3.12 or python.org) and re-run;" >&2
-  echo "       for pip's full reason run: $VENV/bin/pip install -r $DIR/requirements.txt" >&2
-  exit 1
-}
-
-echo "==> installing python dependencies"
-# On Linux, evdev is a C extension and has no wheels, so a machine without a
-# compiler fails here with a wall of gcc output. Retry once with build deps
-# rather than installing ~200 MB of toolchain up front on machines that don't
-# need it. (macOS has no such dependency; see retry_on_older_python.)
-PIP_ERR="$(mktemp)"
-if ! "$VENV/bin/pip" -q install -r "$DIR/requirements.txt" 2>"$PIP_ERR"; then
-  cat "$PIP_ERR" >&2
-  if [ "$OS" = "Darwin" ]; then
-    # Only a missing wheel is worth a new interpreter. Anything else — a network
-    # drop during the tray's in-app update, say — would otherwise replace a
-    # working venv with an empty one that launchd then fails to start.
-    if grep -qE 'ResolutionImpossible|No matching distribution' "$PIP_ERR"; then
-      retry_on_older_python
-    else
-      echo "ERROR: installing the Python dependencies failed (see above); re-run when fixed" >&2
-      exit 1
-    fi
-  else
-    echo "    dependency build failed — installing compiler and Python headers"
-    pyver="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-    if command -v apt-get >/dev/null; then
-      install_pkg build-essential "python${pyver}-dev"
-    elif command -v dnf >/dev/null; then
-      install_pkg gcc "python3-devel"
-    elif command -v pacman >/dev/null; then
-      install_pkg base-devel
-    else
-      echo "ERROR: install a C compiler and Python headers, then re-run" >&2
-      exit 1
-    fi
-    "$VENV/bin/pip" -q install -r "$DIR/requirements.txt"
-  fi
-fi
-rm -f "$PIP_ERR"
-# dpkg installs these dependencies before postinst runs; never nest apt there.
-if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
-  if command -v apt-get >/dev/null; then
-    if ! debian_packages_installed libvulkan1 mesa-vulkan-drivers libportaudio2; then
-      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
-    fi
-  elif command -v dnf >/dev/null; then
-    if ! rpm -q vulkan-loader mesa-vulkan-drivers portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-loader mesa-vulkan-drivers portaudio
-    fi
-  elif command -v pacman >/dev/null; then
-    if ! pacman -Q vulkan-icd-loader vulkan-radeon vulkan-intel portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
-    fi
-  fi
-fi
-echo "==> configuring automatic hardware acceleration"
-"$VENV/bin/python" "$DIR/setup_acceleration.py"
-
-# Older installs sealed their venv (created before --system-site-packages
-# became the default here). Flip the flag instead of recreating the venv:
-# site.py re-reads pyvenv.cfg on every interpreter start.
-if [ "$OS" = "Linux" ] && [ -f "$VENV/pyvenv.cfg" ] \
-    && grep -q "^include-system-site-packages = false" "$VENV/pyvenv.cfg"; then
-  sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' \
-    "$VENV/pyvenv.cfg"
-  echo "    existing venv: enabled access to system packages (was sealed)"
-fi
-
-appindicator_probe() {
-  # pystray tries the legacy namespace first, then Ayatana — probe in the
-  # same order, or older releases get a false "no tray" warning.
-  "$VENV/bin/python" - >/dev/null 2>&1 <<'PY'
-import gi
-try:
-    gi.require_version("AppIndicator3", "0.1")
-    from gi.repository import AppIndicator3  # noqa: F401
-except (ValueError, ImportError):
-    gi.require_version("AyatanaAppIndicator3", "0.1")
-    from gi.repository import AyatanaAppIndicator3  # noqa: F401
-PY
-}
-
-# The tray icon needs an AppIndicator implementation. GNOME removed the XEmbed
-# system tray years ago, so without one pystray picks its Xorg backend and the
-# icon is simply never shown: dictation still works, but every menu — model,
-# language, push-to-talk key — becomes unreachable. PyGObject and the typelib
-# exist only as distro packages, which is why the venv is created with
-# --system-site-packages above.
-if [ "$OS" = "Linux" ] && ! appindicator_probe; then
-  echo "==> installing AppIndicator support for the tray icon"
-  if command -v apt-get >/dev/null; then
-    install_pkg gir1.2-ayatanaappindicator3-0.1 python3-gi || true
-  elif command -v dnf >/dev/null; then
-    install_pkg libayatana-appindicator-gtk3 python3-gobject || true
-  elif command -v pacman >/dev/null; then
-    install_pkg libayatana-appindicator python-gobject || true
-  fi
-  if ! appindicator_probe; then
-    echo "    WARNING: no AppIndicator available — the daemon will run, but"
-    echo "             without a tray icon (see README 'no tray icon')."
-    echo "             On GNOME the AppIndicator shell extension is also needed."
-  fi
-fi
-
-# Tk powers the live preview. Python.org bundles it; Homebrew splits it into a
-# version-matched formula, as do Linux distributions into their own packages.
-if [ "$OS" = "Darwin" ] && [ "${PTT_OVERLAY:-1}" != 0 ] \
-   && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
-  if command -v brew >/dev/null; then
-    tkver="$(pyver_of "$VENV/bin/python")"
-    brew install "python-tk@$tkver" || true
-  fi
-  if ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
-    echo "==> provisioning Python with Tk for the live preview"
-    bootstrap_macos_python
-    reinstall_venv_with "$PYTHON"
-  fi
-  "$VENV/bin/python" -c 'import tkinter' || {
-    echo "ERROR: live preview requires a Python installation with tkinter." >&2
+  echo "==> downloading $URL"
+  curl -fsSL -o "$TMP/$ASSET" "$URL"
+  curl -fsSL -o "$TMP/SHA256SUMS" "${URL%/*}/SHA256SUMS"
+  EXPECTED="$(awk -v a="$ASSET" '{n=$2; sub(/^\*/, "", n)} n == a {print tolower($1); exit}' "$TMP/SHA256SUMS")"
+  ACTUAL="$(sha256 "$TMP/$ASSET")"
+  if [ -z "$EXPECTED" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "ERROR: $ASSET is damaged (hash $ACTUAL, expected ${EXPECTED:-none listed})" >&2
     exit 1
-  }
-fi
-if [ "$OS" = "Linux" ] && ! "$VENV/bin/python" -c 'import tkinter' 2>/dev/null; then
-  echo "==> installing tkinter (for the PTT_OVERLAY recording overlay)"
-  if command -v apt-get >/dev/null; then
-    install_pkg python3-tk || true
-  elif command -v dnf >/dev/null; then
-    install_pkg python3-tkinter || true
-  elif command -v pacman >/dev/null; then
-    install_pkg tk || true
   fi
+  EXE="$TMP/$ASSET"
 fi
 
-if [ "$SESSION" = "wayland" ]; then
-  echo "==> Wayland detected — setting up evdev key grab and ydotool typing"
-
-  command -v ydotool  >/dev/null || install_pkg ydotool
-  # Debian and Ubuntu split the daemon into its own 'ydotoold' package, so
-  # installing 'ydotool' alone leaves ydotoold missing and the run aborts below.
-  # Other distros bundle both; tolerate the failure there and let the check
-  # further down report what is actually missing.
-  command -v ydotoold >/dev/null || install_pkg ydotoold || true
-  command -v wl-copy  >/dev/null || install_pkg wl-clipboard
-
-  # /dev/uinput is root-only by default; hand it to the 'input' group so
-  # ydotoold can run as a user service instead of as root.
-  rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
-  if ! cmp -s "$DIR/udev/99-whisper-ptt-uinput.rules" "$rule"; then
-    echo "    installing udev rule $rule"
-    $SUDO install -m 0644 "$DIR/udev/99-whisper-ptt-uinput.rules" "$rule"
-    $SUDO udevadm control --reload-rules
-    $SUDO udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
-  fi
-
-  # uinput is a module; load it now and on every boot.
-  if [ ! -e /dev/uinput ]; then
-    echo "    loading uinput module"
-    $SUDO modprobe uinput
-  fi
-  if [ ! -f /etc/modules-load.d/uinput.conf ]; then
-    printf 'uinput\n' | $SUDO tee /etc/modules-load.d/uinput.conf >/dev/null
-  fi
-
-  # Verify the rule actually applied. udevadm trigger does not always re-label
-  # an already-existing node, and a silent failure here would only surface much
-  # later as ydotool refusing to type.
-  if [ -e /dev/uinput ]; then
-    uinput_group="$(stat -c %G /dev/uinput)"
-    if [ "$uinput_group" != "input" ]; then
-      echo "    WARNING: /dev/uinput belongs to group '$uinput_group', not 'input'."
-      echo "             Typing will fail until the rule applies — reboot, or run:"
-      echo "               sudo udevadm control --reload-rules && sudo udevadm trigger"
+case "$ASSET" in
+  *.zip)
+    # macOS: the asset is hushkey.app, zipped.
+    if [ "${EXE%.zip}" != "$EXE" ]; then
+      ditto -x -k "$EXE" "$TMP/app"
+      EXE="$TMP/app/hushkey.app/Contents/MacOS/hushkey"
     fi
-  fi
-
-  # Reading the PTT key from /dev/input needs the 'input' group. This also
-  # grants the ability to observe all other keystrokes — see README.
-  # id -un rather than $USER: the latter is unset in some non-login shells,
-  # which would silently target the empty user name.
-  me="$(id -un)"
-  if ! id -nG "$me" | tr ' ' '\n' | grep -qx input; then
-    echo "    adding $me to the 'input' group"
-    $SUDO usermod -aG input "$me"
-    NEEDS_LOGOUT=1
-  fi
-
-  # Prefer the distribution's own ydotool.service when it ships one.
-  #
-  # Two ydotoold units do not coexist: whichever loses the race dies with
-  # "Another ydotoold is running with the same socket" and, with
-  # Restart=on-failure, retries forever. Debian enables its unit by preset, so
-  # it normally wins and ours crash-loops in the background while dictation
-  # appears to work. (Socket location differs by version — 1.x honours
-  # --socket-path, 0.1.x always binds /tmp/.ydotool_socket — but either way
-  # the loser still claims the same one; the daemon probes both.)
-  mkdir -p "$UNIT_DIR"
-  if systemctl --user list-unit-files ydotool.service --no-legend 2>/dev/null \
-      | grep -q '^ydotool\.service'; then
-    YDOTOOLD_UNIT=ydotool.service
-    echo "    using the distribution's ydotool.service (same socket path)"
-    if [ -f "$UNIT_DIR/ydotoold.service" ]; then
-      # An earlier run of this installer left ours behind; it is redundant and
-      # would keep crash-looping against the packaged one.
-      systemctl --user disable --now ydotoold.service 2>/dev/null || true
-      rm -f "$UNIT_DIR/ydotoold.service"
-      echo "    removed our redundant ydotoold.service"
+    xattr -dr com.apple.quarantine "$(dirname "$(dirname "$(dirname "$EXE")")")" 2>/dev/null || true
+    ;;
+  *)
+    chmod +x "$EXE"
+    # Linux: the key is read from /dev/input and text is inserted through a
+    # virtual keyboard (/dev/uinput); both need the 'input' group. The Python
+    # hushkey set this up already; a new machine needs it once (sudo).
+    RULE=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
+    if [ ! -f "$RULE" ] || ! id -nG | tr ' ' '\n' | grep -qx input; then
+      echo "==> one-time setup: 'input' group and /dev/uinput access (asks for your password)"
+      # Not without a terminal (the Python updater runs this unattended).
+      if [ -t 0 ] && sudo -v; then
+        printf '%s\n' 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+          | sudo tee "$RULE" >/dev/null
+        sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput || true
+        sudo usermod -aG input "$USER"
+        echo "    NOTE: log out and back in once, so the 'input' group applies."
+      else
+        echo "    WARNING: skipped; hushkey will say what is missing when it starts." >&2
+      fi
     fi
-  else
-    YDOTOOLD_UNIT=ydotoold.service
-    # The unit needs an absolute path, and ydotoold is not always in /usr/bin
-    # (a self-built one lands in /usr/local/bin). Resolve it rather than guess,
-    # so a wrong path surfaces here instead of as a unit that fails to start.
-    YDOTOOLD="$(command -v ydotoold || true)"
-    if [ -z "$YDOTOOLD" ]; then
-      echo "ERROR: ydotoold not found in PATH after installing ydotool." >&2
-      echo "       Some distributions ship the daemon in a separate package." >&2
-      exit 1
-    fi
-    echo "    installing our own ydotoold.service ($YDOTOOLD)"
-    sed -e "s|@DIR@|$DIR_SED|g" -e "s|@YDOTOOLD@|$YDOTOOLD|g" \
-      "$DIR/systemd/ydotoold.service.in" > "$UNIT_DIR/ydotoold.service"
-  fi
-fi
+    ;;
+esac
 
-if [ "$NO_AUTOSTART" = 1 ]; then
-  echo "Done. Dependencies and acceleration configured; autostart skipped."
-  exit 0
-fi
-
-if [ "$OS" = "Darwin" ]; then
-  echo "==> installing launchd agent"
-  PLIST="$HOME/Library/LaunchAgents/com.whisper-ptt.plist"
-  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/whisper-ptt"
-  sed -e "s|@DIR@|$DIR_SED|g" -e "s|@HOME@|$HOME|g" \
-    "$DIR/macos/com.whisper-ptt.plist.in" > "$PLIST"
-  launchctl bootout "gui/$(id -u)/com.whisper-ptt" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-
-  echo
-  echo "Done. Hold Right Ctrl in any window, speak, release — text gets typed."
-  echo "First dictation downloads the whisper model (~0.5-1.5 GB), then it's offline."
-  echo "Logs:    ~/Library/Logs/whisper-ptt/ (dictate.log + launchd.log)"
-  echo "Restart: launchctl kickstart -k gui/\$(id -u)/com.whisper-ptt"
-else
-  echo "==> installing systemd user service"
-  mkdir -p "$UNIT_DIR"
-  sed "s|@DIR@|$DIR_SED|g" "$DIR/systemd/whisper-ptt.service.in" \
-    > "$UNIT_DIR/whisper-ptt.service"
-  systemctl --user daemon-reload
-
-  # A launcher, so the app shows up in the desktop's app search (GNOME,
-  # KDE, ...). The daemon itself is the service above, so launching restarts
-  # it — which also revives a daemon the tray gave up on. The .deb ships its
-  # own dpkg-owned entry in /usr/share/applications; a per-user copy next to
-  # it would list the app twice. Best effort: a missing launcher must never
-  # cost the service setup below.
-  APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-  if [ -f /usr/share/applications/hushkey.desktop ]; then
-    rm -f "$APPS_DIR/hushkey.desktop" 2>/dev/null || true
-  elif ! { mkdir -p "$APPS_DIR" \
-      && sed "s|@DIR@|$DIR_SED|g" "$DIR/desktop/hushkey.desktop.in" \
-        > "$APPS_DIR/hushkey.desktop"; } 2>/dev/null; then
-    echo "    WARNING: could not write $APPS_DIR/hushkey.desktop — hushkey"
-    echo "             will not show up in the app search (dictation is unaffected)"
-  fi
-
-  if [ "$SESSION" = "wayland" ]; then
-    systemctl --user enable "$YDOTOOLD_UNIT"
-    if [ "$NEEDS_LOGOUT" -eq 0 ]; then
-      # start rather than restart: the packaged unit may already be serving the
-      # socket, and bouncing it would drop it for anything else using ydotool.
-      systemctl --user start "$YDOTOOLD_UNIT"
-    fi
-  fi
-
-  if [ "$NEEDS_LOGOUT" -eq 1 ]; then
-    systemctl --user enable whisper-ptt.service
-    echo
-    echo "Almost done — you were just added to the 'input' group."
-    echo "Log out and back in (a reboot also works), then dictation starts automatically."
-    echo "Verify afterwards with: systemctl --user status whisper-ptt.service"
-    exit 0
-  fi
-
-  # restart, not enable --now: an already-running daemon would otherwise keep
-  # serving the old code (and, after a move, the old path) — and the .deb runs
-  # this from postinst, where a "please restart" note goes unread.
-  # Skipped when we run inside the service itself (the tray's in-app update):
-  # that tray is already the new code, and a restart would kill this script
-  # mid-run along with the rest of the unit's cgroup. Checked via the cgroup,
-  # not INVOCATION_ID — that is set in every unit, packagekit's included.
-  systemctl --user enable whisper-ptt.service
-  if ! grep -q '/whisper-ptt\.service$' /proc/self/cgroup 2>/dev/null; then
-    systemctl --user restart whisper-ptt.service
-  fi
-
-  echo
-  echo "Done. Hold Right Ctrl in any window, speak, release — text gets inserted."
-  echo "First dictation downloads the whisper model (~0.5-1.5 GB), then it's offline."
-  echo "Logs: journalctl --user -u whisper-ptt.service -f"
-  if [ "$SESSION" = "wayland" ]; then
-    echo "Wayland note: terminals paste with Ctrl+Shift+V — for those set"
-    echo "  PTT_PASTE_KEY=ctrl+shift+v (see README 'Configuration')."
-  fi
-fi
+echo "==> installing"
+"$EXE" --install --from-python
+echo
+echo "Done: hushkey runs (tray icon) and starts at login."
+echo "Hold your key (Caps Lock unless you picked another), speak, release."
+echo "Settings are in the tray menu. Remove with: ~/.local/bin/hushkey --uninstall (Linux),"
+echo "  ~/Applications/hushkey.app/Contents/MacOS/hushkey --uninstall (macOS)"

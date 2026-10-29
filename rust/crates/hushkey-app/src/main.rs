@@ -54,6 +54,10 @@ fn main() -> std::process::ExitCode {
             log::open();
             setup::install(from_python)
         }
+        Ok(setup::Start::Version) => {
+            println!("hushkey {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Ok(setup::Start::Uninstall) => {
             log::open();
             setup::uninstall()
