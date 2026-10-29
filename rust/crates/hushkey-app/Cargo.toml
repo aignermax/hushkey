@@ -33,7 +33,7 @@ png = "0.18"
 ico = "0.4"
 winresource = "0.1"
 
-[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 tray-icon = "0.26"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -60,3 +60,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
 ] }
+
+# The versions tray-icon already uses, so there is one objc2 in the build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+libc = "0.2"

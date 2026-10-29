@@ -70,6 +70,14 @@ jobs:
       - name: Tests (real tiny-model inference)
         run: cargo test --workspace
 
+      - name: hushkey.app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build -p hushkey-app
+          sh packaging/macos/make-app.sh target/debug/hushkey target/app
+          plutil -lint target/app/hushkey.app/Contents/Info.plist
+          test -s target/app/hushkey.app/Contents/Resources/hushkey.icns
+
       - name: C host against include/hushkey.h
         if: runner.os != 'Windows'
         shell: bash
