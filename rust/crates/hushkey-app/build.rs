@@ -61,16 +61,12 @@ fn shrink(rgba: &[u8], size: u32, factor: u32) -> Vec<u8> {
                 }
             }
             let n = (factor * factor) as u64;
-            if a == 0 {
-                result.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                result.extend_from_slice(&[
-                    (r / a) as u8,
-                    (g / a) as u8,
-                    (b / a) as u8,
-                    (a / n) as u8,
-                ]);
-            }
+            // Fully transparent blocks stay transparent black.
+            let pixel = match (r.checked_div(a), g.checked_div(a), b.checked_div(a)) {
+                (Some(r), Some(g), Some(b)) => [r as u8, g as u8, b as u8, (a / n) as u8],
+                _ => [0, 0, 0, 0],
+            };
+            result.extend_from_slice(&pixel);
         }
     }
     result

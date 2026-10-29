@@ -73,16 +73,12 @@ pub fn shrink(rgba: &[u8], size: u32, factor: u32) -> Vec<u8> {
                 }
             }
             let n = (factor * factor) as u64;
-            if a == 0 {
-                result.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                result.extend_from_slice(&[
-                    (r / a) as u8,
-                    (g / a) as u8,
-                    (b / a) as u8,
-                    (a / n) as u8,
-                ]);
-            }
+            // Fully transparent blocks stay transparent black.
+            let pixel = match (r.checked_div(a), g.checked_div(a), b.checked_div(a)) {
+                (Some(r), Some(g), Some(b)) => [r as u8, g as u8, b as u8, (a / n) as u8],
+                _ => [0, 0, 0, 0],
+            };
+            result.extend_from_slice(&pixel);
         }
     }
     result
@@ -179,7 +175,8 @@ mod preview {
                     let dst = ((y * SIZE * n + i as u32 * SIZE + x) * 4) as usize;
                     let a = image[src + 3] as u32;
                     for c in 0..3 {
-                        strip[dst + c] = ((image[src + c] as u32 * a + 255 * (255 - a)) / 255) as u8;
+                        strip[dst + c] =
+                            ((image[src + c] as u32 * a + 255 * (255 - a)) / 255) as u8;
                     }
                 }
             }
@@ -187,6 +184,9 @@ mod preview {
         let mut png = png::Encoder::new(std::fs::File::create(path).unwrap(), SIZE * n, SIZE);
         png.set_color(png::ColorType::Rgba);
         png.set_depth(png::BitDepth::Eight);
-        png.write_header().unwrap().write_image_data(&strip).unwrap();
+        png.write_header()
+            .unwrap()
+            .write_image_data(&strip)
+            .unwrap();
     }
 }
