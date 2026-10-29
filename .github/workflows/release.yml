@@ -92,6 +92,8 @@ jobs:
 
       - name: Build
         working-directory: rust
+        # PowerShell: in Git Bash, coreutils' link.exe shadows MSVC's linker.
+        shell: pwsh
         run: cargo build --release -p hushkey-app --features ${{ matrix.features }}
 
       - name: Package
