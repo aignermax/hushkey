@@ -5,6 +5,9 @@
 // A tray app: no console window on Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// Only the Windows app loads and saves settings so far; elsewhere the
+// parsing is still built and tested.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod config;
 #[cfg(windows)]
 mod log;
