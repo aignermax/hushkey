@@ -52,8 +52,10 @@ try {
     }
 
     Write-Host "==> installing"
-    # A window program: Start-Process waits for it, '&' would not.
-    $p = Start-Process -FilePath $Exe -ArgumentList "--install", "--from-python" -Wait -PassThru
+    # A window program: '&' would not wait for it, and Start-Process -Wait
+    # would also wait for the hushkey it starts (a child), forever.
+    $p = Start-Process -FilePath $Exe -ArgumentList "--install", "--from-python" -PassThru
+    $p.WaitForExit()
     if ($p.ExitCode -ne 0) {
         throw "hushkey --install failed (exit $($p.ExitCode)); see $env:LOCALAPPDATA\hushkey-rs\hushkey.log"
     }
