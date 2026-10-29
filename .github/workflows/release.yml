@@ -3,7 +3,8 @@ name: release
 # The Rust app for every system, attached to the release of a v* tag
 # (a pre-release when the tag has a suffix: v0.11.0-rc.1). The app updates
 # itself from these assets, and install.ps1 / install.sh download them.
-# Run by hand (workflow_dispatch) to build without publishing.
+# Pull requests that touch the build, and runs by hand (workflow_dispatch),
+# build without publishing.
 
 permissions:
   contents: write  # attaching the assets to the release
@@ -11,6 +12,9 @@ permissions:
 on:
   push:
     tags: ["v*"]
+  # A trial build (nothing published) when the build itself changes.
+  pull_request:
+    paths: [".github/workflows/release.yml", "rust/packaging/**", "rust/Cargo.toml", "rust/crates/hushkey-app/**"]
   workflow_dispatch:
 
 jobs:
