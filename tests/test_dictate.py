@@ -2764,6 +2764,8 @@ def _x11_offer(monkeypatch, focus=None, owner=0x4A00001):
     monkeypatch.setattr(dictate, "_x11_focus_window_id", lambda: focus)
     monkeypatch.setattr(dictate, "_x11_clipboard_owner_id",
                         lambda: served.get("owner", owner))
+    monkeypatch.setattr(dictate, "_x11_clipboard_read",
+                        lambda: served.get("content", b"a copy"))
     return dictate._X11ClipboardOffer("Hallo"), served
 
 
@@ -2898,3 +2900,19 @@ def test_x11_offer_counts_every_client_when_the_root_has_focus(monkeypatch):
     offer.arm()
     served["on_request"](True, CHROMIUM_CLIPBOARD)
     assert offer.fetched.is_set()
+
+
+def test_x11_offer_counts_a_manager_reowning_the_transcript_as_ours(
+        monkeypatch):
+    """Parcellite/CopyQ in sync mode take over every new selection: the
+    clipboard then still holds the transcript, and the previous contents
+    must come back all the same."""
+    offer, served = _x11_offer(monkeypatch)
+    served["owner"] = CLIPBOARD_MANAGER
+    served["thread"].alive = False
+    served["content"] = "Hallo".encode()
+    assert offer.owned()
+    served["content"] = None  # our owner died and the clipboard emptied
+    assert offer.owned()
+    served["content"] = b"something the user copied"
+    assert not offer.owned()

@@ -1294,7 +1294,8 @@ class _X11ClipboardOffer:
         self.armed = False
         self.target_client = None
         self.last_request = time.monotonic()
-        self._thread = _x11_clipboard_own(text.encode("utf-8"),
+        self.data = text.encode("utf-8")
+        self._thread = _x11_clipboard_own(self.data,
                                           on_request=self._on_request)
 
     def _on_request(self, served_text, requestor=None):
@@ -1330,9 +1331,10 @@ class _X11ClipboardOffer:
                 return True
             if time.monotonic() >= deadline:
                 return False
-        # a fresh budget for the quiet period: a late fetch is followed by
-        # the rest of the target's handshake just the same
-        deadline = time.monotonic() + timeout
+        # a budget of its own for the quiet period: a late fetch is followed
+        # by the rest of the target's handshake just the same — bounded, so a
+        # target that keeps polling TARGETS cannot hold the daemon
+        deadline = time.monotonic() + max(2.0, 4 * CLIPBOARD_SETTLE)
         while True:
             quiet_until = self.last_request + CLIPBOARD_SETTLE
             now = time.monotonic()
@@ -1341,15 +1343,21 @@ class _X11ClipboardOffer:
             time.sleep(min(quiet_until, deadline) - now)
 
     def owned(self):
-        """Whether the server still names our window as the owner — the
-        serving thread may not have processed a SelectionClear yet."""
-        if not self._thread.is_alive():
-            return False
+        """Whether the clipboard still holds the transcript, so the restore
+        overwrites nothing newer. Asks the server rather than the serving
+        thread, which may not have processed a SelectionClear yet. Another
+        owner still counts when it serves nothing (our thread died and the
+        clipboard emptied) or our very text (a clipboard manager re-owning
+        every new selection) — only a real copy made meanwhile is kept."""
         try:
-            return _x11_clipboard_owner_id() == self._thread.window_id
+            if (self._thread.is_alive()
+                    and _x11_clipboard_owner_id() == self._thread.window_id):
+                return True
+            current = _x11_clipboard_read()
         except Exception:
             return False  # cannot tell: better keep the transcript than
                           # overwrite a copy made meanwhile
+        return current is None or current == self.data
 
     def close(self):
         pass  # served until another owner takes over, like wl-copy
