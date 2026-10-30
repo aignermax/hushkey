@@ -266,7 +266,7 @@ def test_dictation_cycle_redecodes_auto_detected_chinese(monkeypatch, tmp_path):
     assert d.model.calls[1]["initial_prompt"] == dictate.ZH_PROMPT
     assert d.model.calls[1]["temperature"] == 0.0
     # CJK is never typed (borrow-remap race): it lands via the clipboard
-    assert owned == [("简体字 ".encode(), None)]
+    assert owned == ["简体字 ".encode()]
 
 
 def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
@@ -291,7 +291,7 @@ def test_dictation_cycle_pastes_chinese_when_untypeable(monkeypatch, tmp_path):
     dictate_one_cycle(d, idle)
     # the transcript was owned for the paste, then the old clipboard restored
     # (served indefinitely — a bounded restore would lose it right after)
-    assert owned == [("你好，世界 ".encode(), None), (b"OLD", None)]
+    assert owned == ["你好，世界 ".encode(), b"OLD"]
     # and the chord went to the window instead of per-character typing
     keys = [k for event, k in d.injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]

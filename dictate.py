@@ -1314,11 +1314,22 @@ class _X11ClipboardOffer:
 
     def _focus_client(self):
         window_id = _x11_focus_window_id()
-        return None if window_id is None else window_id & ~self._thread.id_mask
+        if window_id is None:
+            return None
+        # 0 is the server's own client — the root window under
+        # focus-follows-mouse, say: no app to attribute the paste to
+        return (window_id & ~self._thread.id_mask) or None
 
     def wait(self, timeout):
-        if not self.fetched.wait(timeout):
-            return False
+        deadline = time.monotonic() + timeout
+        while not self.fetched.wait(min(0.05, max(0.0, deadline - time.monotonic()))):
+            if not self._thread.is_alive():
+                # another owner took over (a copy, a syncing clipboard
+                # manager): the target reads from it now, nothing to wait
+                # for — owned() then rules out the restore
+                return True
+            if time.monotonic() >= deadline:
+                return False
         # a fresh budget for the quiet period: a late fetch is followed by
         # the rest of the target's handshake just the same
         deadline = time.monotonic() + timeout
@@ -1337,7 +1348,8 @@ class _X11ClipboardOffer:
         try:
             return _x11_clipboard_owner_id() == self._thread.window_id
         except Exception:
-            return True  # cannot ask: the thread being alive has to do
+            return False  # cannot tell: better keep the transcript than
+                          # overwrite a copy made meanwhile
 
     def close(self):
         pass  # served until another owner takes over, like wl-copy
@@ -1398,13 +1410,12 @@ def _x11_clipboard_read(timeout=2.0):
         d.close()
 
 
-def _x11_clipboard_own(data, serve_seconds=None, on_request=None):
+def _x11_clipboard_own(data, on_request=None):
     """Own the X11 CLIPBOARD selection holding `data` (bytes).
 
     Owning a selection means answering SelectionRequest events for it, which
     runs on a daemon thread until another client takes the selection over
-    (SelectionClear) or serve_seconds pass — the default None serves
-    indefinitely, mirroring how wl-copy/xclip stay alive: closing the
+    (SelectionClear), mirroring how wl-copy/xclip stay alive: closing the
     connection would destroy the owner window and the clipboard would revert
     to no-owner. The thread closes the connection when it ends; the caller
     must not touch it afterwards. Returns the serving thread.
@@ -1433,15 +1444,13 @@ def _x11_clipboard_own(data, serve_seconds=None, on_request=None):
 
     def serve():
         try:
-            end = None if serve_seconds is None else time.time() + serve_seconds
-            while end is None or time.time() < end:
+            while True:
                 if d.pending_events() == 0:
                     # Check the queue first (python-xlib reads ahead, see
                     # _x11_clipboard_read), then sleep on the socket: a paste
                     # takes several request round trips (Chromium: TARGETS,
                     # text, TARGETS again), each one answered at once.
-                    left = None if end is None else max(0.0, end - time.time())
-                    select.select([d], [], [], left)
+                    select.select([d], [], [])
                     continue
                 ev = d.next_event()
                 if ev.type == X.SelectionClear:

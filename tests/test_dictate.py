@@ -897,7 +897,7 @@ class FakeMappingController(FakeController):
 
 
 def _pin_clipboard(monkeypatch, previous=b"OLD"):
-    """Fake the X11 clipboard helpers; returns the owned (data, TTL) pairs."""
+    """Fake the X11 clipboard helpers; returns the data owned, in order."""
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: previous)
     fake_x11_owner(monkeypatch, owned)
@@ -918,7 +918,7 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     injector.insert("你好 a")
     # transcript until the target fetched it, then the old contents served
     # indefinitely (a bounded restore would destroy the owner window)
-    assert owned == [("你好 a".encode(), None), (b"OLD", None)]
+    assert owned == ["你好 a".encode(), b"OLD"]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]  # chord only, no per-char typing
 
@@ -936,7 +936,7 @@ def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "<shift>", "v"]
     # nothing to restore: the transcript stays pasteable
-    assert owned == [("你好".encode(), None)]
+    assert owned == ["你好".encode()]
 
 
 def test_paste_honours_the_streaming_chord_override(monkeypatch):
@@ -982,7 +982,7 @@ def test_cjk_uses_the_clipboard_even_when_a_keycode_row_is_free(monkeypatch):
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("你a")
     # the whole text goes through the clipboard as one paste, no typing
-    assert owned == [("你a".encode(), None)]
+    assert owned == ["你a".encode()]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]
 
@@ -1019,7 +1019,7 @@ def test_legacy_keysym_character_unmapped_uses_the_clipboard(monkeypatch):
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("€")
-    assert owned == [("€".encode(), None)]
+    assert owned == ["€".encode()]
 
 
 def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
@@ -1041,7 +1041,7 @@ def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
     # only the paste chord, no per-character typing
     assert [k for event, k in injector.controller.events
             if event == "down"] == ["<ctrl>", "v"]
-    assert owned == [("名".encode(), None)]  # clipboard instead
+    assert owned == ["名".encode()]  # clipboard instead
 
 
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
@@ -1055,7 +1055,7 @@ def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
     def broken_read():
         raise OSError("no X connection")
 
-    def broken_own(data, serve_seconds=None):
+    def broken_own(data, on_request=None):
         raise OSError("no X connection")
 
     monkeypatch.setattr(dictate, "_x11_clipboard_read", broken_read)
@@ -2756,7 +2756,7 @@ def _x11_offer(monkeypatch, focus=None, owner=0x4A00001):
     from conftest import _FakeOwnerThread
     served = {"thread": _FakeOwnerThread(window_id=0x4A00001)}
 
-    def own(data, serve_seconds=None, on_request=None):
+    def own(data, on_request=None):
         served["data"], served["on_request"] = data, on_request
         return served["thread"]
 
@@ -2860,3 +2860,41 @@ def test_a_bad_paste_chord_leaves_the_clipboard_untouched(monkeypatch):
     with pytest.raises(ValueError):
         injector._paste_text("Hallo")
     assert owned == []
+
+
+@pytest.mark.parametrize("requestor, restored", [
+    (CHROMIUM_CLIPBOARD, True),  # the focused app fetched: restore
+    (CLIPBOARD_MANAGER, False),  # only a clipboard manager did: keep it
+])
+def test_x11_paste_restores_only_after_the_focused_app_fetched(
+        monkeypatch, requestor, restored):
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set())
+    owned = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: b"OLD")
+    fake_x11_owner(monkeypatch, owned, focus=CHROMIUM_FOCUS,
+                   requestor=requestor)
+    monkeypatch.setattr(dictate, "PASTE_FETCH_TIMEOUT", 0.1)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    assert injector._paste_text("名")
+    assert owned == (["名".encode(), b"OLD"] if restored else ["名".encode()])
+
+
+def test_x11_offer_stops_waiting_once_another_owner_took_over(monkeypatch):
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    served["thread"].alive = False  # SelectionClear: someone copied
+    t0 = time.monotonic()
+    offer.wait(5)
+    assert time.monotonic() - t0 < 1
+    assert not offer.owned()
+
+
+def test_x11_offer_counts_every_client_when_the_root_has_focus(monkeypatch):
+    """Focus on the root (focus-follows-mouse): no app to attribute to."""
+    offer, served = _x11_offer(monkeypatch, focus=0x000101)
+    offer.arm()
+    served["on_request"](True, CHROMIUM_CLIPBOARD)
+    assert offer.fetched.is_set()
