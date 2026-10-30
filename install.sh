@@ -51,12 +51,32 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
   SUDO="sudo"
 fi
 
+# A background update from the tray has no terminal, so a sudo password prompt
+# cannot be answered: sudo fails and, under set -e, the rest of the installer
+# (acceleration, service, launcher) would be skipped on every update. Only call
+# sudo when it works without a prompt or a terminal can ask for the password.
+sudo_usable() {
+  [ -z "$SUDO" ] && return 0
+  $SUDO -n true 2>/dev/null && return 0
+  ( exec </dev/tty ) 2>/dev/null
+}
+
+# install_pkg exits with this when sudo could not be used at all (see
+# sudo_usable) — optional packages tolerate exactly that, not a failed install.
+NO_SUDO=3
+
 install_pkg() {
   if [ "${HUSHKEY_PACKAGE_INSTALL:-0}" = 1 ]; then
     echo "ERROR: package dependency missing: $* (no nested package manager during dpkg)" >&2
     return 1
   fi
   echo "==> installing $* (may ask for your password)"
+  if { command -v apt-get || command -v dnf || command -v pacman; } >/dev/null \
+      && ! sudo_usable; then  # brew alone needs no sudo
+    echo "WARNING: cannot install $*: sudo needs a password and there is no terminal to ask for it." >&2
+    echo "         Install it yourself, then re-run: bash \"$DIR/install.sh\"" >&2
+    return "$NO_SUDO"
+  fi
   if command -v apt-get >/dev/null; then
     $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
   elif command -v dnf >/dev/null; then
@@ -250,15 +270,15 @@ rm -f "$PIP_ERR"
 if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
   if command -v apt-get >/dev/null; then
     if ! debian_packages_installed libvulkan1 mesa-vulkan-drivers libportaudio2; then
-      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
+      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2 || [ $? = "$NO_SUDO" ]
     fi
   elif command -v dnf >/dev/null; then
     if ! rpm -q vulkan-loader mesa-vulkan-drivers portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-loader mesa-vulkan-drivers portaudio
+      install_pkg vulkan-loader mesa-vulkan-drivers portaudio || [ $? = "$NO_SUDO" ]
     fi
   elif command -v pacman >/dev/null; then
     if ! pacman -Q vulkan-icd-loader vulkan-radeon vulkan-intel portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
+      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio || [ $? = "$NO_SUDO" ]
     fi
   fi
 fi

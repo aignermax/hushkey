@@ -1057,7 +1057,12 @@ def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
     def broken_read():
         raise OSError("no X connection")
 
+    def broken_own(data, serve_seconds=None):
+        raise OSError("no X connection")
+
     monkeypatch.setattr(dictate, "_x11_clipboard_read", broken_read)
+    # a live X display would otherwise really take the clipboard
+    monkeypatch.setattr(dictate, "_x11_clipboard_own", broken_own)
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     injector.insert("你a")
