@@ -52,3 +52,43 @@ def _typing_by_default(monkeypatch):
     """Most insert tests predate paste mode; pin typing, which also keeps
     every test off the real clipboard (paste tests opt in and stub it)."""
     monkeypatch.setenv("PTT_INSERT", "type")
+
+
+class _FakeOwnerThread:
+    alive = True
+    id_mask = 0x1FFFFF
+
+    def __init__(self, window_id=0x4A00001):
+        self.window_id = window_id
+
+    def is_alive(self):
+        return self.alive
+
+
+def fake_x11_owner(monkeypatch, owned, fetch=True, focus=None,
+                   requestor=None):
+    """Replace dictate._x11_clipboard_own with a recorder of the data owned.
+    With fetch, `requestor` fetches the text as soon as an offer is armed —
+    what a real target does in reply to the chord. `focus` is the id of the
+    input-focus window (None: no window to attribute the paste to)."""
+    import dictate
+    owners = []
+
+    def own(data, on_request=None):
+        owned.append(data)
+        owners.append(_FakeOwnerThread(window_id=0x4A00001 + len(owners)))
+        return owners[-1]
+
+    monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    monkeypatch.setattr(dictate, "_x11_focus_window_id", lambda: focus)
+    monkeypatch.setattr(dictate, "_x11_clipboard_owner_id",
+                        lambda: owners[-1].window_id)
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.0)
+    if fetch:
+        arm = dictate._X11ClipboardOffer.arm
+
+        def arm_and_fetch(self):
+            arm(self)
+            self._on_request(True, requestor)
+
+        monkeypatch.setattr(dictate._X11ClipboardOffer, "arm", arm_and_fetch)

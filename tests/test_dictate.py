@@ -10,6 +10,7 @@ import time
 import pytest
 
 import dictate
+from conftest import fake_x11_owner
 
 
 @pytest.fixture(autouse=True)
@@ -896,12 +897,10 @@ class FakeMappingController(FakeController):
 
 
 def _pin_clipboard(monkeypatch, previous=b"OLD"):
-    """Fake the X11 clipboard helpers; returns the owned (data, TTL) pairs."""
+    """Fake the X11 clipboard helpers; returns the data owned, in order."""
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: previous)
-    monkeypatch.setattr(
-        dictate, "_x11_clipboard_own",
-        lambda data, serve_seconds=None: owned.append((data, serve_seconds)))
+    fake_x11_owner(monkeypatch, owned)
     return owned
 
 
@@ -917,10 +916,9 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好 a")
-    # transcript until the restore, then the old contents served indefinitely
-    # (a bounded restore would destroy the owner window and lose it again)
-    assert owned == [("你好 a".encode(), dictate.CLIPBOARD_SETTLE + 2.0),
-                     (b"OLD", None)]
+    # transcript until the target fetched it, then the old contents served
+    # indefinitely (a bounded restore would destroy the owner window)
+    assert owned == ["你好 a".encode(), b"OLD"]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]  # chord only, no per-char typing
 
@@ -938,7 +936,7 @@ def test_untypeable_text_in_a_terminal_pastes_with_ctrl_shift_v(monkeypatch):
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "<shift>", "v"]
     # nothing to restore: the transcript stays pasteable
-    assert owned == [("你好".encode(), None)]
+    assert owned == ["你好".encode()]
 
 
 def test_paste_honours_the_streaming_chord_override(monkeypatch):
@@ -984,7 +982,7 @@ def test_cjk_uses_the_clipboard_even_when_a_keycode_row_is_free(monkeypatch):
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("你a")
     # the whole text goes through the clipboard as one paste, no typing
-    assert owned == [("你a".encode(), None)]
+    assert owned == ["你a".encode()]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]
 
@@ -1021,7 +1019,7 @@ def test_legacy_keysym_character_unmapped_uses_the_clipboard(monkeypatch):
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
     injector.insert("€")
-    assert owned == [("€".encode(), None)]
+    assert owned == ["€".encode()]
 
 
 def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
@@ -1043,7 +1041,7 @@ def test_borrowed_unicode_keysyms_are_never_typed(monkeypatch):
     # only the paste chord, no per-character typing
     assert [k for event, k in injector.controller.events
             if event == "down"] == ["<ctrl>", "v"]
-    assert owned == [("名".encode(), None)]  # clipboard instead
+    assert owned == ["名".encode()]  # clipboard instead
 
 
 def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
@@ -1057,7 +1055,7 @@ def test_clipboard_failure_falls_back_to_typing_what_it_can(monkeypatch,
     def broken_read():
         raise OSError("no X connection")
 
-    def broken_own(data, serve_seconds=None):
+    def broken_own(data, on_request=None):
         raise OSError("no X connection")
 
     monkeypatch.setattr(dictate, "_x11_clipboard_read", broken_read)
@@ -1130,6 +1128,8 @@ class _FakeSelectionDisplay:
         self._events = list(events)
         self.closed = 0
         self._root = types.SimpleNamespace(create_window=lambda *a: window)
+        self.display = types.SimpleNamespace(
+            info=types.SimpleNamespace(resource_id_mask=0x1FFFFF))
 
     def get_atom(self, name):
         return name
@@ -2182,8 +2182,8 @@ def test_transcript_is_recorded_even_when_insert_fails(monkeypatch, tmp_path):
 
 
 class FakeOffer:
-    def __init__(self, writes, text, transient, fetched, owned=True):
-        writes.append((text, transient))
+    def __init__(self, writes, text, fetched, owned=True):
+        writes.append((text, "offer"))
         self.fetched, self.armed, self.closed = fetched, False, False
         self._owned = owned
         self.waited = False
@@ -2212,12 +2212,11 @@ def _paste_mode(monkeypatch, platform, previous="OLD", terminal=False,
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_read",
                         staticmethod(lambda: previous))
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_write",
-                        staticmethod(lambda data, transient=False:
-                                     writes.append((data, transient))))
+                        staticmethod(lambda data:
+                                     writes.append((data, "restore"))))
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
-                        classmethod(lambda cls, text, transient:
-                                    FakeOffer(writes, text, transient, fetched,
-                                              owned)))
+                        classmethod(lambda cls, text:
+                                    FakeOffer(writes, text, fetched, owned)))
     monkeypatch.setattr(dictate, "foreground_window_is_terminal",
                         lambda: terminal)
     monkeypatch.setattr(dictate, "_CHORD_KEYS",
@@ -2239,7 +2238,7 @@ def test_paste_mode_pastes_with_ctrl_v_and_restores_the_clipboard(monkeypatch):
     injector, writes = _paste_mode(monkeypatch, "win32")
     injector.insert("Hallo, Welt! ")
     assert _downs(injector) == ["<ctrl>", "v"]
-    assert writes == [("Hallo, Welt! ", True), ("OLD", False)]
+    assert writes == [("Hallo, Welt! ", "offer"), ("OLD", "restore")]
 
 
 def test_paste_mode_uses_shift_insert_in_windows_terminals(monkeypatch):
@@ -2279,7 +2278,7 @@ def test_paste_mode_does_not_restore_when_the_target_never_fetched(monkeypatch):
     instead of the dictation. Without a confirmed fetch: no restore."""
     injector, writes = _paste_mode(monkeypatch, "win32", fetched=False)
     injector.insert("Hallo")
-    assert writes == [("Hallo", True)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_keeps_a_copy_made_while_the_paste_settled(monkeypatch):
@@ -2287,7 +2286,7 @@ def test_paste_mode_keeps_a_copy_made_while_the_paste_settled(monkeypatch):
     contents; the restore must not overwrite it."""
     injector, writes = _paste_mode(monkeypatch, "win32", owned=False)
     injector.insert("Hallo")
-    assert writes == [("Hallo", True)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_leaves_the_transcript_when_nothing_to_restore(monkeypatch):
@@ -2296,10 +2295,10 @@ def test_paste_mode_leaves_the_transcript_when_nothing_to_restore(monkeypatch):
     offers = []
     real_offer = dictate.PynputInjector._clipboard_offer
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
-                        classmethod(lambda cls, text, transient: offers.append(
-                            real_offer(text, transient)) or offers[-1]))
+                        classmethod(lambda cls, text: offers.append(
+                            real_offer(text)) or offers[-1]))
     injector.insert("Hallo")
-    assert writes == [("Hallo", False)]
+    assert writes == [("Hallo", "offer")]
     # Nothing to restore, so nothing to wait for: no stall per dictation.
     assert not offers[0].waited
 
@@ -2317,7 +2316,7 @@ def test_paste_mode_pastes_even_when_the_previous_clipboard_is_unreadable(
                         staticmethod(busy))
     injector.insert("Hallo")
     assert _downs(injector) == ["<ctrl>", "v"]
-    assert writes == [("Hallo", False)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_puts_the_previous_text_back_when_the_offer_fails(
@@ -2337,7 +2336,7 @@ def test_paste_mode_puts_the_previous_text_back_when_the_offer_fails(
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     injector.insert("ab")
     assert _downs(injector) == ["a", "b"]
-    assert writes == [("OLD", False)]
+    assert writes == [("OLD", "restore")]
 
 
 def test_paste_mode_honours_the_streaming_chord_override(monkeypatch):
@@ -2749,3 +2748,171 @@ def test_preview_skips_the_punctuation_redecode(monkeypatch, tmp_path):
     d.model = FakeModel()
     d._transcribe(wav, None, restyle=False)
     assert len(calls) == 1
+
+
+def _x11_offer(monkeypatch, focus=None, owner=0x4A00001):
+    """A real _X11ClipboardOffer over a stub owner thread we drive by hand;
+    `focus` is the input-focus window id, `owner` the CLIPBOARD owner id."""
+    from conftest import _FakeOwnerThread
+    served = {"thread": _FakeOwnerThread(window_id=0x4A00001)}
+
+    def own(data, on_request=None):
+        served["data"], served["on_request"] = data, on_request
+        return served["thread"]
+
+    monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    monkeypatch.setattr(dictate, "_x11_focus_window_id", lambda: focus)
+    monkeypatch.setattr(dictate, "_x11_clipboard_owner_id",
+                        lambda: served.get("owner", owner))
+    monkeypatch.setattr(dictate, "_x11_clipboard_read",
+                        lambda: served.get("content", b"a copy"))
+    return dictate._X11ClipboardOffer("Hallo"), served
+
+
+CHROMIUM_FOCUS = 0x3A00003      # the focused Chromium window
+CHROMIUM_CLIPBOARD = 0x3A00000  # its hidden window that reads the clipboard
+CLIPBOARD_MANAGER = 0x6008AE    # another X client
+
+
+def test_x11_offer_waits_for_the_targets_fetch_and_then_for_quiet(monkeypatch):
+    """Chromium/Electron (Teams) read in several round trips and drop the paste
+    when the owner changes in between: the restore waits for the text fetch
+    and then for the requests to stop, not for a fixed timer."""
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.2)
+    offer, served = _x11_offer(monkeypatch, focus=CHROMIUM_FOCUS)
+    assert served["data"] == "Hallo".encode()
+    served["on_request"](True, CHROMIUM_CLIPBOARD)  # before the chord
+    assert not offer.fetched.is_set()
+    offer.arm()
+
+    def chromium():
+        for text in (False, True, False, False):  # TARGETS, text, TARGETS…
+            time.sleep(0.1)
+            served["on_request"](text, CHROMIUM_CLIPBOARD)
+
+    t0 = time.monotonic()
+    threading.Thread(target=chromium).start()
+    assert offer.wait(5)
+    # last request at ~0.4 s, then 0.2 s of quiet
+    assert time.monotonic() - t0 >= 0.55
+
+
+def test_x11_offer_ignores_a_clipboard_manager(monkeypatch):
+    """A clipboard manager fetching every new owner is not the paste target:
+    counting it would restore before a slow target even started reading."""
+    offer, served = _x11_offer(monkeypatch, focus=CHROMIUM_FOCUS)
+    offer.arm()
+    served["on_request"](True, CLIPBOARD_MANAGER)
+    assert not offer.wait(0.1)
+    served["on_request"](True, CHROMIUM_CLIPBOARD)
+    assert offer.fetched.is_set()
+
+
+def test_x11_offer_counts_every_client_without_a_focus_window(monkeypatch):
+    offer, served = _x11_offer(monkeypatch, focus=None)
+    offer.arm()
+    served["on_request"](True, CLIPBOARD_MANAGER)
+    assert offer.fetched.is_set()
+
+
+def test_x11_offer_reports_no_fetch_on_timeout(monkeypatch):
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    served["on_request"](False, CHROMIUM_CLIPBOARD)  # TARGETS only
+    assert not offer.wait(0.1)
+
+
+def test_x11_offer_gives_a_late_fetch_its_quiet_period(monkeypatch):
+    """A fetch just before the timeout is still followed by the rest of the
+    target's handshake — the quiet period gets its own budget."""
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.8)
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    threading.Timer(0.3, served["on_request"], (True, None)).start()
+    t0 = time.monotonic()
+    assert offer.wait(1.0)  # generous: slow CI runners fire timers late
+    # fetch at >= 0.3 s + 0.8 s quiet: past the first 1.0 s budget
+    assert time.monotonic() - t0 >= 1.05
+
+
+def test_x11_offer_is_not_owned_once_the_server_names_another_owner(
+        monkeypatch):
+    """A copy made during the paste must survive: ask the server, the
+    serving thread may not have seen the SelectionClear yet."""
+    offer, served = _x11_offer(monkeypatch)
+    assert offer.owned()
+    served["owner"] = 0x5000001  # the user copied something meanwhile
+    assert not offer.owned()
+    served["owner"] = 0x4A00001
+    served["thread"].alive = False  # SelectionClear ended the thread
+    assert not offer.owned()
+
+
+def test_a_bad_paste_chord_leaves_the_clipboard_untouched(monkeypatch):
+    """The chord is resolved before the clipboard changes hands."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set())
+    owned = _pin_clipboard(monkeypatch)
+
+    def bad_chord(chord):
+        raise ValueError(f"unknown key in {chord!r}")
+
+    monkeypatch.setattr(injector, "_chord_keys", bad_chord)
+    with pytest.raises(ValueError):
+        injector._paste_text("Hallo")
+    assert owned == []
+
+
+@pytest.mark.parametrize("requestor, restored", [
+    (CHROMIUM_CLIPBOARD, True),  # the focused app fetched: restore
+    (CLIPBOARD_MANAGER, False),  # only a clipboard manager did: keep it
+])
+def test_x11_paste_restores_only_after_the_focused_app_fetched(
+        monkeypatch, requestor, restored):
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set())
+    owned = []
+    monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: b"OLD")
+    fake_x11_owner(monkeypatch, owned, focus=CHROMIUM_FOCUS,
+                   requestor=requestor)
+    monkeypatch.setattr(dictate, "PASTE_FETCH_TIMEOUT", 0.1)
+    monkeypatch.setattr(dictate, "_CHORD_KEYS", {"ctrl": "<ctrl>"})
+    monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
+    assert injector._paste_text("名")
+    assert owned == (["名".encode(), b"OLD"] if restored else ["名".encode()])
+
+
+def test_x11_offer_stops_waiting_once_another_owner_took_over(monkeypatch):
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    served["thread"].alive = False  # SelectionClear: someone copied
+    t0 = time.monotonic()
+    offer.wait(5)
+    assert time.monotonic() - t0 < 1
+    assert not offer.owned()
+
+
+def test_x11_offer_counts_every_client_when_the_root_has_focus(monkeypatch):
+    """Focus on the root (focus-follows-mouse): no app to attribute to."""
+    offer, served = _x11_offer(monkeypatch, focus=0x000101)
+    offer.arm()
+    served["on_request"](True, CHROMIUM_CLIPBOARD)
+    assert offer.fetched.is_set()
+
+
+def test_x11_offer_counts_a_manager_reowning_the_transcript_as_ours(
+        monkeypatch):
+    """Parcellite/CopyQ in sync mode take over every new selection: the
+    clipboard then still holds the transcript, and the previous contents
+    must come back all the same."""
+    offer, served = _x11_offer(monkeypatch)
+    served["owner"] = CLIPBOARD_MANAGER
+    served["thread"].alive = False
+    served["content"] = "Hallo".encode()
+    assert offer.owned()
+    served["content"] = None  # our owner died and the clipboard emptied
+    assert offer.owned()
+    served["content"] = b"something the user copied"
+    assert not offer.owned()
