@@ -1245,6 +1245,31 @@ class _TimedOffer:
         pass
 
 
+def _x11_focus_window_id():
+    """The input-focus window's id, or None (no X, no focus, PointerRoot)."""
+    try:
+        from Xlib import display as xdisplay
+        d = xdisplay.Display()
+        try:
+            focus = d.get_input_focus().focus
+        finally:
+            d.close()
+    except Exception:
+        return None
+    return getattr(focus, "id", None) or None  # None/PointerRoot are ints
+
+
+def _x11_clipboard_owner_id():
+    """The CLIPBOARD owner window's id (0 for none). Raises without X."""
+    from Xlib import display as xdisplay
+    d = xdisplay.Display()
+    try:
+        owner = d.get_selection_owner(d.get_atom("CLIPBOARD"))
+    finally:
+        d.close()
+    return getattr(owner, "id", owner)
+
+
 class _X11ClipboardOffer:
     """The transcript on the X11 CLIPBOARD, watching who fetches it.
 
@@ -1254,33 +1279,49 @@ class _X11ClipboardOffer:
     again — and drop the whole paste when the owner changes in between, which
     a restore after a fixed CLIPBOARD_SETTLE did for slow ones.
 
-    Only a text fetch after arm() counts. wait() then also lets the requests
-    fall quiet for CLIPBOARD_SETTLE before it reports the paste done. The
-    text is served until another owner takes over — the restore, or a copy —
-    so an unfetched offer stays pasteable.
+    Only requests after arm() from the X client that holds the input focus
+    count — matched by resource-id base, which also covers the hidden window
+    Chromium reads the clipboard through. A clipboard manager grabbing every
+    new owner is another client and is ignored. (Without a focus window to
+    attribute to, every requester counts.) After the text fetch, wait() lets
+    the target's requests fall quiet for CLIPBOARD_SETTLE before it reports
+    the paste done. The text is served until another owner takes over — the
+    restore, or a copy — so an unfetched offer stays pasteable.
     """
 
     def __init__(self, text):
         self.fetched = threading.Event()
         self.armed = False
+        self.target_client = None
         self.last_request = time.monotonic()
         self._thread = _x11_clipboard_own(text.encode("utf-8"),
                                           on_request=self._on_request)
 
-    def _on_request(self, served_text):
+    def _on_request(self, served_text, requestor=None):
         if not self.armed:
             return
+        if (self.target_client is not None and requestor is not None
+                and requestor & ~self._thread.id_mask != self.target_client):
+            return  # another client: a clipboard manager, not the target
         self.last_request = time.monotonic()
         if served_text:
             self.fetched.set()
 
     def arm(self):
+        self.target_client = self._focus_client()
+        self.last_request = time.monotonic()
         self.armed = True
 
+    def _focus_client(self):
+        window_id = _x11_focus_window_id()
+        return None if window_id is None else window_id & ~self._thread.id_mask
+
     def wait(self, timeout):
-        deadline = time.monotonic() + timeout
         if not self.fetched.wait(timeout):
             return False
+        # a fresh budget for the quiet period: a late fetch is followed by
+        # the rest of the target's handshake just the same
+        deadline = time.monotonic() + timeout
         while True:
             quiet_until = self.last_request + CLIPBOARD_SETTLE
             now = time.monotonic()
@@ -1289,10 +1330,17 @@ class _X11ClipboardOffer:
             time.sleep(min(quiet_until, deadline) - now)
 
     def owned(self):
-        return self._thread.is_alive()  # ends on SelectionClear
+        """Whether the server still names our window as the owner — the
+        serving thread may not have processed a SelectionClear yet."""
+        if not self._thread.is_alive():
+            return False
+        try:
+            return _x11_clipboard_owner_id() == self._thread.window_id
+        except Exception:
+            return True  # cannot ask: the thread being alive has to do
 
     def close(self):
-        pass
+        pass  # served until another owner takes over, like wl-copy
 
 
 def _default_paste_chord():
@@ -1361,8 +1409,10 @@ def _x11_clipboard_own(data, serve_seconds=None, on_request=None):
     to no-owner. The thread closes the connection when it ends; the caller
     must not touch it afterwards. Returns the serving thread.
 
-    on_request(served_text) is called after each answered request — True
-    when it handed out the text, False for a TARGETS query.
+    on_request(served_text, requestor_id) is called after each answered
+    request — served_text True when it handed out the text, False for a
+    TARGETS query. The thread carries window_id (the owner window) and
+    id_mask (the server's resource-id mask, to tell clients apart).
     """
     from Xlib import X, Xatom, display as xdisplay
     from Xlib.protocol import event as xevent
@@ -1416,7 +1466,8 @@ def _x11_clipboard_own(data, serve_seconds=None, on_request=None):
                         property=prop if ok else X.NONE))
                     d.sync()
                     if on_request is not None:
-                        on_request(ok and ev.target != targets)
+                        on_request(ok and ev.target != targets,
+                                   ev.requestor.id)
                 except Exception as exc:
                     # e.g. the requestor died mid-request: lose this answer,
                     # not the whole selection
@@ -1428,6 +1479,8 @@ def _x11_clipboard_own(data, serve_seconds=None, on_request=None):
             d.close()
 
     thread = threading.Thread(target=serve, daemon=True)
+    thread.window_id = win.id
+    thread.id_mask = d.display.info.resource_id_mask
     thread.start()
     return thread
 
@@ -1567,6 +1620,11 @@ class PynputInjector:
         every dictation in paste mode, and on X11 for text with untypeable
         characters in type mode. False when the clipboard could not be set
         up — the caller then types instead."""
+        # Resolved before the clipboard changes hands: a bad chord must fail
+        # while the previous contents are still in place.
+        if chord is None:
+            chord = _default_paste_chord()
+        keys = self._chord_keys(chord)
         try:
             previous = self._clipboard_read()
         except Exception as exc:
@@ -1583,9 +1641,6 @@ class PynputInjector:
             self._recover_clipboard(previous)
             return False
         try:
-            if chord is None:
-                chord = _default_paste_chord()
-            keys = self._chord_keys(chord)
             offer.arm()
             for key in keys:
                 self.controller.press(key)

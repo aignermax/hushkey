@@ -56,6 +56,10 @@ def _typing_by_default(monkeypatch):
 
 class _FakeOwnerThread:
     alive = True
+    id_mask = 0x1FFFFF
+
+    def __init__(self, window_id=0x4A00001):
+        self.window_id = window_id
 
     def is_alive(self):
         return self.alive
@@ -72,6 +76,8 @@ def fake_x11_owner(monkeypatch, owned, fetch=True):
         return _FakeOwnerThread()
 
     monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    monkeypatch.setattr(dictate, "_x11_focus_window_id", lambda: None)
+    monkeypatch.setattr(dictate, "_x11_clipboard_owner_id", lambda: 0x4A00001)
     monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.0)
     if fetch:
         arm = dictate._X11ClipboardOffer.arm

@@ -1128,6 +1128,8 @@ class _FakeSelectionDisplay:
         self._events = list(events)
         self.closed = 0
         self._root = types.SimpleNamespace(create_window=lambda *a: window)
+        self.display = types.SimpleNamespace(
+            info=types.SimpleNamespace(resource_id_mask=0x1FFFFF))
 
     def get_atom(self, name):
         return name
@@ -2748,22 +2750,26 @@ def test_preview_skips_the_punctuation_redecode(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
-def _x11_offer(monkeypatch):
-    """An _X11ClipboardOffer whose owner thread is a stub we drive by hand."""
-    served = {}
-
-    class Thread:
-        alive = True
-
-        def is_alive(self):
-            return self.alive
+def _x11_offer(monkeypatch, focus=None, owner=0x4A00001):
+    """A real _X11ClipboardOffer over a stub owner thread we drive by hand;
+    `focus` is the input-focus window id, `owner` the CLIPBOARD owner id."""
+    from conftest import _FakeOwnerThread
+    served = {"thread": _FakeOwnerThread(window_id=0x4A00001)}
 
     def own(data, serve_seconds=None, on_request=None):
         served["data"], served["on_request"] = data, on_request
-        return served.setdefault("thread", Thread())
+        return served["thread"]
 
     monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    monkeypatch.setattr(dictate, "_x11_focus_window_id", lambda: focus)
+    monkeypatch.setattr(dictate, "_x11_clipboard_owner_id",
+                        lambda: served.get("owner", owner))
     return dictate._X11ClipboardOffer("Hallo"), served
+
+
+CHROMIUM_FOCUS = 0x3A00003      # the focused Chromium window
+CHROMIUM_CLIPBOARD = 0x3A00000  # its hidden window that reads the clipboard
+CLIPBOARD_MANAGER = 0x6008AE    # another X client
 
 
 def test_x11_offer_waits_for_the_targets_fetch_and_then_for_quiet(monkeypatch):
@@ -2771,16 +2777,16 @@ def test_x11_offer_waits_for_the_targets_fetch_and_then_for_quiet(monkeypatch):
     when the owner changes in between: the restore waits for the text fetch
     and then for the requests to stop, not for a fixed timer."""
     monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.2)
-    offer, served = _x11_offer(monkeypatch)
+    offer, served = _x11_offer(monkeypatch, focus=CHROMIUM_FOCUS)
     assert served["data"] == "Hallo".encode()
-    served["on_request"](True)  # a clipboard watcher before the chord
+    served["on_request"](True, CHROMIUM_CLIPBOARD)  # before the chord
     assert not offer.fetched.is_set()
     offer.arm()
 
     def chromium():
         for text in (False, True, False, False):  # TARGETS, text, TARGETS…
             time.sleep(0.1)
-            served["on_request"](text)
+            served["on_request"](text, CHROMIUM_CLIPBOARD)
 
     t0 = time.monotonic()
     threading.Thread(target=chromium).start()
@@ -2789,15 +2795,68 @@ def test_x11_offer_waits_for_the_targets_fetch_and_then_for_quiet(monkeypatch):
     assert time.monotonic() - t0 >= 0.55
 
 
+def test_x11_offer_ignores_a_clipboard_manager(monkeypatch):
+    """A clipboard manager fetching every new owner is not the paste target:
+    counting it would restore before a slow target even started reading."""
+    offer, served = _x11_offer(monkeypatch, focus=CHROMIUM_FOCUS)
+    offer.arm()
+    served["on_request"](True, CLIPBOARD_MANAGER)
+    assert not offer.wait(0.1)
+    served["on_request"](True, CHROMIUM_CLIPBOARD)
+    assert offer.fetched.is_set()
+
+
+def test_x11_offer_counts_every_client_without_a_focus_window(monkeypatch):
+    offer, served = _x11_offer(monkeypatch, focus=None)
+    offer.arm()
+    served["on_request"](True, CLIPBOARD_MANAGER)
+    assert offer.fetched.is_set()
+
+
 def test_x11_offer_reports_no_fetch_on_timeout(monkeypatch):
     offer, served = _x11_offer(monkeypatch)
     offer.arm()
-    served["on_request"](False)  # TARGETS only
+    served["on_request"](False, CHROMIUM_CLIPBOARD)  # TARGETS only
     assert not offer.wait(0.1)
 
 
-def test_x11_offer_is_not_owned_after_another_client_took_over(monkeypatch):
+def test_x11_offer_gives_a_late_fetch_its_quiet_period(monkeypatch):
+    """A fetch just before the timeout is still followed by the rest of the
+    target's handshake — the quiet period gets its own budget."""
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.1)
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    threading.Timer(0.15, served["on_request"], (True, None)).start()
+    t0 = time.monotonic()
+    assert offer.wait(0.2)
+    # fetch at 0.15 s + 0.1 s quiet: past the first 0.2 s budget
+    assert time.monotonic() - t0 >= 0.24
+
+
+def test_x11_offer_is_not_owned_once_the_server_names_another_owner(
+        monkeypatch):
+    """A copy made during the paste must survive: ask the server, the
+    serving thread may not have seen the SelectionClear yet."""
     offer, served = _x11_offer(monkeypatch)
     assert offer.owned()
-    served["thread"].alive = False  # SelectionClear ends the serving thread
+    served["owner"] = 0x5000001  # the user copied something meanwhile
     assert not offer.owned()
+    served["owner"] = 0x4A00001
+    served["thread"].alive = False  # SelectionClear ended the thread
+    assert not offer.owned()
+
+
+def test_a_bad_paste_chord_leaves_the_clipboard_untouched(monkeypatch):
+    """The chord is resolved before the clipboard changes hands."""
+    _pin_x11(monkeypatch)
+    injector = dictate.PynputInjector()
+    injector.controller = FakeMappingController(mapped=set())
+    owned = _pin_clipboard(monkeypatch)
+
+    def bad_chord(chord):
+        raise ValueError(f"unknown key in {chord!r}")
+
+    monkeypatch.setattr(injector, "_chord_keys", bad_chord)
+    with pytest.raises(ValueError):
+        injector._paste_text("Hallo")
+    assert owned == []
