@@ -2825,14 +2825,14 @@ def test_x11_offer_reports_no_fetch_on_timeout(monkeypatch):
 def test_x11_offer_gives_a_late_fetch_its_quiet_period(monkeypatch):
     """A fetch just before the timeout is still followed by the rest of the
     target's handshake — the quiet period gets its own budget."""
-    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.1)
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.8)
     offer, served = _x11_offer(monkeypatch)
     offer.arm()
-    threading.Timer(0.15, served["on_request"], (True, None)).start()
+    threading.Timer(0.3, served["on_request"], (True, None)).start()
     t0 = time.monotonic()
-    assert offer.wait(0.2)
-    # fetch at 0.15 s + 0.1 s quiet: past the first 0.2 s budget
-    assert time.monotonic() - t0 >= 0.24
+    assert offer.wait(1.0)  # generous: slow CI runners fire timers late
+    # fetch at >= 0.3 s + 0.8 s quiet: past the first 1.0 s budget
+    assert time.monotonic() - t0 >= 1.05
 
 
 def test_x11_offer_is_not_owned_once_the_server_names_another_owner(
