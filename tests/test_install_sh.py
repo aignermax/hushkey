@@ -212,7 +212,7 @@ def test_a_skipped_required_package_still_fails_the_install(sandbox):
     host.mkdir()
     for d in ("/bin", "/usr/bin"):
         for name in os.listdir(d):
-            if not name.startswith("ydotool") and not (host / name).exists():
+            if not name.startswith("ydotool") and not os.path.lexists(host / name):
                 (host / name).symlink_to(os.path.join(d, name))
     proc, log = _run_without_terminal(sandbox, "wayland", PATH=f"{shims}:{host}")
     assert proc.returncode != 0
