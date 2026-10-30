@@ -52,3 +52,32 @@ def _typing_by_default(monkeypatch):
     """Most insert tests predate paste mode; pin typing, which also keeps
     every test off the real clipboard (paste tests opt in and stub it)."""
     monkeypatch.setenv("PTT_INSERT", "type")
+
+
+class _FakeOwnerThread:
+    alive = True
+
+    def is_alive(self):
+        return self.alive
+
+
+def fake_x11_owner(monkeypatch, owned, fetch=True):
+    """Replace dictate._x11_clipboard_own with a recorder of (data,
+    serve_seconds). With fetch, the paste target fetches the text as soon as
+    an offer is armed — what a real target does in reply to the chord."""
+    import dictate
+
+    def own(data, serve_seconds=None, on_request=None):
+        owned.append((data, serve_seconds))
+        return _FakeOwnerThread()
+
+    monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.0)
+    if fetch:
+        arm = dictate._X11ClipboardOffer.arm
+
+        def arm_and_fetch(self):
+            arm(self)
+            self._on_request(True)
+
+        monkeypatch.setattr(dictate._X11ClipboardOffer, "arm", arm_and_fetch)

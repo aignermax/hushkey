@@ -10,6 +10,7 @@ import time
 import pytest
 
 import dictate
+from conftest import fake_x11_owner
 
 
 @pytest.fixture(autouse=True)
@@ -899,9 +900,7 @@ def _pin_clipboard(monkeypatch, previous=b"OLD"):
     """Fake the X11 clipboard helpers; returns the owned (data, TTL) pairs."""
     owned = []
     monkeypatch.setattr(dictate, "_x11_clipboard_read", lambda: previous)
-    monkeypatch.setattr(
-        dictate, "_x11_clipboard_own",
-        lambda data, serve_seconds=None: owned.append((data, serve_seconds)))
+    fake_x11_owner(monkeypatch, owned)
     return owned
 
 
@@ -917,10 +916,9 @@ def test_untypeable_text_is_pasted_not_typed(monkeypatch):
     monkeypatch.setattr(dictate, "foreground_window_is_terminal", lambda: False)
     monkeypatch.setattr(dictate.time, "sleep", lambda s: None)
     injector.insert("你好 a")
-    # transcript until the restore, then the old contents served indefinitely
-    # (a bounded restore would destroy the owner window and lose it again)
-    assert owned == [("你好 a".encode(), dictate.CLIPBOARD_SETTLE + 2.0),
-                     (b"OLD", None)]
+    # transcript until the target fetched it, then the old contents served
+    # indefinitely (a bounded restore would destroy the owner window)
+    assert owned == [("你好 a".encode(), None), (b"OLD", None)]
     keys = [k for event, k in injector.controller.events if event == "down"]
     assert keys == ["<ctrl>", "v"]  # chord only, no per-char typing
 
@@ -2182,8 +2180,8 @@ def test_transcript_is_recorded_even_when_insert_fails(monkeypatch, tmp_path):
 
 
 class FakeOffer:
-    def __init__(self, writes, text, transient, fetched, owned=True):
-        writes.append((text, transient))
+    def __init__(self, writes, text, fetched, owned=True):
+        writes.append((text, "offer"))
         self.fetched, self.armed, self.closed = fetched, False, False
         self._owned = owned
         self.waited = False
@@ -2212,12 +2210,11 @@ def _paste_mode(monkeypatch, platform, previous="OLD", terminal=False,
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_read",
                         staticmethod(lambda: previous))
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_write",
-                        staticmethod(lambda data, transient=False:
-                                     writes.append((data, transient))))
+                        staticmethod(lambda data:
+                                     writes.append((data, "restore"))))
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
-                        classmethod(lambda cls, text, transient:
-                                    FakeOffer(writes, text, transient, fetched,
-                                              owned)))
+                        classmethod(lambda cls, text:
+                                    FakeOffer(writes, text, fetched, owned)))
     monkeypatch.setattr(dictate, "foreground_window_is_terminal",
                         lambda: terminal)
     monkeypatch.setattr(dictate, "_CHORD_KEYS",
@@ -2239,7 +2236,7 @@ def test_paste_mode_pastes_with_ctrl_v_and_restores_the_clipboard(monkeypatch):
     injector, writes = _paste_mode(monkeypatch, "win32")
     injector.insert("Hallo, Welt! ")
     assert _downs(injector) == ["<ctrl>", "v"]
-    assert writes == [("Hallo, Welt! ", True), ("OLD", False)]
+    assert writes == [("Hallo, Welt! ", "offer"), ("OLD", "restore")]
 
 
 def test_paste_mode_uses_shift_insert_in_windows_terminals(monkeypatch):
@@ -2279,7 +2276,7 @@ def test_paste_mode_does_not_restore_when_the_target_never_fetched(monkeypatch):
     instead of the dictation. Without a confirmed fetch: no restore."""
     injector, writes = _paste_mode(monkeypatch, "win32", fetched=False)
     injector.insert("Hallo")
-    assert writes == [("Hallo", True)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_keeps_a_copy_made_while_the_paste_settled(monkeypatch):
@@ -2287,7 +2284,7 @@ def test_paste_mode_keeps_a_copy_made_while_the_paste_settled(monkeypatch):
     contents; the restore must not overwrite it."""
     injector, writes = _paste_mode(monkeypatch, "win32", owned=False)
     injector.insert("Hallo")
-    assert writes == [("Hallo", True)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_leaves_the_transcript_when_nothing_to_restore(monkeypatch):
@@ -2296,10 +2293,10 @@ def test_paste_mode_leaves_the_transcript_when_nothing_to_restore(monkeypatch):
     offers = []
     real_offer = dictate.PynputInjector._clipboard_offer
     monkeypatch.setattr(dictate.PynputInjector, "_clipboard_offer",
-                        classmethod(lambda cls, text, transient: offers.append(
-                            real_offer(text, transient)) or offers[-1]))
+                        classmethod(lambda cls, text: offers.append(
+                            real_offer(text)) or offers[-1]))
     injector.insert("Hallo")
-    assert writes == [("Hallo", False)]
+    assert writes == [("Hallo", "offer")]
     # Nothing to restore, so nothing to wait for: no stall per dictation.
     assert not offers[0].waited
 
@@ -2317,7 +2314,7 @@ def test_paste_mode_pastes_even_when_the_previous_clipboard_is_unreadable(
                         staticmethod(busy))
     injector.insert("Hallo")
     assert _downs(injector) == ["<ctrl>", "v"]
-    assert writes == [("Hallo", False)]
+    assert writes == [("Hallo", "offer")]
 
 
 def test_paste_mode_puts_the_previous_text_back_when_the_offer_fails(
@@ -2337,7 +2334,7 @@ def test_paste_mode_puts_the_previous_text_back_when_the_offer_fails(
     monkeypatch.setattr(dictate, "TYPE_DELAY", 0)
     injector.insert("ab")
     assert _downs(injector) == ["a", "b"]
-    assert writes == [("OLD", False)]
+    assert writes == [("OLD", "restore")]
 
 
 def test_paste_mode_honours_the_streaming_chord_override(monkeypatch):
@@ -2749,3 +2746,58 @@ def test_preview_skips_the_punctuation_redecode(monkeypatch, tmp_path):
     d.model = FakeModel()
     d._transcribe(wav, None, restyle=False)
     assert len(calls) == 1
+
+
+def _x11_offer(monkeypatch):
+    """An _X11ClipboardOffer whose owner thread is a stub we drive by hand."""
+    served = {}
+
+    class Thread:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    def own(data, serve_seconds=None, on_request=None):
+        served["data"], served["on_request"] = data, on_request
+        return served.setdefault("thread", Thread())
+
+    monkeypatch.setattr(dictate, "_x11_clipboard_own", own)
+    return dictate._X11ClipboardOffer("Hallo"), served
+
+
+def test_x11_offer_waits_for_the_targets_fetch_and_then_for_quiet(monkeypatch):
+    """Chromium/Electron (Teams) read in several round trips and drop the paste
+    when the owner changes in between: the restore waits for the text fetch
+    and then for the requests to stop, not for a fixed timer."""
+    monkeypatch.setattr(dictate, "CLIPBOARD_SETTLE", 0.2)
+    offer, served = _x11_offer(monkeypatch)
+    assert served["data"] == "Hallo".encode()
+    served["on_request"](True)  # a clipboard watcher before the chord
+    assert not offer.fetched.is_set()
+    offer.arm()
+
+    def chromium():
+        for text in (False, True, False, False):  # TARGETS, text, TARGETS…
+            time.sleep(0.1)
+            served["on_request"](text)
+
+    t0 = time.monotonic()
+    threading.Thread(target=chromium).start()
+    assert offer.wait(5)
+    # last request at ~0.4 s, then 0.2 s of quiet
+    assert time.monotonic() - t0 >= 0.55
+
+
+def test_x11_offer_reports_no_fetch_on_timeout(monkeypatch):
+    offer, served = _x11_offer(monkeypatch)
+    offer.arm()
+    served["on_request"](False)  # TARGETS only
+    assert not offer.wait(0.1)
+
+
+def test_x11_offer_is_not_owned_after_another_client_took_over(monkeypatch):
+    offer, served = _x11_offer(monkeypatch)
+    assert offer.owned()
+    served["thread"].alive = False  # SelectionClear ends the serving thread
+    assert not offer.owned()
