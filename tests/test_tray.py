@@ -135,6 +135,34 @@ def test_pending_update_runs_installer(tmp_path, monkeypatch):
     assert not marker.exists()  # consumed: never runs twice
 
 
+def test_pending_update_runs_installer_without_a_terminal(tmp_path, monkeypatch):
+    """A sudo prompt on the terminal the tray was started from would stall
+    the update; the installer gets no stdin and (POSIX) its own session."""
+    marker = tmp_path / "update-pending"
+    marker.write_text("")
+    monkeypatch.setattr(tray, "UPDATE_PENDING", str(marker))
+    monkeypatch.setattr(tray, "UPDATE_LOG", str(tmp_path / "update.log"))
+    kwargs = []
+    monkeypatch.setattr(tray.subprocess, "run", lambda *a, **k: kwargs.append(k))
+    tray.run_pending_update_if_any()
+    assert kwargs[0]["stdin"] == tray.subprocess.DEVNULL
+    if tray.sys.platform != "win32":
+        assert kwargs[0]["start_new_session"] is True
+
+
+def test_skipped_root_steps_are_reported_once(tmp_path, monkeypatch):
+    needs_root = tmp_path / ".needs-root"
+    needs_root.write_text("apt-get install -y libportaudio2\n")
+    monkeypatch.setattr(tray, "NEEDS_ROOT", str(needs_root))
+    shown = []
+    monkeypatch.setattr(tray.dictate, "notify", lambda *a: shown.append(a))
+    monkeypatch.setattr(tray.dictate, "log", lambda msg: None)
+    tray.report_skipped_root_steps()
+    tray.report_skipped_root_steps()
+    assert len(shown) == 1 and "install.sh" in shown[0][1]
+    assert not needs_root.exists()
+
+
 def test_no_pending_update_is_a_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(tray, "UPDATE_PENDING", str(tmp_path / "nope"))
     calls = []

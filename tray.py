@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -462,11 +463,36 @@ def run_pending_update_if_any():
                    "-File", os.path.join(DIR, "install.ps1")]
         else:
             cmd = ["bash", os.path.join(DIR, "install.sh")]
+        # No terminal for the installer: a sudo prompt on the one the tray
+        # was started from would stall the update until the timeout.
+        detach = {} if sys.platform == "win32" else {"start_new_session": True}
         try:
             subprocess.run(cmd, cwd=DIR, check=True, timeout=900,
-                           stdout=out, stderr=subprocess.STDOUT)
+                           stdin=subprocess.DEVNULL, stdout=out,
+                           stderr=subprocess.STDOUT, **detach)
         except (OSError, subprocess.SubprocessError) as exc:
             dictate.log(f"tray: update installer failed: {exc}")
+
+
+NEEDS_ROOT = os.path.join(DIR, ".needs-root")
+
+
+def report_skipped_root_steps():
+    """Tell the user once about install steps a background update had to skip
+    for want of sudo (install.sh lists them in NEEDS_ROOT): otherwise they
+    would only ever show up in update.log."""
+    try:
+        with open(NEEDS_ROOT, encoding="utf-8") as fh:
+            steps = [line.strip() for line in fh if line.strip()]
+        os.remove(NEEDS_ROOT)
+    except OSError:
+        return
+    if not steps:
+        return
+    dictate.log("tray: update skipped steps that need sudo: " + "; ".join(steps))
+    dictate.notify("hushkey update needs your password",
+                   "Some steps were skipped. Run in a terminal: bash "
+                   + shlex.quote(os.path.join(DIR, "install.sh")))
 
 
 def spawn_update_helper():
@@ -1259,6 +1285,7 @@ def main():
         print("another hushkey tray is already running", file=sys.stderr)
         return 1
     run_pending_update_if_any()  # before any GUI import locks files (Windows)
+    report_skipped_root_steps()
     if overlay_wanted():
         import atexit
         overlay = RecordingOverlay()

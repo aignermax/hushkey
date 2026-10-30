@@ -13,3 +13,4 @@ native/
 debug-audio/
 debug-audio.json
 debug-audio.lock
+.needs-root

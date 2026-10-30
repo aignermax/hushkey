@@ -58,7 +58,8 @@ def run_installer():
             cmd = ["bash", os.path.join(DIR, "install.sh")]
         try:
             return subprocess.run(cmd, cwd=DIR, timeout=900,
-                                  stdout=out, stderr=subprocess.STDOUT).returncode
+                                  stdin=subprocess.DEVNULL, stdout=out,
+                                  stderr=subprocess.STDOUT).returncode
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"installer could not run: {exc}")
             return -1

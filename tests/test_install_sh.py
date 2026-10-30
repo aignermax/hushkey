@@ -156,6 +156,96 @@ def test_background_update_with_runtime_dependencies_needs_no_sudo(sandbox):
         assert "setup_acceleration.py" in log
 
 
+def _run_without_terminal(sandbox, session_type="x11", **env_overrides):
+    """Like a tray update: no controlling terminal for sudo to prompt on."""
+    env = dict(sandbox["env"], XDG_SESSION_TYPE=session_type, FAKE_UNAME="Linux",
+               **env_overrides)
+    proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
+                          env=env, capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, start_new_session=True)
+    return proc, sandbox["log"].read_text()
+
+
+# sudo that would have to prompt: `sudo -n` fails, anything else "succeeds".
+PASSWORD_SUDO_SHIM = SHIM.replace(
+    "exit 0", 'if [ "$1" = -n ]; then exit 1; fi\nexit 0')
+
+
+def test_background_update_without_sudo_skips_optional_packages(sandbox):
+    """A missing optional package must not abort a tray update before the
+    acceleration and service steps (seen with libportaudio2 missing: every
+    update since 0.8.0 failed at the sudo prompt)."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "dpkg-query", "#!/bin/sh\nexit 1\n")  # nothing installed
+    _write_exec(shims / "sudo", PASSWORD_SUDO_SHIM)
+    proc, log = _run_without_terminal(sandbox)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "apt-get" not in log
+    assert "skipped (needs sudo" in proc.stderr
+    assert log.index("setup_acceleration.py") < log.index("restart whisper-ptt.service")
+    # listed for the tray to report
+    needs_root = (sandbox["repo"] / ".needs-root").read_text()
+    assert "apt-get install -y libvulkan1 mesa-vulkan-drivers libportaudio2" in needs_root
+
+
+def test_background_update_on_wayland_skips_root_steps_without_sudo(sandbox):
+    """The udev rule, uinput module and input group need root too: without
+    usable sudo they are listed and skipped, not fatal."""
+    _write_exec(sandbox["repo"].parent / "shims/sudo", PASSWORD_SUDO_SHIM)
+    proc, log = _run_without_terminal(sandbox, "wayland",
+                                      FAKE_PACKAGED_YDOTOOL="1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "sudo install" not in log and "sudo usermod" not in log
+    assert "restart whisper-ptt.service" in log
+    needs_root = (sandbox["repo"] / ".needs-root").read_text()
+    assert "udev/99-whisper-ptt-uinput.rules" in needs_root
+
+
+def test_a_skipped_required_package_still_fails_the_install(sandbox):
+    """Only optional packages tolerate a skip: a missing ydotool on Wayland
+    must stop the run with the reason, not later with a confusing error."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "sudo", PASSWORD_SUDO_SHIM)
+    os.remove(shims / "ydotool")
+    # the host's own tools minus any real ydotool
+    host = sandbox["repo"].parent / "host-bin"
+    host.mkdir()
+    for d in ("/bin", "/usr/bin"):
+        for name in os.listdir(d):
+            if not name.startswith("ydotool") and not os.path.lexists(host / name):
+                (host / name).symlink_to(os.path.join(d, name))
+    proc, log = _run_without_terminal(sandbox, "wayland", PATH=f"{shims}:{host}")
+    assert proc.returncode != 0
+    assert "skipped (needs sudo" in proc.stderr and "ydotool" in proc.stderr
+    assert "restart whisper-ptt.service" not in log
+
+
+def test_a_later_install_clears_the_skipped_root_steps(sandbox):
+    (sandbox["repo"] / ".needs-root").write_text("apt-get install -y x\n")
+    proc, _ = run_installer(sandbox, "x11")
+    assert proc.returncode == 0, proc.stderr
+    assert not (sandbox["repo"] / ".needs-root").exists()
+
+
+def test_background_update_uses_sudo_that_needs_no_password(sandbox):
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "dpkg-query", "#!/bin/sh\nexit 1\n")
+    proc, log = _run_without_terminal(sandbox)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libportaudio2" in log
+
+
+def test_failed_optional_package_install_still_aborts(sandbox):
+    """Only the no-sudo case is tolerated — a real apt failure is not."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "dpkg-query", "#!/bin/sh\nexit 1\n")
+    _write_exec(shims / "sudo", SHIM.replace(  # `sudo apt-get install` fails
+        "exit 0", 'if [ "$1" = -n ]; then exit 0; fi\nexit 100'))
+    proc, log = _run_without_terminal(sandbox)
+    assert proc.returncode != 0
+    assert "restart whisper-ptt.service" not in log
+
+
 def test_macos_web_install_without_clt_does_not_execute_git_stub(sandbox):
     shims = sandbox["repo"].parent / "shims"
     for name in ("git", "xcode-select"):
