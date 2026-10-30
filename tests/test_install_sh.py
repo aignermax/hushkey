@@ -156,9 +156,10 @@ def test_background_update_with_runtime_dependencies_needs_no_sudo(sandbox):
         assert "setup_acceleration.py" in log
 
 
-def _run_without_terminal(sandbox):
+def _run_without_terminal(sandbox, session_type="x11", **env_overrides):
     """Like a tray update: no controlling terminal for sudo to prompt on."""
-    env = dict(sandbox["env"], XDG_SESSION_TYPE="x11", FAKE_UNAME="Linux")
+    env = dict(sandbox["env"], XDG_SESSION_TYPE=session_type, FAKE_UNAME="Linux",
+               **env_overrides)
     proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
                           env=env, capture_output=True, text=True, timeout=180,
                           stdin=subprocess.DEVNULL, start_new_session=True)
@@ -191,17 +192,32 @@ def test_background_update_on_wayland_skips_root_steps_without_sudo(sandbox):
     """The udev rule, uinput module and input group need root too: without
     usable sudo they are listed and skipped, not fatal."""
     _write_exec(sandbox["repo"].parent / "shims/sudo", PASSWORD_SUDO_SHIM)
-    env = dict(sandbox["env"], XDG_SESSION_TYPE="wayland", FAKE_UNAME="Linux",
-               FAKE_PACKAGED_YDOTOOL="1")
-    proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
-                          env=env, capture_output=True, text=True, timeout=180,
-                          stdin=subprocess.DEVNULL, start_new_session=True)
-    log = sandbox["log"].read_text()
+    proc, log = _run_without_terminal(sandbox, "wayland",
+                                      FAKE_PACKAGED_YDOTOOL="1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "sudo install" not in log and "sudo usermod" not in log
     assert "restart whisper-ptt.service" in log
     needs_root = (sandbox["repo"] / ".needs-root").read_text()
     assert "udev/99-whisper-ptt-uinput.rules" in needs_root
+
+
+def test_a_skipped_required_package_still_fails_the_install(sandbox):
+    """Only optional packages tolerate a skip: a missing ydotool on Wayland
+    must stop the run with the reason, not later with a confusing error."""
+    shims = sandbox["repo"].parent / "shims"
+    _write_exec(shims / "sudo", PASSWORD_SUDO_SHIM)
+    os.remove(shims / "ydotool")
+    # the host's own tools minus any real ydotool
+    host = sandbox["repo"].parent / "host-bin"
+    host.mkdir()
+    for d in ("/bin", "/usr/bin"):
+        for name in os.listdir(d):
+            if not name.startswith("ydotool") and not (host / name).exists():
+                (host / name).symlink_to(os.path.join(d, name))
+    proc, log = _run_without_terminal(sandbox, "wayland", PATH=f"{shims}:{host}")
+    assert proc.returncode != 0
+    assert "skipped (needs sudo" in proc.stderr and "ydotool" in proc.stderr
+    assert "restart whisper-ptt.service" not in log
 
 
 def test_a_later_install_clears_the_skipped_root_steps(sandbox):

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -490,7 +491,8 @@ def report_skipped_root_steps():
         return
     dictate.log("tray: update skipped steps that need sudo: " + "; ".join(steps))
     dictate.notify("hushkey update needs your password",
-                   f"Some steps were skipped. Run in a terminal: bash {DIR}/install.sh")
+                   "Some steps were skipped. Run in a terminal: bash "
+                   + shlex.quote(os.path.join(DIR, "install.sh")))
 
 
 def spawn_update_helper():

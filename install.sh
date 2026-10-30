@@ -60,17 +60,17 @@ fi
 # step that does run and fails still aborts the install.
 NEEDS_ROOT_FILE="$DIR/.needs-root"
 rm -f "$NEEDS_ROOT_FILE"
-ROOT_OK=""  # decided once: a failed `sudo -n` is logged as an auth failure
+ROOT_UNUSABLE=0  # only "no" is remembered: a failed `sudo -n` is logged as an
+                 # auth failure, while a cached sudo ticket may expire mid-run
 root_usable() {
-  if [ -z "$ROOT_OK" ]; then
-    ROOT_OK=no
-    if [ -z "$SUDO" ]; then
-      [ "$(id -u)" -eq 0 ] && ROOT_OK=yes  # no sudo at all: only root can
-    elif $SUDO -n true 2>/dev/null || ( exec </dev/tty ) 2>/dev/null; then
-      ROOT_OK=yes
-    fi
+  [ "$ROOT_UNUSABLE" = 1 ] && return 1
+  if [ -z "$SUDO" ]; then
+    [ "$(id -u)" -eq 0 ] && return 0  # no sudo installed: only root can
+  elif $SUDO -n true 2>/dev/null || ( exec </dev/tty ) 2>/dev/null; then
+    return 0
   fi
-  [ "$ROOT_OK" = yes ]
+  ROOT_UNUSABLE=1
+  return 1
 }
 
 as_root() {
@@ -78,31 +78,40 @@ as_root() {
     $SUDO "$@"
     return
   fi
-  echo "WARNING: skipped (needs sudo, and there is no terminal to ask for the password): $*" >&2
+  if [ -z "$SUDO" ]; then
+    echo "WARNING: skipped (needs root, and sudo is not installed): $*" >&2
+  else
+    echo "WARNING: skipped (needs sudo, and there is no terminal to ask for the password): $*" >&2
+  fi
   printf '%s\n' "$*" 2>/dev/null >> "$NEEDS_ROOT_FILE" || true
 }
 
+# Fails when the packages were skipped for want of root, with PKG_SKIPPED=1 so
+# optional packages can tolerate exactly that and nothing else.
+PKG_SKIPPED=0
 install_pkg() {
+  PKG_SKIPPED=0
   if [ "${HUSHKEY_PACKAGE_INSTALL:-0}" = 1 ]; then
     echo "ERROR: package dependency missing: $* (no nested package manager during dpkg)" >&2
     return 1
   fi
   echo "==> installing $*"
   if command -v apt-get >/dev/null; then
-    if root_usable; then
-      $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
-    else
-      as_root apt-get install -y "$@"
-    fi
+    as_root apt-get update -qq && as_root apt-get install -y "$@" || return
   elif command -v dnf >/dev/null; then
-    as_root dnf install -y "$@"
+    as_root dnf install -y "$@" || return
   elif command -v pacman >/dev/null; then
-    as_root pacman -S --noconfirm "$@"
+    as_root pacman -S --noconfirm "$@" || return
   elif command -v brew >/dev/null; then
     brew install "$@"
+    return
   else
     echo "ERROR: install $* manually (no apt/dnf/pacman/brew found)" >&2
     exit 1
+  fi
+  if ! root_usable; then
+    PKG_SKIPPED=1
+    return 1
   fi
 }
 
@@ -119,6 +128,10 @@ bootstrap_macos_python() {
     brew install python@3.12 python-tk@3.12
     PYTHON="$(brew --prefix python@3.12)/bin/python3.12"
   else
+    if ! root_usable; then
+      echo "ERROR: installing Python 3.12 needs sudo — run this installer in a terminal" >&2
+      exit 1
+    fi
     local pkg
     pkg="$(mktemp -d)/python.pkg"
     curl -fSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$pkg"
@@ -285,15 +298,15 @@ rm -f "$PIP_ERR"
 if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
   if command -v apt-get >/dev/null; then
     if ! debian_packages_installed libvulkan1 mesa-vulkan-drivers libportaudio2; then
-      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
+      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2 || [ "$PKG_SKIPPED" = 1 ]
     fi
   elif command -v dnf >/dev/null; then
     if ! rpm -q vulkan-loader mesa-vulkan-drivers portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-loader mesa-vulkan-drivers portaudio
+      install_pkg vulkan-loader mesa-vulkan-drivers portaudio || [ "$PKG_SKIPPED" = 1 ]
     fi
   elif command -v pacman >/dev/null; then
     if ! pacman -Q vulkan-icd-loader vulkan-radeon vulkan-intel portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
+      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio || [ "$PKG_SKIPPED" = 1 ]
     fi
   fi
 fi
@@ -402,7 +415,8 @@ if [ "$SESSION" = "wayland" ]; then
     as_root modprobe uinput
   fi
   if [ ! -f /etc/modules-load.d/uinput.conf ]; then
-    printf 'uinput\n' | as_root tee /etc/modules-load.d/uinput.conf >/dev/null
+    # a here-string, not a pipe: a skipped tee would leave printf to SIGPIPE
+    as_root tee /etc/modules-load.d/uinput.conf >/dev/null <<<'uinput'
   fi
 
   # Verify the rule actually applied. udevadm trigger does not always re-label
