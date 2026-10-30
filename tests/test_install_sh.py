@@ -180,8 +180,35 @@ def test_background_update_without_sudo_skips_optional_packages(sandbox):
     proc, log = _run_without_terminal(sandbox)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "apt-get" not in log
-    assert "cannot install libvulkan1 mesa-vulkan-drivers libportaudio2" in proc.stderr
+    assert "skipped (needs sudo" in proc.stderr
     assert log.index("setup_acceleration.py") < log.index("restart whisper-ptt.service")
+    # listed for the tray to report
+    needs_root = (sandbox["repo"] / ".needs-root").read_text()
+    assert "apt-get install -y libvulkan1 mesa-vulkan-drivers libportaudio2" in needs_root
+
+
+def test_background_update_on_wayland_skips_root_steps_without_sudo(sandbox):
+    """The udev rule, uinput module and input group need root too: without
+    usable sudo they are listed and skipped, not fatal."""
+    _write_exec(sandbox["repo"].parent / "shims/sudo", PASSWORD_SUDO_SHIM)
+    env = dict(sandbox["env"], XDG_SESSION_TYPE="wayland", FAKE_UNAME="Linux",
+               FAKE_PACKAGED_YDOTOOL="1")
+    proc = subprocess.run(["bash", str(sandbox["repo"] / "install.sh")],
+                          env=env, capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, start_new_session=True)
+    log = sandbox["log"].read_text()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "sudo install" not in log and "sudo usermod" not in log
+    assert "restart whisper-ptt.service" in log
+    needs_root = (sandbox["repo"] / ".needs-root").read_text()
+    assert "udev/99-whisper-ptt-uinput.rules" in needs_root
+
+
+def test_a_later_install_clears_the_skipped_root_steps(sandbox):
+    (sandbox["repo"] / ".needs-root").write_text("apt-get install -y x\n")
+    proc, _ = run_installer(sandbox, "x11")
+    assert proc.returncode == 0, proc.stderr
+    assert not (sandbox["repo"] / ".needs-root").exists()
 
 
 def test_background_update_uses_sudo_that_needs_no_password(sandbox):

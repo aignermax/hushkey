@@ -53,36 +53,51 @@ fi
 
 # A background update from the tray has no terminal, so a sudo password prompt
 # cannot be answered: sudo fails and, under set -e, the rest of the installer
-# (acceleration, service, launcher) would be skipped on every update. Only call
-# sudo when it works without a prompt or a terminal can ask for the password.
-sudo_usable() {
-  [ -z "$SUDO" ] && return 0
-  $SUDO -n true 2>/dev/null && return 0
-  ( exec </dev/tty ) 2>/dev/null
+# (acceleration, service, launcher) would be skipped on every update. So every
+# privileged step goes through as_root: it runs when sudo works without a
+# prompt or a terminal can ask for the password, and is otherwise skipped with
+# a warning — listed in $NEEDS_ROOT_FILE, which the tray reports. A privileged
+# step that does run and fails still aborts the install.
+NEEDS_ROOT_FILE="$DIR/.needs-root"
+rm -f "$NEEDS_ROOT_FILE"
+ROOT_OK=""  # decided once: a failed `sudo -n` is logged as an auth failure
+root_usable() {
+  if [ -z "$ROOT_OK" ]; then
+    ROOT_OK=no
+    if [ -z "$SUDO" ]; then
+      [ "$(id -u)" -eq 0 ] && ROOT_OK=yes  # no sudo at all: only root can
+    elif $SUDO -n true 2>/dev/null || ( exec </dev/tty ) 2>/dev/null; then
+      ROOT_OK=yes
+    fi
+  fi
+  [ "$ROOT_OK" = yes ]
 }
 
-# install_pkg exits with this when sudo could not be used at all (see
-# sudo_usable) — optional packages tolerate exactly that, not a failed install.
-NO_SUDO=3
+as_root() {
+  if root_usable; then
+    $SUDO "$@"
+    return
+  fi
+  echo "WARNING: skipped (needs sudo, and there is no terminal to ask for the password): $*" >&2
+  printf '%s\n' "$*" 2>/dev/null >> "$NEEDS_ROOT_FILE" || true
+}
 
 install_pkg() {
   if [ "${HUSHKEY_PACKAGE_INSTALL:-0}" = 1 ]; then
     echo "ERROR: package dependency missing: $* (no nested package manager during dpkg)" >&2
     return 1
   fi
-  echo "==> installing $* (may ask for your password)"
-  if { command -v apt-get || command -v dnf || command -v pacman; } >/dev/null \
-      && ! sudo_usable; then  # brew alone needs no sudo
-    echo "WARNING: cannot install $*: sudo needs a password and there is no terminal to ask for it." >&2
-    echo "         Install it yourself, then re-run: bash \"$DIR/install.sh\"" >&2
-    return "$NO_SUDO"
-  fi
+  echo "==> installing $*"
   if command -v apt-get >/dev/null; then
-    $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
+    if root_usable; then
+      $SUDO apt-get update -qq && $SUDO apt-get install -y "$@"
+    else
+      as_root apt-get install -y "$@"
+    fi
   elif command -v dnf >/dev/null; then
-    $SUDO dnf install -y "$@"
+    as_root dnf install -y "$@"
   elif command -v pacman >/dev/null; then
-    $SUDO pacman -S --noconfirm "$@"
+    as_root pacman -S --noconfirm "$@"
   elif command -v brew >/dev/null; then
     brew install "$@"
   else
@@ -108,7 +123,7 @@ bootstrap_macos_python() {
     pkg="$(mktemp -d)/python.pkg"
     curl -fSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$pkg"
     echo "8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4  $pkg" | shasum -a 256 -c -
-    $SUDO installer -pkg "$pkg" -target /
+    as_root installer -pkg "$pkg" -target /
     rm -f "$pkg"
     rmdir "$(dirname "$pkg")"
     PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
@@ -270,15 +285,15 @@ rm -f "$PIP_ERR"
 if [ "$OS" = Linux ] && [ "${HUSHKEY_PACKAGE_INSTALL:-0}" != 1 ]; then
   if command -v apt-get >/dev/null; then
     if ! debian_packages_installed libvulkan1 mesa-vulkan-drivers libportaudio2; then
-      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2 || [ $? = "$NO_SUDO" ]
+      install_pkg libvulkan1 mesa-vulkan-drivers libportaudio2
     fi
   elif command -v dnf >/dev/null; then
     if ! rpm -q vulkan-loader mesa-vulkan-drivers portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-loader mesa-vulkan-drivers portaudio || [ $? = "$NO_SUDO" ]
+      install_pkg vulkan-loader mesa-vulkan-drivers portaudio
     fi
   elif command -v pacman >/dev/null; then
     if ! pacman -Q vulkan-icd-loader vulkan-radeon vulkan-intel portaudio >/dev/null 2>&1; then
-      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio || [ $? = "$NO_SUDO" ]
+      install_pkg vulkan-icd-loader vulkan-radeon vulkan-intel portaudio
     fi
   fi
 fi
@@ -376,18 +391,18 @@ if [ "$SESSION" = "wayland" ]; then
   rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
   if ! cmp -s "$DIR/udev/99-whisper-ptt-uinput.rules" "$rule"; then
     echo "    installing udev rule $rule"
-    $SUDO install -m 0644 "$DIR/udev/99-whisper-ptt-uinput.rules" "$rule"
-    $SUDO udevadm control --reload-rules
-    $SUDO udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
+    as_root install -m 0644 "$DIR/udev/99-whisper-ptt-uinput.rules" "$rule"
+    as_root udevadm control --reload-rules
+    as_root udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
   fi
 
   # uinput is a module; load it now and on every boot.
   if [ ! -e /dev/uinput ]; then
     echo "    loading uinput module"
-    $SUDO modprobe uinput
+    as_root modprobe uinput
   fi
   if [ ! -f /etc/modules-load.d/uinput.conf ]; then
-    printf 'uinput\n' | $SUDO tee /etc/modules-load.d/uinput.conf >/dev/null
+    printf 'uinput\n' | as_root tee /etc/modules-load.d/uinput.conf >/dev/null
   fi
 
   # Verify the rule actually applied. udevadm trigger does not always re-label
@@ -409,8 +424,8 @@ if [ "$SESSION" = "wayland" ]; then
   me="$(id -un)"
   if ! id -nG "$me" | tr ' ' '\n' | grep -qx input; then
     echo "    adding $me to the 'input' group"
-    $SUDO usermod -aG input "$me"
-    NEEDS_LOGOUT=1
+    as_root usermod -aG input "$me"
+    root_usable && NEEDS_LOGOUT=1
   fi
 
   # Prefer the distribution's own ydotool.service when it ships one.
