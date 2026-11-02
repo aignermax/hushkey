@@ -53,6 +53,14 @@ pub fn init() {
 
 pub fn fatal(message: &str) -> ExitCode {
     log::line(&format!("fatal: {message}"));
+    eprintln!("hushkey: {message}");
+    // --install, --uninstall and an unknown argument reach this without
+    // platform::init(), and MessageDialog::new asserts GTK is initialized.
+    // Without a desktop session (a terminal install over SSH) there is
+    // nothing to show a dialog on either; the message above has to do.
+    if gtk::init().is_err() {
+        return ExitCode::FAILURE;
+    }
     let dialog = gtk::MessageDialog::new(
         None::<&gtk::Window>,
         gtk::DialogFlags::MODAL,
