@@ -150,12 +150,22 @@ pub const LANGUAGES: &[(Option<&str>, &str)] = &[
 ];
 
 /// (config name, label) for the key menu: keys that do nothing when held.
+/// Every key `config::KEYS` accepts, so the menu can always show which one
+/// is set. A key missing here would leave the submenu unchecked and the
+/// next click on it would discard the setting — which is what happened to
+/// `right_alt`, the key a handover from the Python app brings over from
+/// its `alt_r`/`alt_gr`.
 pub const KEY_LABELS: &[(&str, &str)] = &[
     ("caps_lock", "Caps Lock"),
     ("right_ctrl", "Right Ctrl"),
+    ("right_alt", "Right Alt"),
+    ("scroll_lock", "Scroll Lock"),
+    ("insert", "Insert"),
     ("f8", "F8"),
     ("f9", "F9"),
-    ("scroll_lock", "Scroll Lock"),
+    ("f10", "F10"),
+    ("f11", "F11"),
+    ("f12", "F12"),
 ];
 
 #[cfg(windows)]
@@ -211,6 +221,18 @@ mod tests {
     fn every_key_in_the_menu_is_a_known_key() {
         for (name, _) in KEY_LABELS {
             assert!(crate::config::virtual_key(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_key_the_settings_accept_has_a_menu_entry() {
+        // Without one, Tray::sync cannot check the configured key: the
+        // submenu shows nothing as active and the next click drops it.
+        for (name, _) in crate::config::KEYS {
+            assert!(
+                KEY_LABELS.iter().any(|(labelled, _)| labelled == name),
+                "{name} is configurable but has no label"
+            );
         }
     }
 
