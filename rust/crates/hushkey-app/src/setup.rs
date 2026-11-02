@@ -86,7 +86,10 @@ pub fn install(from_python: bool) -> Result<(), String> {
         if !autostart::enabled() {
             autostart::set(true)?;
         }
-        log::line(&format!("installed by the package manager: {}", exe.display()));
+        log::line(&format!(
+            "installed by the package manager: {}",
+            exe.display()
+        ));
         return setup::launch(&exe, &[]);
     }
     // A fresh install starts at login; a reinstall keeps the user's choice.

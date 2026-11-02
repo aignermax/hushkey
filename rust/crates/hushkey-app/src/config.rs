@@ -165,10 +165,7 @@ impl Config {
         }
         if let Some(brain) = &config.brain {
             if brain.kind != "openai" {
-                return Err(format!(
-                    "brain kind {:?}: use \"openai\"",
-                    brain.kind
-                ));
+                return Err(format!("brain kind {:?}: use \"openai\"", brain.kind));
             }
         }
         Ok(config)

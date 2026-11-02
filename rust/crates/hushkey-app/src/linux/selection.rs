@@ -229,9 +229,7 @@ impl Offer {
     /// transcript itself (a clipboard manager re-owning every new
     /// selection) — only a real copy made meanwhile is kept.
     pub fn owned(&self) -> bool {
-        if self.shared.serving.load(Ordering::SeqCst)
-            && clipboard_owner() == Some(self.window)
-        {
+        if self.shared.serving.load(Ordering::SeqCst) && clipboard_owner() == Some(self.window) {
             return true;
         }
         match read_clipboard() {
@@ -338,7 +336,12 @@ fn clipboard_owner() -> Option<Window> {
         .ok()?
         .atom;
     // Bound, so the connection outlives the request it is borrowed by.
-    let owner = conn.get_selection_owner(clipboard).ok()?.reply().ok()?.owner;
+    let owner = conn
+        .get_selection_owner(clipboard)
+        .ok()?
+        .reply()
+        .ok()?
+        .owner;
     match owner {
         0 => None,
         owner => Some(owner),
@@ -397,7 +400,14 @@ fn read_clipboard() -> Result<Option<Vec<u8>>, String> {
                     return Ok(None); // the owner does not offer UTF8_STRING
                 }
                 let reply = conn
-                    .get_property(true, window, notify.property, AtomEnum::ANY, 0, u32::MAX / 4)
+                    .get_property(
+                        true,
+                        window,
+                        notify.property,
+                        AtomEnum::ANY,
+                        0,
+                        u32::MAX / 4,
+                    )
                     .map_err(|e| format!("X11 property: {e}"))?
                     .reply()
                     .map_err(|e| format!("X11 property: {e}"))?;
