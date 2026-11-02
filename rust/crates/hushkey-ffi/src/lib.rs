@@ -167,8 +167,13 @@ pub struct HkBrainAnswer {
 /// Answers an utterance. Called on hushkey's brain thread, one call at a
 /// time, never from the thread that started the session — the host must
 /// not assume its own main thread here.
-pub type HkBrainReplyCallback =
-    Option<unsafe extern "C" fn(utterance: *const c_char, answer: *mut HkBrainAnswer, user_data: *mut c_void)>;
+pub type HkBrainReplyCallback = Option<
+    unsafe extern "C" fn(
+        utterance: *const c_char,
+        answer: *mut HkBrainAnswer,
+        user_data: *mut c_void,
+    ),
+>;
 
 /// The host's brain, as hushkey's `Brain`.
 struct CallbackBrain {
@@ -697,6 +702,12 @@ pub unsafe extern "C" fn hk_listen_config_init(cfg: *mut HkListenConfig) {
         return;
     }
     let d = ListenConfig::default();
+    // Defaults mean every field: a host that does not zero its struct and
+    // then only sets `brain` would otherwise hand over whatever happened to
+    // be in brain_reply, and a non-null garbage pointer passes the null
+    // check in brain().
+    write_field!(cfg, HkListenConfig, brain_reply, None);
+    write_field!(cfg, HkListenConfig, brain_user_data, ptr::null_mut());
     let to_ms = |frames: usize| (frames * VAD_FRAME * 1000 / 16_000) as u32;
     write_field!(
         cfg,
@@ -875,7 +886,12 @@ unsafe fn brain(cfg: *const HkListenConfig) -> Result<Option<Box<dyn Brain>>, St
         }
         return Ok(Some(Box::new(CallbackBrain {
             reply,
-            user_data: UserData(read_field!(cfg, HkListenConfig, brain_user_data, ptr::null_mut())),
+            user_data: UserData(read_field!(
+                cfg,
+                HkListenConfig,
+                brain_user_data,
+                ptr::null_mut()
+            )),
         })));
     }
     let text = |p: *const c_char, what: &str| opt_str(p, what);
@@ -1052,5 +1068,93 @@ mod tests {
                 true
             ));
         }
+    }
+
+    /// A host brain: `reply` fills in whatever `answer_with` says, and
+    /// records the utterance it was given.
+    struct Host {
+        seen: Vec<CString>,
+        text: Option<CString>,
+        details: Option<CString>,
+        error: Option<CString>,
+    }
+
+    unsafe extern "C" fn host_reply(
+        utterance: *const c_char,
+        answer: *mut HkBrainAnswer,
+        user_data: *mut c_void,
+    ) {
+        let host = unsafe { &mut *(user_data as *mut Host) };
+        host.seen
+            .push(unsafe { CStr::from_ptr(utterance) }.to_owned());
+        let answer = unsafe { &mut *answer };
+        assert_eq!(answer.size, size_of::<HkBrainAnswer>(), "hushkey sets size");
+        answer.text = host.text.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        answer.details = host.details.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+        answer.error = host.error.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+    }
+
+    fn host_brain(host: &mut Host) -> CallbackBrain {
+        CallbackBrain {
+            reply: Some(host_reply),
+            user_data: UserData(host as *mut Host as *mut c_void),
+        }
+    }
+
+    #[test]
+    fn a_host_brain_answers_and_is_given_the_utterance() {
+        let mut host = Host {
+            seen: Vec::new(),
+            text: Some(CString::new("der Kanal ist frei").unwrap()),
+            details: Some(CString::new(r#"{"action":"none"}"#).unwrap()),
+            error: None,
+        };
+        let reply = {
+            let mut brain = host_brain(&mut host);
+            brain.reply("Wie steht der Kanal?").unwrap()
+        };
+        assert_eq!(reply.text, "der Kanal ist frei");
+        assert_eq!(reply.details.as_deref(), Some(r#"{"action":"none"}"#));
+        assert_eq!(host.seen.len(), 1);
+        assert_eq!(host.seen[0].to_str().unwrap(), "Wie steht der Kanal?");
+    }
+
+    #[test]
+    fn a_host_brain_reports_its_own_error() {
+        let mut host = Host {
+            seen: Vec::new(),
+            text: None,
+            details: None,
+            error: Some(CString::new("the lab assistant is offline").unwrap()),
+        };
+        let err = {
+            let mut brain = host_brain(&mut host);
+            brain.reply("x").unwrap_err()
+        };
+        assert_eq!(err, "the lab assistant is offline");
+    }
+
+    #[test]
+    fn a_host_brain_that_fills_in_nothing_is_an_error_not_an_empty_answer() {
+        let mut host = Host {
+            seen: Vec::new(),
+            text: None,
+            details: None,
+            error: None,
+        };
+        let err = {
+            let mut brain = host_brain(&mut host);
+            brain.reply("x").unwrap_err()
+        };
+        assert!(err.contains("no answer"), "{err}");
+    }
+
+    #[test]
+    fn a_brain_without_a_callback_does_not_call_through_a_null_pointer() {
+        let mut brain = CallbackBrain {
+            reply: None,
+            user_data: UserData(ptr::null_mut()),
+        };
+        assert!(brain.reply("x").unwrap_err().contains("brain_reply"));
     }
 }
