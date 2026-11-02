@@ -104,7 +104,9 @@ case "$ASSET" in
 esac
 
 echo "==> installing"
-"$EXE" --install --from-python
+# Its exit code is the result: 3 means this session cannot run it yet
+# (tray.py keeps the Python dictation then).
+"$EXE" --install --from-python || exit $?
 
 # The Python hushkey was also shipped as a .deb. Installing over it this way
 # leaves dpkg's records, /opt/hushkey (34 MB) and a menu entry that now

@@ -204,22 +204,69 @@ pub fn chord(keys: &[KeyCode], keysyms: &str) -> Result<(), String> {
     })
 }
 
-/// Press `keys` in order and release them in reverse through XTEST. X
-/// keycodes are evdev codes + 8, so these are keys by position, like the
-/// uinput keyboard's.
+/// The keysym a chord key stands for, where the layout decides which key
+/// that is: `v` is not at V's position on Dvorak.
+fn chord_keysym(key: KeyCode) -> Option<u32> {
+    Some(match key {
+        KeyCode::KEY_LEFTCTRL => 0xffe3,  // Control_L
+        KeyCode::KEY_LEFTSHIFT => 0xffe1, // Shift_L
+        KeyCode::KEY_CAPSLOCK => 0xffe5,  // Caps_Lock
+        KeyCode::KEY_V => 0x0076,         // v
+        _ => return None,
+    })
+}
+
+/// The X keycode for `key` on the current layout: the key whose first
+/// level (or shifted level) carries its keysym. Where none does — a
+/// Cyrillic layout has no `v` — the key at the same position (evdev code
+/// + 8), which is what apps match Ctrl+V against on such layouts anyway.
+fn x_keycode(key: KeyCode, min: u8, per_keycode: usize, keysyms: &[u32]) -> u8 {
+    let by_position = u8::try_from(key.code() + 8).unwrap_or(0);
+    let Some(wanted) = chord_keysym(key) else {
+        return by_position;
+    };
+    if per_keycode == 0 {
+        return by_position;
+    }
+    keysyms
+        .chunks(per_keycode)
+        .position(|syms| syms.iter().take(2).any(|s| *s == wanted))
+        .and_then(|i| u8::try_from(usize::from(min) + i).ok())
+        .unwrap_or(by_position)
+}
+
+/// Press `keys` in order and release them in reverse through XTEST, each
+/// as the key the layout puts its character on (see [`x_keycode`]).
 fn xtest_chord(keys: &[KeyCode]) -> Result<(), String> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
     use x11rb::protocol::xtest::ConnectionExt as _;
     let x = |e: &dyn std::fmt::Display| format!("XTEST: {e}");
     let (conn, screen) = x11rb::connect(None).map_err(|e| x(&e))?;
-    let root = conn.setup().roots[screen].root;
+    let setup = conn.setup();
+    let root = setup.roots[screen].root;
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
     conn.xtest_get_version(2, 2)
         .map_err(|e| x(&e))?
         .reply()
         .map_err(|e| x(&e))?;
-    let send = |kind: u8, key: &KeyCode| -> Result<(), String> {
-        let code = u8::try_from(key.code() + 8).map_err(|_| x(&"key out of range"))?;
+    let mapping = conn
+        .get_keyboard_mapping(min, max - min + 1)
+        .map_err(|e| x(&e))?
+        .reply()
+        .map_err(|e| x(&e))?;
+    let codes: Vec<u8> = keys
+        .iter()
+        .map(|k| {
+            x_keycode(
+                *k,
+                min,
+                usize::from(mapping.keysyms_per_keycode),
+                &mapping.keysyms,
+            )
+        })
+        .collect();
+    let send = |kind: u8, code: u8| -> Result<(), String> {
         conn.xtest_fake_input(kind, code, x11rb::CURRENT_TIME, root, 0, 0, 0)
             .map_err(|e| x(&e))?;
         conn.flush().map_err(|e| x(&e))?;
@@ -228,11 +275,11 @@ fn xtest_chord(keys: &[KeyCode]) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(12));
         Ok(())
     };
-    for key in keys {
-        send(KEY_PRESS_EVENT, key)?;
+    for code in &codes {
+        send(KEY_PRESS_EVENT, *code)?;
     }
-    for key in keys.iter().rev() {
-        send(KEY_RELEASE_EVENT, key)?;
+    for code in codes.iter().rev() {
+        send(KEY_RELEASE_EVENT, *code)?;
     }
     // A round trip: the server has taken every key before this returns.
     conn.get_input_focus()
@@ -340,6 +387,19 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_keys_follow_the_layout() {
+        // Keycodes 8.. with two keysyms each: 8 is `k`, 9 is `v` (as on
+        // Dvorak, where `v` is not at V's position, evdev 47 + 8 = 55).
+        let keysyms = [0x6b, 0x4b, 0x76, 0x56, 0xffe3, 0];
+        assert_eq!(x_keycode(KeyCode::KEY_V, 8, 2, &keysyms), 9);
+        assert_eq!(x_keycode(KeyCode::KEY_LEFTCTRL, 8, 2, &keysyms), 10);
+        // Not on this layout at all: by position.
+        assert_eq!(x_keycode(KeyCode::KEY_LEFTSHIFT, 8, 2, &keysyms), 42 + 8);
+        // Keys that are not chord keys: by position.
+        assert_eq!(x_keycode(KeyCode::KEY_F9, 8, 2, &keysyms), 67 + 8);
+    }
 
     #[test]
     fn terminal_names_are_lowercase() {

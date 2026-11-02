@@ -60,6 +60,9 @@ impl Start {
     }
 }
 
+/// How an install that this session cannot run yet begins its error.
+pub const NOT_READY: &str = "hushkey cannot run in this session yet";
+
 /// Install this program, start it with every login, and start it now.
 pub fn install(from_python: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -76,7 +79,7 @@ pub fn install(from_python: bool) -> Result<(), String> {
         // would be left with no dictation at all.
         setup::ready().map_err(|e| {
             log::line(&format!("install: the Python hushkey stays for now: {e}"));
-            e
+            format!("{NOT_READY}: {e}")
         })?;
         import_python(&setup::python_state_dir());
     }

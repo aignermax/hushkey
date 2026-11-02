@@ -71,7 +71,7 @@ class FakeDaemon:
 
 
 def test_a_failed_handover_keeps_dictation_and_tries_again(home, monkeypatch):
-    results = iter([3, 1, 0])
+    results = iter([1, 2, 0])
     ran, pauses, notes, daemons = [], [], [], []
 
     def fake_run(cmd, **kwargs):
@@ -94,7 +94,45 @@ def test_a_failed_handover_keeps_dictation_and_tries_again(home, monkeypatch):
     assert len(notes) == 1
     assert len(daemons) == 1 and daemons[0].terminated
     log = (Path(tray.state_dir()) / "update.log").read_text()
-    assert "rc=3" in log and "rc=0" in log
+    assert "rc=1" in log and "rc=0" in log
+
+
+def test_a_session_that_cannot_run_it_waits_a_day(home, monkeypatch):
+    results = iter([tray.NOT_READY, 0])
+    pauses = []
+    monkeypatch.setattr(tray.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, next(results)))
+    monkeypatch.setattr(tray.time, "sleep", pauses.append)
+    monkeypatch.setattr(tray, "python_dictation", FakeDaemon)
+    monkeypatch.setattr(tray, "notify", lambda *a: None)
+    assert tray.main() == 0
+    assert pauses == [tray.NOT_READY_PAUSE]
+
+
+def test_a_second_tray_waits_for_the_first(home, tmp_path):
+    # The lock is held by another process; ours must not get it.
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time; sys.path.insert(0, sys.argv[1]); import tray; "
+         "l = tray.single_instance(); print('held', flush=True); time.sleep(30)",
+         tray.DIR],
+        stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        waiter = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); import tray; "
+             "tray.single_instance(); print('got it', flush=True)",
+             tray.DIR],
+            stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+        with pytest.raises(subprocess.TimeoutExpired):
+            waiter.wait(timeout=2)
+        holder.kill()
+        holder.wait()
+        out, _ = waiter.communicate(timeout=15)
+        assert out.strip() == "got it"
+    finally:
+        holder.kill()
 
 
 def test_the_python_dictation_is_only_started_where_it_is_left(home, monkeypatch):

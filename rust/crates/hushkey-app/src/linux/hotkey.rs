@@ -149,6 +149,19 @@ struct Watcher {
 }
 
 impl Watcher {
+    fn new(key: KeyCode, on_key: Box<dyn Fn(KeyEvent) + Send>) -> Watcher {
+        Watcher {
+            key,
+            press: Press {
+                key,
+                on_key,
+                pressed: None,
+            },
+            devices: HashMap::new(),
+            skipped: Vec::new(),
+        }
+    }
+
     /// Open keyboards not open yet; drop what is gone. Counts nodes that
     /// could not be read.
     fn scan(&mut self) -> std::io::Result<usize> {
@@ -256,6 +269,53 @@ pub struct Hotkey {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Where the key comes from in this session.
+enum Source {
+    /// Keyboards in /dev/input (possibly none yet: the rescans find them).
+    Evdev,
+    /// The X server, as no keyboard in /dev/input can be read.
+    X11(Box<xkey::XKeys>),
+}
+
+/// What to do when neither /dev/input nor an X server can tell the key.
+const NO_ACCESS: &str = "hushkey may not read the keyboard (/dev/input/event*): add \
+     yourself to the 'input' group (sudo usermod -aG input $USER) and log in again";
+
+/// Decide where the key comes from, after `watcher` looked at /dev/input.
+/// The one decision both the app and the Python handover go by
+/// ([`readable`]): the handover must not switch the Python app off for a
+/// program that then cannot see the key.
+fn source(watcher: &mut Watcher) -> Result<Source, String> {
+    let listed = watcher.scan();
+    if !watcher.devices.is_empty() {
+        return Ok(Source::Evdev);
+    }
+    // No keyboard there to read: on X11 the server can tell the key — with
+    // /dev/input denied, missing (a container) or empty alike.
+    let x11 = if xkey::available() {
+        // X keycodes are evdev codes + 8 on every evdev-based server.
+        match xkey::XKeys::open(u32::from(watcher.key.code()) + 8, IGNORED) {
+            Ok(keys) => return Ok(Source::X11(Box::new(keys))),
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+    let why = match listed {
+        Err(e) => {
+            format!("/dev/input: {e}; hushkey reads the key from the keyboard devices there")
+        }
+        Ok(denied) if denied > 0 => NO_ACCESS.to_string(),
+        // Nothing denied, nothing there yet (a Bluetooth keyboard asleep):
+        // the rescans find it.
+        Ok(_) => return Ok(Source::Evdev),
+    };
+    Err(match x11 {
+        Some(e) => format!("{why} ({e})"),
+        None => why,
+    })
+}
+
 impl Hotkey {
     /// Watch for `key` on every keyboard; `on_key` runs on the watcher
     /// thread.
@@ -263,40 +323,38 @@ impl Hotkey {
         key: KeyCode,
         on_key: impl Fn(KeyEvent) + Send + 'static,
     ) -> Result<Hotkey, String> {
-        let mut watcher = Watcher {
-            key,
-            press: Press {
-                key,
-                on_key: Box::new(on_key),
-                pressed: None,
-            },
-            devices: HashMap::new(),
-            skipped: Vec::new(),
-        };
-        let denied = watcher.scan().map_err(|e| {
-            format!("/dev/input: {e}; hushkey reads the key from the keyboard devices there")
-        })?;
-        if watcher.devices.is_empty() {
-            if denied > 0 {
-                if xkey::available() {
-                    return Self::from_x11(watcher.press);
+        let mut watcher = Watcher::new(key, Box::new(on_key));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = match source(&mut watcher)? {
+            Source::Evdev => {
+                if watcher.devices.is_empty() {
+                    log::line("key: no keyboard found yet; looking again every 2 s");
                 }
-                return Err(NO_ACCESS.into());
+                // The caps restore and paste chords come from this
+                // keyboard; the desktop needs a moment to take a new one
+                // in, so make it now.
+                uinput::prepare();
+                std::thread::Builder::new()
+                    .name("hushkey-hotkey".into())
+                    .spawn({
+                        let stop = stop.clone();
+                        move || watcher.run(stop)
+                    })
             }
-            // A Bluetooth keyboard asleep, say: the rescans find it later.
-            log::line("key: no keyboard found yet; looking again every 2 s");
+            Source::X11(keys) => {
+                log::line(
+                    "key: no keyboard in /dev/input can be read; the X server reports the key",
+                );
+                let mut press = watcher.press;
+                std::thread::Builder::new()
+                    .name("hushkey-hotkey".into())
+                    .spawn({
+                        let stop = stop.clone();
+                        move || keys.run(stop, |down| if down { press.down() } else { press.up() })
+                    })
+            }
         }
-        // The caps restore and paste chords come from this keyboard; the
-        // desktop needs a moment to take a new one in, so make it now.
-        uinput::prepare();
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = std::thread::Builder::new()
-            .name("hushkey-hotkey".into())
-            .spawn({
-                let stop = stop.clone();
-                move || watcher.run(stop)
-            })
-            .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
         Ok(Hotkey {
             stop,
             thread: Some(thread),
@@ -304,49 +362,11 @@ impl Hotkey {
     }
 }
 
-/// What to do when neither /dev/input nor an X server can tell the key.
-const NO_ACCESS: &str = "hushkey may not read the keyboard (/dev/input/event*): add \
-     yourself to the 'input' group (sudo usermod -aG input $USER) and log in again";
-
-impl Hotkey {
-    /// The key from the X server, for an X11 session without /dev/input.
-    fn from_x11(mut press: Press) -> Result<Hotkey, String> {
-        // X keycodes are evdev codes + 8 on every evdev-based server.
-        let keys = xkey::XKeys::open(u32::from(press.key.code()) + 8)
-            .map_err(|e| format!("{NO_ACCESS} ({e})"))?;
-        log::line("key: /dev/input is not readable; the X server reports the key");
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = std::thread::Builder::new()
-            .name("hushkey-hotkey".into())
-            .spawn({
-                let stop = stop.clone();
-                move || keys.run(stop, |down| if down { press.down() } else { press.up() })
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(Hotkey {
-            stop,
-            thread: Some(thread),
-        })
-    }
-}
-
-/// Whether the push-to-talk key can be read in this session: a keyboard
-/// in /dev/input is readable, or the X server reports keys.
-pub fn readable() -> Result<(), String> {
-    let readable = nodes()
-        .unwrap_or_default()
-        .iter()
-        .any(|p| std::fs::File::open(p).is_ok());
-    if readable {
-        return Ok(());
-    }
-    if xkey::available() {
-        // Caps Lock: any key does, this only asks whether XInput 2 answers.
-        return xkey::XKeys::open(u32::from(KeyCode::KEY_CAPSLOCK.code()) + 8)
-            .map(drop)
-            .map_err(|e| format!("{NO_ACCESS} ({e})"));
-    }
-    Err(NO_ACCESS.into())
+/// Whether the push-to-talk key can be read in this session, decided as
+/// [`Hotkey::install`] decides it. `key` is any key: keyboards have them
+/// all, and the X server reports every one.
+pub fn readable(key: KeyCode) -> Result<(), String> {
+    source(&mut Watcher::new(key, Box::new(|_| {}))).map(drop)
 }
 
 impl Drop for Hotkey {

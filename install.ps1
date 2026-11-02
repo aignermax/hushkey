@@ -62,6 +62,12 @@ try {
     # code for a process that ended before it looked ($null, which is not 0).
     $null = $p.Handle
     $p.WaitForExit()
+    if ($p.ExitCode -eq 3) {
+        # This session cannot run it yet: the Python hushkey stays. tray.py
+        # tells this exit code from a failure.
+        Write-Host "hushkey cannot run here yet; see $env:LOCALAPPDATA\hushkey-rs\hushkey.log"
+        exit 3
+    }
     if ($p.ExitCode -ne 0) {
         throw "hushkey --install failed (exit $($p.ExitCode)); see $env:LOCALAPPDATA\hushkey-rs\hushkey.log"
     }

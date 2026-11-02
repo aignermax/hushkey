@@ -61,7 +61,8 @@ run it with `--install`.
 **Linux:** the key is read from `/dev/input` and text is inserted through a
 virtual keyboard (`/dev/uinput`); both need the `input` group. The installer
 sets this up once (it asks for your password; log out and in once
-afterwards).
+afterwards). On X11 hushkey also works without it: the X server then
+reports the key and takes the paste keystrokes. Wayland needs the group.
 
 **macOS:** grant hushkey **Microphone** and **Accessibility** access when asked
 (System Settings › Privacy & Security); the key and the inserting depend on
@@ -109,7 +110,8 @@ listening).
 
 ## Uninstall
 
-Windows: `powershell -ExecutionPolicy Bypass -File uninstall.ps1`, or run
+Windows: Settings › Apps › hushkey › Uninstall, or
+`powershell -ExecutionPolicy Bypass -File uninstall.ps1`, or run
 `hushkey.exe --uninstall`. Linux and macOS: `bash uninstall.sh`, or run
 `hushkey --uninstall`. Settings, history and log stay.
 

@@ -88,9 +88,13 @@ fn main() -> std::process::ExitCode {
                 return app::run(after_update);
             }
         }
-        Ok(setup::Start::Install { from_python }) => {
+        Ok(setup::Start::Install { from_python: true }) => {
             log::open();
-            setup::install(from_python)
+            return unattended(setup::install(true));
+        }
+        Ok(setup::Start::Install { from_python: false }) => {
+            log::open();
+            setup::install(false)
         }
         Ok(setup::Start::Version) => {
             println!("hushkey {}", env!("CARGO_PKG_VERSION"));
@@ -105,6 +109,27 @@ fn main() -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => platform::fatal(&e),
+    }
+}
+
+/// The end of `--install --from-python`, which the Python updater runs
+/// with no one watching: a dialog would only hold up the Python dictation
+/// that keeps working meanwhile (tray.py waits for this), and come back at
+/// every retry. The log and the exit code say what happened; 3 means this
+/// session cannot run the program yet, so the Python hushkey stays.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn unattended(result: Result<(), String>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            log::line(&format!("install failed: {e}"));
+            eprintln!("hushkey: {e}");
+            if e.starts_with(setup::NOT_READY) {
+                std::process::ExitCode::from(3)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
     }
 }
 

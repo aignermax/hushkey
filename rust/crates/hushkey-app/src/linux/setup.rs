@@ -214,7 +214,7 @@ pub fn launch(exe: &Path, args: &[&str]) -> Result<(), String> {
 /// Whether this program can work in this session, so that a Python
 /// hushkey may be switched off for it: it has to read the push-to-talk key.
 pub fn ready() -> Result<(), String> {
-    super::hotkey::readable()
+    super::hotkey::readable(evdev::KeyCode::KEY_A)
 }
 
 /// Whether a Python hushkey is still set up to start itself.

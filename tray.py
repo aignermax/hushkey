@@ -77,10 +77,43 @@ def outside_the_service(cmd):
 
 # Pauses between handover attempts (seconds); the last one repeats.
 RETRY_PAUSES = (120, 600, 1800, 3600)
+# The native program said this session cannot run it yet (exit code 3):
+# that does not change by the hour, and each attempt is a download.
+NOT_READY = 3
+NOT_READY_PAUSE = 24 * 3600
+
+
+def single_instance():
+    """Hold tray.lock (the old tray's lock file) for as long as we run.
+
+    More than one tray.py can be started — launchd's KeepAlive restart next
+    to the update helper's start, or the old Start Menu entry clicked — and
+    two would start two Python dictations, typing everything twice. A
+    second one waits here until the first is done, then finds the native
+    program installed and the handover a formality.
+    """
+    os.makedirs(state_dir(), exist_ok=True)
+    fh = open(os.path.join(state_dir(), "tray.lock"), "a+b")
+    if sys.platform == "win32":
+        import msvcrt
+        fh.seek(0)
+        fh.write(b"\0")  # a byte to lock, as the old tray did
+        fh.flush()
+        while True:
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                return fh
+            except OSError:
+                time.sleep(5)
+    import fcntl
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
 
 
 def handover(log_path):
-    """One attempt; True when the native program took over."""
+    """One attempt; the installer's exit code (0: the native program took
+    over), or None when it could not run at all."""
     cmd = outside_the_service(handover_command())
     kwargs = {"cwd": DIR, "stdin": subprocess.DEVNULL}
     if sys.platform == "win32":
@@ -97,9 +130,9 @@ def handover(log_path):
                                 timeout=900, **kwargs).returncode
         except (OSError, subprocess.SubprocessError) as exc:
             log.write(f"--- handover failed: {exc}\n".encode())
-            return False
+            return None
         log.write(f"--- handover finished rc={rc}\n".encode())
-    return rc == 0
+    return rc
 
 
 def python_dictation():
@@ -133,7 +166,7 @@ def notify(title, text):
 
 
 def main():
-    os.makedirs(state_dir(), exist_ok=True)
+    lock = single_instance()  # noqa: F841  held until we exit
     log_path = os.path.join(state_dir(), "update.log")
     # A pending marker of the Python updater is answered by this handover.
     try:
@@ -142,7 +175,10 @@ def main():
         pass
     fallback = None
     attempt = 0
-    while not handover(log_path):
+    while True:
+        rc = handover(log_path)
+        if rc == 0:
+            break
         if fallback is None or fallback.poll() is not None:
             fallback = python_dictation()
         if attempt == 0:
@@ -152,7 +188,10 @@ def main():
         # Staying alive, rather than exiting for a service manager to start
         # us again, keeps this pause: launchd's KeepAlive would otherwise
         # rerun the download every few seconds.
-        time.sleep(RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)])
+        if rc == NOT_READY:
+            time.sleep(NOT_READY_PAUSE)
+        else:
+            time.sleep(RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)])
         attempt += 1
     # The native program runs; it stopped the Python processes it found,
     # but the fallback is ours to end in any case.

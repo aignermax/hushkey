@@ -24,6 +24,15 @@ if ($Purge) {
     $null = cmd.exe /d /c "schtasks /Delete /F /TN whisper-ptt >nul 2>&1"
     $startup = Join-Path ([Environment]::GetFolderPath("Startup")) "whisper-ptt.lnk"
     Remove-Item $startup -Force -ErrorAction SilentlyContinue
+    # Its Start Menu entry — only while it still points into the old folder:
+    # after the handover the same name is the native hushkey's.
+    $menu = Join-Path ([Environment]::GetFolderPath("Programs")) "hushkey.lnk"
+    if (Test-Path $menu) {
+        $target = (New-Object -ComObject WScript.Shell).CreateShortcut($menu).TargetPath
+        if ($target -and $target.StartsWith($PSScriptRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item $menu -Force -ErrorAction SilentlyContinue
+        }
+    }
     Write-Host "old hushkey files removed; the native hushkey is not affected"
     exit 0
 }
