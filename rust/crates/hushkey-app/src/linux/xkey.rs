@@ -24,7 +24,8 @@ use crate::log;
 pub struct XKeys {
     conn: RustConnection,
     keycode: u32,
-    /// XTEST devices: keys hushkey (or xdotool) sent itself.
+    /// Devices whose keys hushkey (or another tool) sent itself: XTEST,
+    /// and the virtual keyboards named in `open`.
     synthetic: Vec<u16>,
 }
 
@@ -35,8 +36,10 @@ pub fn available() -> bool {
 
 impl XKeys {
     /// Ask the X server for raw key events of the X `keycode` (an evdev
-    /// code + 8 on every evdev-based server).
-    pub fn open(keycode: u32) -> Result<XKeys, String> {
+    /// code + 8 on every evdev-based server), ignoring XTEST and the
+    /// devices named `ignored` (hushkey's own uinput keyboard: with
+    /// /dev/uinput writable its Caps Lock restore comes back this way).
+    pub fn open(keycode: u32, ignored: &[&str]) -> Result<XKeys, String> {
         let x = |e: &dyn std::fmt::Display| format!("X11 keyboard: {e}");
         let (conn, screen) = x11rb::connect(None).map_err(|e| x(&e))?;
         let root = conn.setup().roots[screen].root;
@@ -64,7 +67,10 @@ impl XKeys {
         let synthetic = devices
             .infos
             .iter()
-            .filter(|d| String::from_utf8_lossy(&d.name).contains("XTEST"))
+            .filter(|d| {
+                let name = String::from_utf8_lossy(&d.name);
+                name.contains("XTEST") || ignored.contains(&name.as_ref())
+            })
             .map(|d| d.deviceid)
             .collect();
         Ok(XKeys {
