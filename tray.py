@@ -81,6 +81,9 @@ RETRY_PAUSES = (120, 600, 1800, 3600)
 # that does not change by the hour, and each attempt is a download.
 NOT_READY = 3
 NOT_READY_PAUSE = 24 * 3600
+# How often the Python dictation is looked after during a pause: it exits
+# by itself when its keyboard goes away, and nobody else restarts it.
+WATCH = 300
 
 
 def single_instance():
@@ -174,13 +177,25 @@ def main():
     except OSError:
         pass
     fallback = None
+
+    def keep_dictation():
+        nonlocal fallback
+        if fallback is None or fallback.poll() is not None:
+            fallback = python_dictation()
+
+    def pause(seconds):
+        while seconds > 0:
+            step = min(WATCH, seconds)
+            time.sleep(step)
+            seconds -= step
+            keep_dictation()
+
     attempt = 0
     while True:
         rc = handover(log_path)
         if rc == 0:
             break
-        if fallback is None or fallback.poll() is not None:
-            fallback = python_dictation()
+        keep_dictation()
         if attempt == 0:
             notify("hushkey update not finished yet",
                    "Dictation keeps working; the update is tried again "
@@ -189,9 +204,9 @@ def main():
         # us again, keeps this pause: launchd's KeepAlive would otherwise
         # rerun the download every few seconds.
         if rc == NOT_READY:
-            time.sleep(NOT_READY_PAUSE)
+            pause(NOT_READY_PAUSE)
         else:
-            time.sleep(RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)])
+            pause(RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)])
         attempt += 1
     # The native program runs; it stopped the Python processes it found,
     # but the fallback is ours to end in any case.

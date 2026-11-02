@@ -9,6 +9,7 @@
 //! That tap comes through XTEST; its device is ignored here, so hushkey
 //! never takes its own keys for the user's.
 
+use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -24,9 +25,12 @@ use crate::log;
 pub struct XKeys {
     conn: RustConnection,
     keycode: u32,
-    /// Devices whose keys hushkey (or another tool) sent itself: XTEST,
-    /// and the virtual keyboards named in `open`.
-    synthetic: Vec<u16>,
+    /// Names of devices whose keys are not the user's (besides XTEST).
+    ignored: Vec<String>,
+    /// Per source device: whether its keys are synthetic. Looked up at its
+    /// first key, not at the start: hushkey's own uinput keyboard only
+    /// appears once it is first used.
+    synthetic: HashMap<u16, bool>,
 }
 
 /// Whether the session can be asked for its keys this way.
@@ -59,43 +63,53 @@ impl XKeys {
             .map_err(|e| x(&e))?
             .check()
             .map_err(|e| x(&e))?;
-        let devices = conn
-            .xinput_xi_query_device(xinput::Device::ALL)
-            .map_err(|e| x(&e))?
-            .reply()
-            .map_err(|e| x(&e))?;
-        let synthetic = devices
-            .infos
-            .iter()
-            .filter(|d| {
-                let name = String::from_utf8_lossy(&d.name);
-                name.contains("XTEST") || ignored.contains(&name.as_ref())
-            })
-            .map(|d| d.deviceid)
-            .collect();
         Ok(XKeys {
             conn,
             keycode,
-            synthetic,
+            ignored: ignored.iter().map(|n| n.to_string()).collect(),
+            synthetic: HashMap::new(),
         })
+    }
+
+    /// Whether the keys of device `id` are synthetic: XTEST (hushkey's own
+    /// chords, xdotool) or a device named in `ignored`.
+    fn synthetic(&mut self, id: u16) -> bool {
+        if let Some(known) = self.synthetic.get(&id) {
+            return *known;
+        }
+        let name = self
+            .conn
+            .xinput_xi_query_device(id)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.infos.into_iter().next())
+            .map(|info| String::from_utf8_lossy(&info.name).into_owned());
+        let synthetic = name
+            .as_deref()
+            .is_some_and(|n| n.contains("XTEST") || self.ignored.iter().any(|i| i == n));
+        // An unanswered lookup is asked again next time.
+        if name.is_some() {
+            self.synthetic.insert(id, synthetic);
+        }
+        synthetic
     }
 
     /// Report the key until `stop` is set or the X connection ends.
     /// `on_change(true)` is a press, `on_change(false)` a release.
-    pub fn run(self, stop: Arc<AtomicBool>, mut on_change: impl FnMut(bool)) {
+    pub fn run(mut self, stop: Arc<AtomicBool>, mut on_change: impl FnMut(bool)) {
         let fd = self.conn.stream().as_raw_fd();
         while !stop.load(Ordering::SeqCst) {
             loop {
                 match self.conn.poll_for_event() {
-                    Ok(Some(Event::XinputRawKeyPress(e)))
-                        if e.detail == self.keycode && !self.synthetic.contains(&e.sourceid) =>
-                    {
-                        on_change(true)
+                    Ok(Some(Event::XinputRawKeyPress(e))) if e.detail == self.keycode => {
+                        if !self.synthetic(e.sourceid) {
+                            on_change(true)
+                        }
                     }
-                    Ok(Some(Event::XinputRawKeyRelease(e)))
-                        if e.detail == self.keycode && !self.synthetic.contains(&e.sourceid) =>
-                    {
-                        on_change(false)
+                    Ok(Some(Event::XinputRawKeyRelease(e))) if e.detail == self.keycode => {
+                        if !self.synthetic(e.sourceid) {
+                            on_change(false)
+                        }
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => break,

@@ -205,19 +205,21 @@ pub fn chord(keys: &[KeyCode], keysyms: &str) -> Result<(), String> {
 }
 
 /// The keysym a chord key stands for, where the layout decides which key
-/// that is: `v` is not at V's position on Dvorak.
+/// that is: `v` is not at V's position on Dvorak. Caps Lock is not among
+/// them: its restore has to press the very key the user held, wherever an
+/// option like caps:swapescape put the Caps_Lock keysym.
 fn chord_keysym(key: KeyCode) -> Option<u32> {
     Some(match key {
         KeyCode::KEY_LEFTCTRL => 0xffe3,  // Control_L
         KeyCode::KEY_LEFTSHIFT => 0xffe1, // Shift_L
-        KeyCode::KEY_CAPSLOCK => 0xffe5,  // Caps_Lock
         KeyCode::KEY_V => 0x0076,         // v
         _ => return None,
     })
 }
 
 /// The X keycode for `key` on the current layout: the key whose first
-/// level (or shifted level) carries its keysym. Where none does — a
+/// level carries its keysym (a shifted level would match the Caps_Lock
+/// that shift:both_capslock puts on Shift). Where none does — a
 /// Cyrillic layout has no `v` — the key at the same position (evdev code
 /// + 8), which is what apps match Ctrl+V against on such layouts anyway.
 fn x_keycode(key: KeyCode, min: u8, per_keycode: usize, keysyms: &[u32]) -> u8 {
@@ -230,7 +232,7 @@ fn x_keycode(key: KeyCode, min: u8, per_keycode: usize, keysyms: &[u32]) -> u8 {
     }
     keysyms
         .chunks(per_keycode)
-        .position(|syms| syms.iter().take(2).any(|s| *s == wanted))
+        .position(|syms| syms.first() == Some(&wanted))
         .and_then(|i| u8::try_from(usize::from(min) + i).ok())
         .unwrap_or(by_position)
 }
@@ -397,6 +399,12 @@ mod tests {
         assert_eq!(x_keycode(KeyCode::KEY_LEFTCTRL, 8, 2, &keysyms), 10);
         // Not on this layout at all: by position.
         assert_eq!(x_keycode(KeyCode::KEY_LEFTSHIFT, 8, 2, &keysyms), 42 + 8);
+        // Only a key's first level counts: `V` (shifted) is not `v`.
+        let shifted_only = [0x6b, 0x76, 0, 0];
+        assert_eq!(x_keycode(KeyCode::KEY_V, 8, 2, &shifted_only), 47 + 8);
+        // Caps Lock goes by position, whatever carries Caps_Lock.
+        let swapped = [0xffe5, 0, 0, 0];
+        assert_eq!(x_keycode(KeyCode::KEY_CAPSLOCK, 8, 2, &swapped), 58 + 8);
         // Keys that are not chord keys: by position.
         assert_eq!(x_keycode(KeyCode::KEY_F9, 8, 2, &keysyms), 67 + 8);
     }

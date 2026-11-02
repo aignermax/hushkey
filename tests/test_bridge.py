@@ -90,7 +90,8 @@ def test_a_failed_handover_keeps_dictation_and_tries_again(home, monkeypatch):
     assert len(ran) == 3
     # Paused in between (no service-manager restart loop), told the user
     # once, and kept one Python dictation running until the handover held.
-    assert pauses == list(tray.RETRY_PAUSES[:2])
+    assert sum(pauses) == sum(tray.RETRY_PAUSES[:2])
+    assert max(pauses) <= tray.WATCH
     assert len(notes) == 1
     assert len(daemons) == 1 and daemons[0].terminated
     log = (Path(tray.state_dir()) / "update.log").read_text()
@@ -106,7 +107,29 @@ def test_a_session_that_cannot_run_it_waits_a_day(home, monkeypatch):
     monkeypatch.setattr(tray, "python_dictation", FakeDaemon)
     monkeypatch.setattr(tray, "notify", lambda *a: None)
     assert tray.main() == 0
-    assert pauses == [tray.NOT_READY_PAUSE]
+    assert sum(pauses) == tray.NOT_READY_PAUSE
+
+
+def test_a_python_dictation_that_exits_comes_back_during_a_pause(home, monkeypatch):
+    results = iter([tray.NOT_READY, 0])
+    started = []
+
+    class Exits(FakeDaemon):
+        def poll(self):
+            return 0  # gone at once
+
+    def daemon():
+        started.append(Exits())
+        return started[-1]
+
+    monkeypatch.setattr(tray.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, next(results)))
+    monkeypatch.setattr(tray.time, "sleep", lambda s: None)
+    monkeypatch.setattr(tray, "python_dictation", daemon)
+    monkeypatch.setattr(tray, "notify", lambda *a: None)
+    tray.main()
+    # Once at the failure, then at every look during the day's pause.
+    assert len(started) == 1 + tray.NOT_READY_PAUSE // tray.WATCH
 
 
 def test_a_second_tray_waits_for_the_first(home, tmp_path):
