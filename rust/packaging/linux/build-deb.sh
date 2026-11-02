@@ -19,7 +19,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 # dpkg's name for this machine's architecture (amd64, arm64).
 ARCH="$(dpkg --print-architecture)"
-PKG="hushkey_${VER}_${ARCH}"
+
+# A semver pre-release ("0.11.0-rc.1") means the opposite to dpkg, which
+# reads everything after the last hyphen as a Debian revision — and a
+# revision sorts *after* the plain version. Someone who installed the
+# release candidate would then never be offered the release. A tilde sorts
+# before anything, which is what "rc" is supposed to mean:
+#   0.11.0~rc.1 < 0.11.0, and both > 0.10.10
+DEB_VER="${VER/-/\~}"
+if [ "$DEB_VER" != "$VER" ]; then
+  echo "==> version $VER is packaged as $DEB_VER (a pre-release sorts first)"
+fi
+PKG="hushkey_${DEB_VER}_${ARCH}"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -71,7 +82,7 @@ chmod 0644 "$DEST/usr/lib/udev/rules.d/99-hushkey-uinput.rules"
 # through, xdotool what types on X11.
 cat > "$DEST/DEBIAN/control" <<EOF
 Package: hushkey
-Version: $VER
+Version: $DEB_VER
 Section: utils
 Priority: optional
 Architecture: $ARCH
