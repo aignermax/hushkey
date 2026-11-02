@@ -239,9 +239,12 @@ pub fn old_package_installed() -> bool {
         return false;
     }
     let version = String::from_utf8_lossy(&out.stdout);
-    // Anything before 0.11 is the Python package; 0.11 and up is this one.
-    let first_native = crate::update::Version::parse("0.11.0").expect("a version");
-    crate::update::Version::parse(version.trim()).is_some_and(|v| v < first_native)
+    // Older than what is running means the Python package. Comparing against
+    // a fixed "0.11.0" would call this very program's own package old while
+    // it is a pre-release (semver puts 0.11.0-rc.1 below 0.11.0) — and the
+    // advice that follows is to remove the hushkey package.
+    let running = crate::update::Version::current();
+    crate::update::Version::parse(version.trim()).is_some_and(|v| v < running)
 }
 
 /// The Python hushkey's state folder (settings, history).
@@ -273,7 +276,11 @@ pub fn retire_python() -> Result<(), String> {
     // unit has to go, not just its enablement.
     let units = config.join("systemd/user");
     let mut removed_a_unit = false;
-    for unit in ["whisper-ptt.service", "whisper-ptt.service.d", "ydotoold.service"] {
+    for unit in [
+        "whisper-ptt.service",
+        "whisper-ptt.service.d",
+        "ydotoold.service",
+    ] {
         let path = units.join(unit);
         let outcome = if path.is_dir() {
             std::fs::remove_dir_all(&path)
