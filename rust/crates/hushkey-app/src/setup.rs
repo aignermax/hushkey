@@ -199,6 +199,29 @@ fn config_from_python(text: &str, env: impl Fn(&str) -> Option<String>) -> Confi
 
 /// Settings and history of the Python hushkey in `dir`, where we have none
 /// of our own yet.
+/// Whether a program started with no arguments should install itself first.
+///
+/// Downloading the program and opening it is how most people will arrive:
+/// from the website, or straight from the release. Running once out of the
+/// Downloads folder is not what they mean by that — there would be no menu
+/// entry, no start at login, and moving or deleting the file would take
+/// hushkey with it.
+///
+/// It stays out of the way where installing is not its business: a package
+/// manager put the program there, it is already the installed copy, or an
+/// installation exists that this copy is not part of (someone is trying a
+/// second one on purpose).
+pub fn should_install_itself() -> bool {
+    if setup::packaged() {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let installed = setup::installed_exe();
+    exe != installed && !installed.exists()
+}
+
 /// Finish a handover that no `--install` ran: a package manager put this
 /// program in place while the Python hushkey was still set to start at
 /// login. Its settings come over (if this program has none yet) and it is

@@ -78,7 +78,16 @@ fn main() -> std::process::ExitCode {
     unsafe { hushkey_core::init_process() };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match setup::Start::from_args(&args) {
-        Ok(setup::Start::App { after_update }) => return app::run(after_update),
+        Ok(setup::Start::App { after_update }) => {
+            // Opened from wherever it was downloaded: install, then run
+            // from where it belongs. `install` starts that copy itself.
+            if !after_update && setup::should_install_itself() {
+                log::open();
+                setup::install(false)
+            } else {
+                return app::run(after_update);
+            }
+        }
         Ok(setup::Start::Install { from_python }) => {
             log::open();
             setup::install(from_python)
