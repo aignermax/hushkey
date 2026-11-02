@@ -3,293 +3,633 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hushkey — hold a key, speak, release</title>
-<meta name="description" content="Local, offline push-to-talk dictation for Windows, Linux and macOS. Hold a key, speak, release — the text lands in whatever window has focus. Nothing leaves your machine.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎙️</text></svg>">
+<title>hushkey — talk to your AI instead of typing</title>
+<meta name="description" content="Hold a key, speak, let go: your words land in ChatGPT, Claude, Cursor or any other window. Free, offline push-to-talk dictation for Windows, macOS and Linux. Nothing you say leaves your computer.">
+<meta property="og:title" content="hushkey — talk to your AI instead of typing">
+<meta property="og:description" content="Hold a key, speak, let go. Free, offline dictation into any app — for better prompts in a fraction of the time.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://hushkey.eu/">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
 <style>
+  /* No web fonts on purpose: a privacy tool should not ping a font CDN. */
   :root {
-    --bg: #fdfdfc;
-    --fg: #1a1a18;
-    --muted: #5e5e58;
-    --line: #e2e2dd;
+    --bg: #f7f9fc;
+    --bg-alt: #eef3f9;
+    --fg: #121722;
+    --muted: #556070;
+    --line: #dbe3ee;
     --card: #ffffff;
-    --accent: #1f6f4a;
+    --accent: #2459d6;
+    --accent-strong: #1b46ad;
     --accent-fg: #ffffff;
-    --code-bg: #f4f4f1;
+    --accent-soft: #e3ecff;
+    --rec: #e5484d;
+    --code-bg: #eef2f7;
+    --shadow: 0 1px 2px rgba(18, 23, 34, .06), 0 8px 24px rgba(18, 23, 34, .08);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #16161a;
-      --fg: #ececea;
-      --muted: #a0a09a;
-      --line: #2e2e34;
-      --card: #1e1e23;
-      --accent: #4ab380;
-      --accent-fg: #0c0c0e;
-      --code-bg: #26262c;
+      --bg: #0e1118;
+      --bg-alt: #131824;
+      --fg: #e9edf4;
+      --muted: #9aa5b6;
+      --line: #252c3b;
+      --card: #161c28;
+      --accent: #6c9cff;
+      --accent-strong: #8db2ff;
+      --accent-fg: #0a0e16;
+      --accent-soft: #1b2640;
+      --rec: #ff6369;
+      --code-bg: #1c2333;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .35);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #16161a;
-    --fg: #ececea;
-    --muted: #a0a09a;
-    --line: #2e2e34;
-    --card: #1e1e23;
-    --accent: #4ab380;
-    --accent-fg: #0c0c0e;
-    --code-bg: #26262c;
+    --bg: #0e1118;
+    --bg-alt: #131824;
+    --fg: #e9edf4;
+    --muted: #9aa5b6;
+    --line: #252c3b;
+    --card: #161c28;
+    --accent: #6c9cff;
+    --accent-strong: #8db2ff;
+    --accent-fg: #0a0e16;
+    --accent-soft: #1b2640;
+    --rec: #ff6369;
+    --code-bg: #1c2333;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .35);
   }
+
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
   }
-  .wrap { max-width: 56rem; margin: 0 auto; padding: 0 1.25rem; }
-  header { padding: 4.5rem 0 3rem; text-align: center; }
-  h1 { font-size: clamp(2.2rem, 7vw, 3.4rem); margin: 0 0 .4rem; letter-spacing: -0.02em; }
-  .tagline { font-size: clamp(1.05rem, 3vw, 1.3rem); color: var(--muted); margin: 0 auto; max-width: 34rem; }
-  h2 { font-size: 1.45rem; margin: 3.5rem 0 1rem; letter-spacing: -0.01em; }
-  h3 { font-size: 1rem; margin: 0 0 .35rem; }
-  p { margin: 0 0 1rem; }
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1rem; }
+  @media (min-width: 40rem) { .wrap { padding: 0 1.5rem; } }
   a { color: var(--accent); }
-
-  /* downloads */
-  .downloads { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin: 1.5rem 0; }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: .7rem;
-    padding: 1.25rem;
-    display: flex;
-    flex-direction: column;
+  h1, h2, h3 { line-height: 1.15; letter-spacing: -0.02em; }
+  h2 { font-size: clamp(1.6rem, 4.5vw, 2.3rem); margin: 0 0 .75rem; }
+  h3 { font-size: 1.08rem; margin: 0 0 .35rem; letter-spacing: -0.01em; }
+  p { margin: 0 0 1rem; }
+  .lead { font-size: clamp(1.05rem, 2.4vw, 1.22rem); color: var(--muted); max-width: 40rem; }
+  section { padding: 4.5rem 0; }
+  section.alt { background: var(--bg-alt); border-block: 1px solid var(--line); }
+  .eyebrow {
+    display: inline-block; font-size: .8rem; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: .6rem;
   }
-  .card .os { font-weight: 600; font-size: 1.1rem; margin-bottom: .15rem; }
-  .card .note { color: var(--muted); font-size: .875rem; margin: 0 0 1rem; flex: 1; }
+
+  /* ---- buttons ---- */
   .btn {
-    display: block;
-    text-align: center;
-    background: var(--accent);
-    color: var(--accent-fg);
-    text-decoration: none;
-    font-weight: 600;
-    padding: .6rem 1rem;
-    border-radius: .45rem;
+    display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+    background: var(--accent); color: var(--accent-fg); text-decoration: none;
+    font-weight: 650; padding: .8rem 1.35rem; border-radius: .7rem; border: 0;
+    font-size: 1rem; line-height: 1.2; cursor: pointer;
+    transition: background-color .15s, transform .15s, box-shadow .15s;
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent);
   }
-  .btn:hover { filter: brightness(1.08); }
-  .btn.primary { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
-  .btn.secondary {
-    background: transparent;
-    color: var(--fg);
-    border: 1px solid var(--line);
-    font-weight: 500;
-    margin-top: .5rem;
-    font-size: .9rem;
-  }
-  .alt { color: var(--muted); font-size: .85rem; margin: .5rem 0 0; text-align: center; }
-  .alt a { color: var(--muted); }
+  .btn:hover { background: var(--accent-strong); transform: translateY(-1px); }
+  .btn:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 3px; }
+  .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); box-shadow: none; font-weight: 550; }
+  .btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.small { padding: .5rem .95rem; font-size: .92rem; border-radius: .55rem; }
+  .btn svg { width: 1.1em; height: 1.1em; flex: none; }
 
-  /* steps */
-  ol.steps { padding-left: 1.2rem; }
-  ol.steps li { margin-bottom: .5rem; }
+  /* ---- sticky top bar: the download button rides along ---- */
+  .bar {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: saturate(1.4) blur(12px); -webkit-backdrop-filter: saturate(1.4) blur(12px);
+    border-bottom: 1px solid transparent; transition: border-color .2s;
+  }
+  .bar.scrolled { border-bottom-color: var(--line); }
+  .bar .wrap { display: flex; align-items: center; gap: 1rem; height: 3.75rem; }
+  .brand { display: flex; align-items: center; gap: .55rem; font-weight: 750; font-size: 1.12rem; color: var(--fg); text-decoration: none; letter-spacing: -0.01em; }
+  .brand img { width: 2rem; height: 2rem; }
+  .bar nav { display: none; gap: 1.4rem; margin-left: 1.5rem; }
+  .bar nav a { color: var(--muted); text-decoration: none; font-size: .95rem; }
+  .bar nav a:hover { color: var(--fg); }
+  .bar .btn { margin-left: auto; }
+  @media (min-width: 52rem) { .bar nav { display: flex; } }
+
+  /* ---- hero ---- */
+  .hero { padding: 3.5rem 0 4.5rem; }
+  .hero .wrap { display: grid; gap: 3rem; align-items: center; }
+  @media (min-width: 60rem) { .hero .wrap { grid-template-columns: 1.05fr 1fr; } .hero { padding: 5rem 0 6rem; } }
+  .hero h1 { font-size: clamp(2.4rem, 7.5vw, 4rem); margin: 0 0 1.1rem; letter-spacing: -0.035em; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .cta-row { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.75rem 0 1rem; }
+  .cta-row .btn { font-size: 1.05rem; padding: .95rem 1.5rem; }
+  .trust { display: flex; flex-wrap: wrap; gap: .35rem 1.1rem; color: var(--muted); font-size: .9rem; padding: 0; margin: 0; list-style: none; }
+  .trust li::before { content: "✓"; color: var(--accent); font-weight: 700; margin-right: .35rem; }
+
+  /* ---- the demo: an AI chat box being dictated into ---- */
+  .demo {
+    background: var(--card); border: 1px solid var(--line); border-radius: 1.1rem;
+    box-shadow: var(--shadow); overflow: hidden; max-width: 34rem; width: 100%; justify-self: center;
+  }
+  .demo-top { display: flex; align-items: center; gap: .4rem; padding: .7rem .9rem; border-bottom: 1px solid var(--line); }
+  .demo-top i { width: .65rem; height: .65rem; border-radius: 50%; background: var(--line); display: block; }
+  .demo-top span { margin-left: .5rem; font-size: .8rem; color: var(--muted); }
+  .demo-body { padding: 1.1rem; display: grid; gap: .9rem; }
+  .bubble { background: var(--bg-alt); border-radius: .9rem; padding: .7rem .9rem; font-size: .9rem; color: var(--muted); max-width: 85%; }
+  .compose {
+    border: 1.5px solid var(--line); border-radius: .9rem; padding: .85rem .95rem; min-height: 7.5rem;
+    font-size: .95rem; line-height: 1.5; position: relative; transition: border-color .2s;
+  }
+  .compose.live { border-color: var(--accent); }
+  .compose .ph { color: var(--muted); opacity: .7; }
+  .compose .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: -.2em; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .demo-foot { display: flex; align-items: center; gap: .75rem; padding: .8rem 1.1rem 1.1rem; flex-wrap: wrap; }
+  .key {
+    font: 600 .82rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: .55rem .75rem; border-radius: .5rem; border: 1px solid var(--line);
+    background: var(--card); box-shadow: 0 3px 0 var(--line); transition: transform .12s, box-shadow .12s, background-color .12s, color .12s;
+  }
+  .key.down { transform: translateY(3px); box-shadow: 0 0 0 var(--line); background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .status { font-size: .85rem; color: var(--muted); display: flex; align-items: center; gap: .45rem; }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--line); }
+  .status.rec .dot { background: var(--rec); animation: pulse 1s ease-in-out infinite; }
+  .status.rec { color: var(--fg); }
+  @keyframes pulse { 50% { transform: scale(1.5); opacity: .55; } }
+  .wave { display: inline-flex; gap: 2px; align-items: center; height: 1rem; }
+  .wave b { width: 3px; border-radius: 2px; background: var(--rec); height: 30%; animation: wave .9s ease-in-out infinite; }
+  .wave b:nth-child(2) { animation-delay: .15s } .wave b:nth-child(3) { animation-delay: .3s } .wave b:nth-child(4) { animation-delay: .45s } .wave b:nth-child(5) { animation-delay: .6s }
+  @keyframes wave { 50% { height: 100%; } }
+  .status:not(.rec) .wave { display: none; }
+
+  /* ---- cards & grids ---- */
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin-top: 2rem; }
+  .grid.four { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 1rem; padding: 1.4rem; }
+  .card p { color: var(--muted); margin: 0; font-size: .97rem; }
+  .icon { width: 2.4rem; height: 2.4rem; border-radius: .7rem; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: .9rem; }
+  .icon svg { width: 1.3rem; height: 1.3rem; }
+  .big { font-size: 2.3rem; font-weight: 750; letter-spacing: -0.03em; color: var(--fg); line-height: 1; margin-bottom: .5rem; }
+  .big small { font-size: .95rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.5rem; padding: 0; list-style: none; }
+  .chips li { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: .4rem .85rem; font-size: .92rem; }
+  .chips li.more { color: var(--muted); border-style: dashed; }
+
+  .steps { counter-reset: s; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin: 2rem 0 0; padding: 0; list-style: none; }
+  .steps li { counter-increment: s; background: var(--card); border: 1px solid var(--line); border-radius: 1rem; padding: 1.4rem; }
+  .steps li::before { content: counter(s); display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font-weight: 700; margin-bottom: .8rem; }
+  .steps p { color: var(--muted); margin: 0; font-size: .97rem; }
 
   code, kbd {
-    background: var(--code-bg);
-    border-radius: .3rem;
-    padding: .12rem .4rem;
-    font: .9em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--code-bg); border-radius: .35rem; padding: .1rem .4rem;
+    font: .88em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
   }
-  pre {
-    background: var(--code-bg);
-    border-radius: .5rem;
-    padding: .9rem 1rem;
-    overflow-x: auto;
-  }
-  pre code { background: none; padding: 0; }
+  .oneliner { display: block; padding: .75rem .9rem; margin: .5rem 0 0; border-radius: .6rem; white-space: normal; word-break: break-all; }
 
-  table { border-collapse: collapse; width: 100%; font-size: .93rem; }
-  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-weight: 600; }
+  /* ---- downloads ---- */
+  .downloads { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin: 2rem 0 1.25rem; }
+  .dl { display: flex; flex-direction: column; }
+  .dl.mine { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .dl .os { font-weight: 700; font-size: 1.15rem; margin-bottom: .2rem; }
+  .dl .note { flex: 1; margin-bottom: 1.1rem; font-size: .93rem; }
+  .dl .btn { width: 100%; }
+  .dl .sub { font-size: .85rem; margin-top: .6rem; text-align: center; color: var(--muted); }
+  .dl .sub a { color: var(--muted); }
+  .badge { display: none; font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); margin-bottom: .4rem; }
+  .dl.mine .badge { display: block; }
+  .meta { color: var(--muted); font-size: .9rem; }
+
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: .7rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 650; white-space: nowrap; }
   .scroll { overflow-x: auto; }
 
-  footer {
-    margin-top: 4rem;
-    padding: 2rem 0 3rem;
-    border-top: 1px solid var(--line);
-    color: var(--muted);
-    font-size: .9rem;
-    text-align: center;
-  }
+  /* ---- FAQ ---- */
+  .faq { max-width: 46rem; margin-top: 2rem; }
+  details { border-bottom: 1px solid var(--line); padding: 1rem 0; }
+  details summary { cursor: pointer; font-weight: 650; list-style: none; display: flex; justify-content: space-between; gap: 1rem; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::after { content: "+"; color: var(--accent); font-weight: 400; font-size: 1.4rem; line-height: 1; }
+  details[open] summary::after { content: "–"; }
+  details p { color: var(--muted); margin: .7rem 0 0; }
+
+  /* ---- closing call ---- */
+  .closing { text-align: center; }
+  .closing .lead { margin: 0 auto 1.75rem; }
+
+  footer { padding: 2.5rem 0 6rem; color: var(--muted); font-size: .9rem; text-align: center; }
   footer a { color: var(--muted); }
+
+  /* ---- floating download button (appears once the hero buttons scroll away) ---- */
+  .float {
+    position: fixed; right: 1rem; bottom: 1rem; z-index: 30;
+    transform: translateY(160%); opacity: 0; pointer-events: none;
+    transition: transform .3s ease, opacity .3s ease;
+  }
+  .float.show { transform: none; opacity: 1; pointer-events: auto; }
+  .float .btn { box-shadow: 0 10px 30px color-mix(in srgb, var(--accent) 40%, transparent); padding: .9rem 1.3rem; }
+  @media (max-width: 40rem) { .float { left: 1rem; } .float .btn { width: 100%; } }
+  @media (prefers-reduced-motion: reduce) {
+    .float, .btn, .key { transition: none; }
+    .compose .caret, .status.rec .dot, .wave b { animation: none; }
+  }
 </style>
 </head>
 <body>
 
-<div class="wrap">
-
-<header>
-  <h1>hushkey</h1>
-  <p class="tagline">Hold a key, speak, release — the text lands in whatever
-  window has focus. Offline, on your machine, in 100+&nbsp;languages.</p>
+<header class="bar" id="bar">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="logo.svg" alt="" width="32" height="32">hushkey</a>
+    <nav aria-label="Sections">
+      <a href="#why">Why voice</a>
+      <a href="#how">How it works</a>
+      <a href="#private">Privacy</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <a class="btn small js-dl" href="#download">Download free</a>
+  </div>
 </header>
 
-<h2>Download</h2>
+<main id="top">
 
-<p id="pick" class="alt" hidden></p>
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <span class="eyebrow">Push-to-talk for your AI</span>
+      <h1>Talk to your AI.<br><em>Stop typing to it.</em></h1>
+      <p class="lead">Hold a key, say what you need, let go — your words land
+      in ChatGPT, Claude, Cursor or whatever window has focus. Speaking is
+      about three times faster than typing, so your prompts get the detail
+      that makes answers good.</p>
+      <div class="cta-row" id="hero-cta">
+        <a class="btn js-dl" href="#download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14"/></svg>
+          <span class="js-dl-label">Download free</span>
+        </a>
+        <a class="btn ghost" href="#how">See how it works</a>
+      </div>
+      <ul class="trust">
+        <li>Free &amp; open source</li>
+        <li>Runs offline</li>
+        <li>No account</li>
+        <li>Windows · macOS · Linux</li>
+      </ul>
+    </div>
 
-<div class="downloads">
-  <div class="card">
-    <div class="os">Windows</div>
-    <p class="note">Installer, no admin rights needed. Sets up autostart.</p>
-    <a class="btn" id="dl-windows"
-       href="https://github.com/aignermax/hushkey/releases/latest">Download for Windows</a>
+    <div class="demo" aria-label="Example: dictating a prompt into an AI chat" role="img">
+      <div class="demo-top"><i></i><i></i><i></i><span id="demo-app">AI chat</span></div>
+      <div class="demo-body">
+        <div class="bubble">How can I help you today?</div>
+        <div class="compose" id="compose"><span class="ph">Message…</span></div>
+      </div>
+      <div class="demo-foot">
+        <span class="key" id="demo-key">Caps Lock</span>
+        <span class="status" id="demo-status"><span class="dot"></span><span class="wave"><b></b><b></b><b></b><b></b><b></b></span><span id="demo-text">Hold the key and speak</span></span>
+      </div>
+    </div>
   </div>
+</section>
 
-  <div class="card">
-    <div class="os">Linux</div>
-    <p class="note">Debian/Ubuntu package for 64-bit PCs. Double-click it, or
-    <code>sudo apt install ./hushkey_*.deb</code>.</p>
-    <!-- Every button starts at the release page: it is right whatever the
-         latest release is called. The script below turns them into direct
-         downloads once it knows what that release actually carries. -->
-    <a class="btn" id="dl-linux"
-       href="https://github.com/aignermax/hushkey/releases/latest">Download .deb (amd64)</a>
-    <a class="btn secondary" href="https://github.com/aignermax/hushkey/releases/latest">Other architectures &amp; plain binary</a>
+<section class="alt" id="why">
+  <div class="wrap">
+    <span class="eyebrow">Why voice</span>
+    <h2>Better answers start with better prompts.</h2>
+    <p class="lead">AI does its best work when you give it context: what you
+    tried, what you want, what to avoid. Typing all that is tedious, so most
+    prompts end up short. Saying it takes seconds.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="big">~3×<small> faster</small></div>
+        <h3>Say more, get more</h3>
+        <p>People speak around 150 words a minute and type around 40. A
+        detailed prompt is half a minute of talking, not five of typing.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="m7 9 3 2.5L7 14M12 14h5"/></svg></div>
+        <h3>Works where your cursor is</h3>
+        <p>Chat apps, coding assistants, the terminal, your editor, email —
+        hushkey types into the focused window. No new app to switch to.</p>
+      </div>
+      <div class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>Your voice stays on your machine</h3>
+        <p>Speech recognition runs locally. Nothing you say is uploaded —
+        only the finished text goes where you put it.</p>
+      </div>
+    </div>
+    <ul class="chips" aria-label="Works with">
+      <li>ChatGPT</li><li>Claude</li><li>Gemini</li><li>Copilot</li>
+      <li>Cursor</li><li>Claude Code</li><li>VS Code</li><li>Terminal</li>
+      <li>Slack</li><li>Teams</li><li>Email</li>
+      <li class="more">any app with a text cursor</li>
+    </ul>
   </div>
+</section>
 
-  <div class="card">
-    <div class="os">macOS</div>
-    <p class="note">Apple Silicon. For an Intel Mac, pick the x86_64 build
-    from the release page. First start: <strong>right-click the app and
-    choose Open</strong> — see below.</p>
-    <a class="btn" id="dl-macos"
-       href="https://github.com/aignermax/hushkey/releases/latest">Download for macOS</a>
+<section id="how">
+  <div class="wrap">
+    <span class="eyebrow">How it works</span>
+    <h2>Hold. Speak. Release.</h2>
+    <p class="lead">No window to open, no button to click. hushkey sits in
+    your tray and waits for one key.</p>
+    <ol class="steps">
+      <li><h3>Hold your key</h3><p><kbd>Caps&nbsp;Lock</kbd> by default — or
+        Right&nbsp;Alt, Right&nbsp;Ctrl, Scroll&nbsp;Lock and others, picked
+        in the tray menu.</p></li>
+      <li><h3>Speak naturally</h3><p>A small overlay shows hushkey is
+        listening. Ramble if you like — over 100 languages are understood,
+        and the language is detected for you.</p></li>
+      <li><h3>Let go</h3><p>The text is pasted into the focused window, and
+        your clipboard is put back the way it was.</p></li>
+    </ol>
   </div>
+</section>
+
+<section class="alt" id="private">
+  <div class="wrap">
+    <span class="eyebrow">Private by design</span>
+    <h2>No cloud. No subscription. No account.</h2>
+    <p class="lead">hushkey runs OpenAI's open Whisper speech model on your
+    own computer, on the graphics card when there is one. After the one-time
+    model download it needs no internet at all.</p>
+    <div class="grid four">
+      <div class="card"><h3>Offline</h3><p>Works on a plane, behind a
+        firewall, with the network cable pulled.</p></div>
+      <div class="card"><h3>Fast on your hardware</h3><p>Uses NVIDIA, AMD and
+        Intel graphics on Windows and Linux, and Apple Silicon on the Mac —
+        the CPU otherwise.</p></div>
+      <div class="card"><h3>Small and self-updating</h3><p>One program, no
+        Python, no setup. It keeps itself up to date — or not, if you switch
+        that off.</p></div>
+      <div class="card"><h3>Recent dictations at hand</h3><p>The last
+        transcripts stay in the tray menu, ready to copy again.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <span class="eyebrow">Download</span>
+    <h2>Get hushkey — it's free.</h2>
+    <p class="meta" id="version-note">One download, about a minute to set up.
+    The speech model (about 1.6&nbsp;GB) is fetched on first start.</p>
+
+    <div class="downloads">
+      <div class="card dl" id="card-windows">
+        <span class="badge">Your system</span>
+        <div class="os">Windows</div>
+        <p class="note">Windows 10 or newer, 64-bit. No admin rights needed;
+        it sets up start at login itself.</p>
+        <a class="btn" id="dl-windows" href="https://github.com/aignermax/hushkey/releases/latest">Download for Windows</a>
+      </div>
+
+      <div class="card dl" id="card-macos">
+        <span class="badge">Your system</span>
+        <div class="os">macOS</div>
+        <p class="note">macOS 13 or newer, Apple Silicon. On the first start,
+        <strong>right-click the app and choose Open</strong> (see FAQ), then
+        allow Microphone and Accessibility.</p>
+        <a class="btn" id="dl-macos" href="https://github.com/aignermax/hushkey/releases/latest">Download for macOS</a>
+        <div class="sub"><a id="dl-macos-intel" href="https://github.com/aignermax/hushkey/releases/latest">Intel Mac</a></div>
+      </div>
+
+      <div class="card dl" id="card-linux">
+        <span class="badge">Your system</span>
+        <div class="os">Linux</div>
+        <p class="note">Ubuntu 22.04+, Debian 12+ and alike; X11 or Wayland.
+        Open the package, or <code>sudo apt install ./hushkey_*.deb</code>.</p>
+        <a class="btn" id="dl-linux" href="https://github.com/aignermax/hushkey/releases/latest">Download .deb (64-bit PC)</a>
+        <div class="sub"><a href="https://github.com/aignermax/hushkey/releases/latest">ARM &amp; plain binary</a></div>
+      </div>
+    </div>
+
+    <p class="meta">On macOS and Linux the one-line install saves a step —
+    it clears macOS' quarantine flag and sets up keyboard access on Linux:</p>
+    <code class="oneliner">curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash</code>
+    <p class="meta" style="margin-top:1rem">Every file with its checksum:
+    <a href="https://github.com/aignermax/hushkey/releases/latest">latest release on GitHub</a>.</p>
+  </div>
+</section>
+
+<section class="alt" id="faq">
+  <div class="wrap">
+    <span class="eyebrow">Questions</span>
+    <h2>Good to know</h2>
+    <div class="faq">
+      <details>
+        <summary>Does anything I say leave my computer?</summary>
+        <p>No. Recognition runs locally. The only downloads are the speech
+        model on first start and update checks against GitHub, which you
+        can switch off in the tray menu.</p>
+      </details>
+      <details>
+        <summary>Is it really free?</summary>
+        <p>Yes. No trial, no subscription, no account. hushkey is open
+        source under the MIT license — the code is on GitHub.</p>
+      </details>
+      <details>
+        <summary>Does it only work with AI chats?</summary>
+        <p>No — it types into any window with a text cursor: chat apps,
+        editors, terminals, browsers, email, office documents. AI prompts
+        are simply where talking instead of typing pays off most.</p>
+      </details>
+      <details>
+        <summary>Which languages?</summary>
+        <p>Everything Whisper understands — over 100 languages, detected
+        automatically, or fixed to one in the tray menu. German and English
+        are tested the most.</p>
+      </details>
+      <details>
+        <summary>Do I need a graphics card?</summary>
+        <p>No. A graphics card makes it faster and is used when present;
+        otherwise the processor does the work.</p>
+      </details>
+      <details>
+        <summary>Can I change the key?</summary>
+        <p>Yes, in the tray menu. Caps Lock is the default because few
+        people miss it; Right Alt, Right Ctrl, Scroll Lock and a few more
+        are offered too.</p>
+      </details>
+      <details>
+        <summary>macOS says the app cannot be opened — what now?</summary>
+        <p>macOS quarantines anything downloaded from a browser, and hushkey
+        is not signed with an Apple developer certificate. On the first
+        start, right-click (or Control-click) hushkey in Finder, choose
+        <strong>Open</strong> and confirm — after that it opens normally.
+        The one-line install avoids this. macOS then asks for
+        <strong>Microphone</strong> and <strong>Accessibility</strong>
+        access: one to hear you, the other to see your key and type for
+        you.</p>
+      </details>
+      <details>
+        <summary>I used the older hushkey — do I need to do anything?</summary>
+        <p>No. The older version updates itself to this one and brings your
+        settings and history along.</p>
+      </details>
+      <details>
+        <summary>How do I remove it?</summary>
+        <p>Windows: through the app list. Linux: <code>sudo apt remove
+        hushkey</code>, or <code>~/.local/bin/hushkey --uninstall</code> for
+        a plain-binary install. macOS: <code>hushkey --uninstall</code>.
+        Your settings and the downloaded model stay unless you delete
+        them.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="closing">
+  <div class="wrap">
+    <h2>Your next prompt could take ten seconds.</h2>
+    <p class="lead">Install hushkey, hold Caps Lock, and just say it.</p>
+    <a class="btn js-dl" href="#download"><span class="js-dl-label">Download free</span></a>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><a href="https://github.com/aignermax/hushkey">Source on GitHub</a> ·
+       <a href="https://github.com/aignermax/hushkey/releases">Releases</a> ·
+       <a href="https://github.com/aignermax/hushkey/issues">Report a problem</a></p>
+    <p>Free and open source (MIT). Your voice stays yours.</p>
+  </div>
+</footer>
+
+<div class="float" id="float" aria-hidden="true">
+  <a class="btn js-dl" href="#download" tabindex="-1"><span class="js-dl-label">Download free</span></a>
 </div>
 
-<p class="alt">On macOS and Linux the one-liner saves a step (it clears
-macOS' quarantine flag and sets up input access on Linux):</p>
-
-<p class="alt">
-<code>curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash</code><br>
-Or see <a href="https://github.com/aignermax/hushkey/releases/latest">every file in the latest release</a>,
-checksums included.</p>
-
 <script>
-// Name the visitor's system, and point the Linux button at the actual .deb
-// (its file name carries the version). Every button already works without
-// this: each links to the latest release, which is never wrong.
 (function () {
   "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var RELEASE = "https://github.com/aignermax/hushkey/releases/latest";
+
+  // ---- which system is this? -------------------------------------------
   var ua = navigator.userAgent;
-  var guess = /Win/.test(ua) ? "windows" : /Mac/.test(ua) ? "macos"
-            : /Linux|X11|CrOS/.test(ua) ? "linux" : null;
-  if (guess) {
-    var names = {windows: "Windows", macos: "macOS", linux: "Linux"};
-    var pick = document.getElementById("pick");
-    pick.textContent = "Looks like you are on " + names[guess] + ".";
-    pick.hidden = false;
-    var button = document.getElementById("dl-" + guess);
-    if (button) { button.classList.add("primary"); }
+  var os = /Android|iPhone|iPad/.test(ua) ? null
+         : /Win/.test(ua) ? "windows" : /Mac/.test(ua) ? "macos"
+         : /Linux|X11|CrOS/.test(ua) ? "linux" : null;
+  var names = { windows: "Windows", macos: "macOS", linux: "Linux" };
+  if (os) {
+    $("card-" + os).classList.add("mine");
+    // Put the visitor's own system first.
+    var list = $("card-" + os).parentNode;
+    list.insertBefore($("card-" + os), list.firstChild);
+    Array.prototype.forEach.call(document.querySelectorAll(".js-dl-label"), function (el) {
+      el.textContent = "Download for " + names[os];
+    });
   }
+
+  // ---- direct downloads, once we know what the latest release carries ---
+  // Every button already works without this: it leads to the download
+  // section, whose buttons lead to the release page.
   fetch("https://api.github.com/repos/aignermax/hushkey/releases/latest")
     .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
     .then(function (release) {
-      var version = String(release.tag_name || "").replace(/^v/, "");
       var assets = release.assets || [];
-      var byName = function (pattern) {
-        return assets.filter(function (a) { return pattern.test(a.name); })[0];
-      };
-      // Only point at a file the release really has; anything missing keeps
-      // its link to the release page.
+      var find = function (re) { return assets.filter(function (a) { return re.test(a.name); })[0]; };
       var direct = {
-        windows: byName(/^hushkey-windows-x86_64\.exe$/),
-        linux: byName(/^hushkey_.*_amd64\.deb$/),
-        macos: byName(/^hushkey-macos-arm64\.zip$/)
+        windows: find(/^hushkey-windows-x86_64\.exe$/),
+        macos: find(/^hushkey-macos-arm64\.zip$/),
+        "macos-intel": find(/^hushkey-macos-x86_64\.zip$/),
+        linux: find(/^hushkey_.*_amd64\.deb$/)
       };
-      Object.keys(direct).forEach(function (os) {
-        var button = document.getElementById("dl-" + os);
-        if (direct[os] && button) { button.href = direct[os].browser_download_url; }
+      Object.keys(direct).forEach(function (k) {
+        var b = $("dl-" + k);
+        if (direct[k] && b) { b.href = direct[k].browser_download_url; }
       });
+      var version = String(release.tag_name || "").replace(/^v/, "");
       if (version) {
-        var note = document.createElement("p");
-        note.className = "alt";
-        note.textContent = "Latest version: " + version;
-        document.getElementById("pick").after(note);
+        $("version-note").textContent = "Version " + version + ". One download, about a minute to set up. "
+          + "The speech model (about 1.6 GB) is fetched on first start.";
       }
     })
     .catch(function () { /* the static links stand on their own */ });
+
+  // ---- the bar gets a border once the page scrolls ----------------------
+  var bar = $("bar");
+  var onScroll = function () { bar.classList.toggle("scrolled", window.scrollY > 8); };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
+
+  // ---- floating button: shown when neither the hero buttons nor the -----
+  // ---- download section are on screen ------------------------------------
+  var float = $("float");
+  if ("IntersectionObserver" in window) {
+    var heroVisible = true, downloadVisible = false;
+    var update = function () {
+      var show = !heroVisible && !downloadVisible;
+      float.classList.toggle("show", show);
+      float.setAttribute("aria-hidden", show ? "false" : "true");
+      float.querySelector("a").tabIndex = show ? 0 : -1;
+    };
+    new IntersectionObserver(function (e) { heroVisible = e[0].isIntersecting; update(); })
+      .observe($("hero-cta"));
+    new IntersectionObserver(function (e) { downloadVisible = e[0].isIntersecting; update(); }, { threshold: 0.15 })
+      .observe($("download"));
+  }
+
+  // ---- the demo: key down, words appear, key up -------------------------
+  var prompts = [
+    { app: "AI chat", text: "Rewrite this email so it sounds friendly but firm: we can't move the deadline, but I can send a first draft on Thursday and walk them through it on a call." },
+    { app: "Coding assistant", text: "Refactor the upload handler so large files stream to disk instead of loading into memory, keep the public API as it is, and add a test with a two gigabyte file." },
+    { app: "AI chat", text: "Plan a three day trip to Lisbon for two, mid-range budget, lots of food and walking, nothing that needs a car, and one rainy day option." }
+  ];
+  var compose = $("compose"), key = $("demo-key"), status = $("demo-status"), label = $("demo-text"), app = $("demo-app");
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (reduce) {
+    compose.textContent = prompts[0].text;
+    label.textContent = "Released — text inserted";
+    return;
+  }
+  var i = 0;
+  var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+  function run() {
+    var p = prompts[i++ % prompts.length];
+    var words = p.text.split(" ");
+    app.textContent = p.app;
+    compose.innerHTML = '<span class="ph">Message…</span>';
+    compose.classList.remove("live");
+    label.textContent = "Hold the key and speak";
+    return wait(1400)
+      .then(function () {
+        key.classList.add("down");
+        status.classList.add("rec");
+        label.textContent = "Listening…";
+        return wait(2600);
+      })
+      .then(function () {
+        key.classList.remove("down");
+        status.classList.remove("rec");
+        label.textContent = "Released — text inserted";
+        compose.classList.add("live");
+        compose.textContent = "";
+        var caret = document.createElement("span");
+        caret.className = "caret";
+        var n = 0;
+        return new Promise(function (done) {
+          var tick = setInterval(function () {
+            n += 3;  // pasted, not typed: it arrives fast
+            compose.textContent = words.slice(0, n).join(" ");
+            compose.appendChild(caret);
+            if (n >= words.length) { clearInterval(tick); done(); }
+          }, 45);
+        });
+      })
+      .then(function () { return wait(3800); })
+      .then(run);
+  }
+  run();
 })();
 </script>
-
-<h2>How it works</h2>
-
-<ol class="steps">
-  <li>Hold your key — <kbd>Caps&nbsp;Lock</kbd> unless you pick another one.</li>
-  <li>Speak. A small overlay shows that hushkey is listening.</li>
-  <li>Let go. The transcript is pasted into the focused window.</li>
-</ol>
-
-<p>The speech model runs on your own machine. After the one-time model
-download (about 0.5–1.5&nbsp;GB on first use), hushkey needs no network at
-all — nothing you say is sent anywhere. A GPU is used when there is one,
-otherwise the CPU does the work.</p>
-
-<h2>What you need</h2>
-
-<div class="scroll">
-<table>
-  <tr><th>Windows</th><td>Windows 10 or newer, 64-bit.</td></tr>
-  <tr><th>Linux</th><td>A desktop session (X11 or Wayland), glibc 2.35 or
-    newer — Ubuntu 22.04 and later, Debian 12 and later. Dictating reads the
-    key from <code>/dev/input</code>, so the installer puts you in the
-    <code>input</code> group; that takes one logout to apply.</td></tr>
-  <tr><th>macOS</th><td>macOS 13 or newer. Allow hushkey under
-    Accessibility when asked — that is what lets it see the key and type
-    for you.</td></tr>
-</table>
-</div>
-
-<h2>Questions</h2>
-
-<h3>Does anything I say leave my computer?</h3>
-<p>No. Recognition happens locally. The only downloads are the speech model
-on first use and update checks against GitHub, which you can switch off.</p>
-
-<h3>Which languages?</h3>
-<p>Everything whisper handles — over 100 languages. German and English are
-what hushkey is tested with most.</p>
-
-<h3>Can I change the key?</h3>
-<p>Yes, in the tray menu. Caps Lock is the default because few people miss
-it; Right Alt, Right Ctrl and Scroll Lock are offered too.</p>
-
-<h3>macOS says the app cannot be opened — what now?</h3>
-<p>macOS quarantines anything downloaded from a browser, and hushkey is not
-signed with an Apple developer certificate. On the first start, right-click
-(or Control-click) hushkey in Finder and choose <strong>Open</strong>, then
-confirm — after that it opens normally. The one-line install below avoids
-this, because it clears the quarantine flag itself.</p>
-
-<p>macOS will then ask for <strong>Microphone</strong> and
-<strong>Accessibility</strong> access. Both are needed: one to hear you, the
-other to see your key and type for you.</p>
-
-<h3>How do I remove it?</h3>
-<p>Windows: through the app list. Linux: <code>sudo apt remove hushkey</code>,
-or <code>hushkey --uninstall</code> for a plain-binary install. macOS:
-<code>hushkey --uninstall</code>. Your settings and the downloaded model
-stay unless you delete them yourself.</p>
-
-<footer>
-  <p><a href="https://github.com/aignermax/hushkey">Source on GitHub</a> ·
-     <a href="https://github.com/aignermax/hushkey/releases">Releases</a> ·
-     <a href="https://github.com/aignermax/hushkey/issues">Report a problem</a></p>
-  <p>Free software. Your voice stays yours.</p>
-</footer>
-
-</div>
 </body>
 </html>

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eaf6fe"/>
+      <stop offset="1" stop-color="#cde9fa"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app-icon badge -->
+  <rect x="16" y="16" width="480" height="480" rx="120" fill="url(#bg)"/>
+
+  <!-- ears -->
+  <path d="M128 198 L156 58 L246 144 Z" fill="#5c6b82" stroke="#2d3542" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M384 198 L356 58 L266 144 Z" fill="#5c6b82" stroke="#2d3542" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M156 172 L168 96 L216 146 Z" fill="#c9d4e0"/>
+  <path d="M356 172 L344 96 L296 146 Z" fill="#c9d4e0"/>
+
+  <!-- head (dark mask fur) -->
+  <path d="M256 118 C180 118 128 176 118 268 C112 330 128 380 168 408 C196 428 224 436 256 436 C288 436 316 428 344 408 C384 380 400 330 394 268 C384 176 332 118 256 118 Z"
+        fill="#6b7a93" stroke="#2d3542" stroke-width="9" stroke-linejoin="round"/>
+
+  <!-- cheek fluff -->
+  <path d="M126 294 L96 330 L132 338 Z" fill="#6b7a93" stroke="#2d3542" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M386 294 L416 330 L380 338 Z" fill="#6b7a93" stroke="#2d3542" stroke-width="8" stroke-linejoin="round"/>
+
+  <!-- white blaze + muzzle -->
+  <path d="M256 140 C240 140 228 150 224 168 C219 198 219 236 223 264 C198 274 170 292 160 316 C148 344 154 380 178 398 C206 420 234 428 256 428 C278 428 306 420 334 398 C358 380 364 344 352 316 C342 292 314 274 289 264 C293 236 293 198 288 168 C284 150 272 140 256 140 Z"
+        fill="#f7fafc"/>
+
+  <!-- open eye (left) -->
+  <g transform="rotate(-8 186 250)">
+    <ellipse cx="186" cy="250" rx="21" ry="15" fill="#7cc4f0" stroke="#2d3542" stroke-width="7"/>
+    <circle cx="188" cy="251" r="7" fill="#22304a"/>
+    <circle cx="191" cy="247" r="3" fill="#ffffff"/>
+  </g>
+  <!-- winking eye (right) -->
+  <path d="M300 252 Q322 268 344 250" fill="none" stroke="#2d3542" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- nose -->
+  <path d="M236 330 Q256 321 276 330 Q283 345 268 355 Q256 361 244 355 Q229 345 236 330 Z" fill="#2d3542"/>
+
+  <!-- mouth -->
+  <path d="M256 360 L256 372 M256 372 Q240 388 219 380 M256 372 Q272 388 293 380"
+        fill="none" stroke="#2d3542" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- tongue out -->
+  <path d="M238 381 Q256 393 274 381 L274 398 Q274 416 256 416 Q238 416 238 398 Z"
+        fill="#f78fb3" stroke="#2d3542" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M256 390 L256 408" stroke="#d9668f" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- key tag -->
+  <g transform="translate(0 -6)">
+    <circle cx="256" cy="446" r="8" fill="none" stroke="#2d3542" stroke-width="6"/>
+    <g stroke="#2d3542" stroke-width="6">
+      <circle cx="256" cy="468" r="13" fill="#f8c945"/>
+      <circle cx="256" cy="468" r="5" fill="#eaf6fe"/>
+      <rect x="252" y="478" width="8" height="24" rx="3" fill="#f8c945"/>
+      <rect x="260" y="488" width="11" height="6" rx="2" fill="#f8c945"/>
+      <rect x="260" y="497" width="8" height="6" rx="2" fill="#f8c945"/>
+    </g>
+  </g>
+</svg>
