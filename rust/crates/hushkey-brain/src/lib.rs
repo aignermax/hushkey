@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 use hushkey_core::{Brain, Reply};
-use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
