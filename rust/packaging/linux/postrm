@@ -1,0 +1,20 @@
+#!/bin/sh
+# hushkey postrm: give back what postinst took.
+#
+# The udev rule, the menu entry and the program are dpkg's own and go by
+# themselves. Settings, history and the downloaded model live in the users'
+# homes and are kept: a purge cannot reach into a home safely, and losing a
+# 1 GB model to an accidental purge would be unkind.
+set -e
+case "${1:-}" in
+  remove|purge)
+    rm -f /etc/modules-load.d/hushkey-uinput.conf
+    command -v udevadm >/dev/null 2>&1 &&
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+    ;;
+esac
+if [ "${1:-}" = purge ]; then
+    echo "hushkey: settings and the speech model stay in the users' home folders."
+    echo "hushkey: remove them with: rm -rf ~/.local/share/hushkey-rs ~/.cache/hushkey"
+fi
+exit 0

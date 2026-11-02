@@ -1,0 +1,79 @@
+#!/bin/sh
+# hushkey postinst: the parts that need root.
+#
+# The program itself is a single binary dpkg has already put in place, and
+# it sets up its own per-user half (autostart, settings) when it first
+# runs. Left here: access to /dev/uinput and /dev/input, which is a
+# privilege only root can grant, and clearing out what the Python hushkey's
+# packages left in system locations.
+set -e
+
+# --- /dev/uinput ----------------------------------------------------------
+# The rule itself ships in /usr/lib/udev/rules.d and is dpkg's. Apply it to
+# the node that may already exist, and make sure the module is there.
+if [ -x /bin/udevadm ] || [ -x /sbin/udevadm ] || command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+if [ ! -e /dev/uinput ]; then
+    modprobe uinput >/dev/null 2>&1 || true
+fi
+command -v udevadm >/dev/null 2>&1 &&
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput >/dev/null 2>&1 || true
+printf 'uinput\n' > /etc/modules-load.d/hushkey-uinput.conf
+
+# --- the Python hushkey's system leftovers --------------------------------
+# Its postinst wrote this rule itself, so dpkg does not know about it and
+# would never take it along. The rule shipped above replaces it.
+rm -f /etc/udev/rules.d/99-whisper-ptt-uinput.rules
+# Its own modules-load file, superseded by ours.
+rm -f /etc/modules-load.d/uinput.conf
+
+# --- the 'input' group ----------------------------------------------------
+# Which user asked for this install? `sudo dpkg -i` and pkexec each say so
+# outright; a graphical install through PackageKit says nothing at all, and
+# then the one logged-in desktop user is the only safe answer — with two of
+# them, guessing would grant the privilege to the wrong person.
+resolve_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        printf '%s\n' "$SUDO_USER"; return 0
+    fi
+    if [ -n "${PKEXEC_UID:-}" ]; then
+        name="$(getent passwd "$PKEXEC_UID" 2>/dev/null | cut -d: -f1)"
+        if [ -n "$name" ] && [ "$name" != root ]; then printf '%s\n' "$name"; return 0; fi
+    fi
+    name="$(logname 2>/dev/null || true)"
+    if [ -n "$name" ] && [ "$name" != root ]; then printf '%s\n' "$name"; return 0; fi
+    command -v loginctl >/dev/null 2>&1 || return 1
+    name=""
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk 'NF {print $1}'); do
+        [ "$(loginctl show-session "$sid" -p Class --value 2>/dev/null)" = "user" ] || continue
+        case "$(loginctl show-session "$sid" -p Type --value 2>/dev/null)" in
+            x11|wayland) ;;
+            *) continue ;;
+        esac
+        user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null)"
+        if [ -n "$user" ] && [ "$user" != root ]; then
+            name="${name:+$name
+}$user"
+        fi
+    done
+    name="$(printf '%s\n' "$name" | sed '/^$/d' | sort -u)"
+    [ -n "$name" ] && [ "$(printf '%s\n' "$name" | wc -l)" -eq 1 ] || return 1
+    printf '%s\n' "$name"
+}
+
+USER_NAME="$(resolve_user || true)"
+if [ -n "$USER_NAME" ] && [ "$USER_NAME" != root ]; then
+    if id -nG "$USER_NAME" 2>/dev/null | tr ' ' '\n' | grep -qx input; then
+        :  # already there, nothing to say
+    else
+        usermod -aG input "$USER_NAME" || true
+        echo "hushkey: '$USER_NAME' added to the 'input' group — log out and back in once before dictating."
+    fi
+else
+    echo "hushkey: could not tell which user to give input access to."
+    echo "hushkey: run 'sudo usermod -aG input \$USER' and log out once."
+fi
+
+echo "hushkey: installed. Start it from your application menu."
+exit 0
