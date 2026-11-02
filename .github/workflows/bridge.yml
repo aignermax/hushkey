@@ -1,0 +1,38 @@
+name: bridge
+
+# The Python hushkey's last files (tray.py, update_helper.py, the installers)
+# hand existing installs over to the native program.
+
+on:
+  push:
+    branches: [master, dev]
+    paths: ["tray.py", "update_helper.py", "install.*", "uninstall.*", "tests/**", ".github/workflows/bridge.yml"]
+  pull_request:
+    paths: ["tray.py", "update_helper.py", "install.*", "uninstall.*", "tests/**", ".github/workflows/bridge.yml"]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests -q
+      - name: Installer scripts parse
+        if: runner.os != 'Windows'
+        run: bash -n install.sh && bash -n uninstall.sh
+      - name: Installer scripts parse (PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($f in "install.ps1", "uninstall.ps1") {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors; exit 1 }
+          }

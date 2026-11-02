@@ -1,0 +1,101 @@
+name: rust
+
+on:
+  push:
+    branches: [master, dev]
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      HUSHKEY_TEST_MODEL: ${{ github.workspace }}/testdata/ggml-tiny.bin
+      HUSHKEY_TEST_SPEECH: ${{ github.workspace }}/testdata/jfk.wav
+      HUSHKEY_TEST_VAD: ${{ github.workspace }}/testdata/ggml-silero-v5.1.2.bin
+      # Real-model tests each load a model and decode on the CPU; in parallel
+      # on a hosted runner's few cores a single preview outlasts any timeout.
+      RUST_TEST_THREADS: "1"
+      # Portable whisper.cpp: a build cached on one runner must run on the
+      # next, whose CPU may lack the first one's instruction sets.
+      GGML_NATIVE: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          # whisper-rs-sys does not rebuild when GGML_* changes
+          key: ggml-portable
+
+      # The app's AppIndicator library is loaded at run time, not linked.
+      - name: ALSA (cpal), OpenSSL (native TLS for brains) and GTK 3 (tray, overlay) headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libssl-dev libgtk-3-dev pkg-config
+
+      - name: libclang for whisper-rs bindgen (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+
+      - name: Test model and public speech sample
+        shell: bash
+        working-directory: .
+        run: |
+          mkdir -p testdata
+          curl -sSfL -o testdata/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+          curl -sSfL -o testdata/jfk.wav https://raw.githubusercontent.com/ggml-org/whisper.cpp/927cfce34f31707e17f2bff35c349632fb9e2c3a/samples/jfk.wav
+          curl -sSfL -o testdata/ggml-silero-v5.1.2.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests (real tiny-model inference)
+        run: cargo test --workspace
+
+      - name: hushkey.app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build -p hushkey-app
+          sh packaging/macos/make-app.sh target/debug/hushkey target/app
+          plutil -lint target/app/hushkey.app/Contents/Info.plist
+          test -s target/app/hushkey.app/Contents/Resources/hushkey.icns
+
+      - name: C host against include/hushkey.h
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -p hushkey-ffi --release
+          cc -std=c99 -Wall -Wextra -Werror -Iinclude crates/hushkey-ffi/tests/c/smoke.c \
+            -Ltarget/release -lhushkey -o target/smoke
+          export LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release
+          target/smoke "$HUSHKEY_TEST_MODEL" "$HUSHKEY_TEST_SPEECH" "$HUSHKEY_TEST_VAD"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: C host against include/hushkey.h (MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cargo build -p hushkey-ffi --release || exit /b 1
+          cl /nologo /W4 /WX /Iinclude crates/hushkey-ffi/tests/c/smoke.c /Fe:target/smoke.exe /Fo:target/smoke.obj target/release/hushkey.dll.lib || exit /b 1
+          set PATH=%CD%\target\release;%PATH%
+          target\smoke.exe "%HUSHKEY_TEST_MODEL%" "%HUSHKEY_TEST_SPEECH%" "%HUSHKEY_TEST_VAD%"

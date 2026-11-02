@@ -1,0 +1,246 @@
+//! The app's words in German or English, by the system's UI language,
+//! like the Python app's tray.
+
+pub struct Strings {
+    pub idle: &'static str,
+    pub loading: &'static str,
+    pub recording: &'static str,
+    pub transcribing: &'static str,
+    pub listening: &'static str,
+    pub hearing: &'static str,
+    pub failed: &'static str,
+    pub model_menu: &'static str,
+    pub key_menu: &'static str,
+    pub lang_menu: &'static str,
+    pub lang_auto: &'static str,
+    pub insert_menu: &'static str,
+    pub insert_paste: &'static str,
+    pub insert_type: &'static str,
+    pub history_menu: &'static str,
+    pub history_empty: &'static str,
+    pub copied: &'static str,
+    pub listen: &'static str,
+    pub autostart: &'static str,
+    pub open_logs: &'static str,
+    pub quit: &'static str,
+    pub model_loading: &'static str,
+    pub nothing_heard: &'static str,
+    pub update_check: &'static str,
+    pub update_install: &'static str,
+    pub update_running: &'static str,
+    pub up_to_date: &'static str,
+    pub update_failed: &'static str,
+}
+
+/// "Start with Windows" and the like, per system.
+const fn autostart_en() -> &'static str {
+    if cfg!(windows) {
+        "Start with Windows"
+    } else {
+        "Start at login"
+    }
+}
+
+const fn autostart_de() -> &'static str {
+    if cfg!(windows) {
+        "Mit Windows starten"
+    } else {
+        "Beim Anmelden starten"
+    }
+}
+
+const fn copied_en() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "copied — paste with Cmd+V"
+    } else {
+        "copied — paste with Ctrl+V"
+    }
+}
+
+const fn copied_de() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "kopiert — mit Cmd+V einfügen"
+    } else {
+        "kopiert — mit Strg+V einfügen"
+    }
+}
+
+pub const EN: Strings = Strings {
+    idle: "ready",
+    loading: "loading the model …",
+    recording: "recording …",
+    transcribing: "transcribing …",
+    listening: "listening",
+    hearing: "hearing you …",
+    failed: "error",
+    model_menu: "Model",
+    key_menu: "Push-to-talk key",
+    lang_menu: "Language",
+    lang_auto: "Auto-detect",
+    insert_menu: "Insert method",
+    insert_paste: "Paste (clipboard)",
+    insert_type: "Type (keystrokes)",
+    history_menu: "Recent dictations",
+    history_empty: "(none yet)",
+    copied: copied_en(),
+    listen: "Continuous listening",
+    autostart: autostart_en(),
+    open_logs: "Open logs",
+    quit: "Quit",
+    model_loading: "loading {model} — the first time downloads {size}",
+    nothing_heard: "nothing heard",
+    update_check: "Check for updates",
+    update_install: "Install update: v{version}",
+    update_running: "installing the update …",
+    up_to_date: "hushkey is up to date",
+    update_failed: "update failed",
+};
+
+pub const DE: Strings = Strings {
+    idle: "bereit",
+    loading: "lädt das Modell …",
+    recording: "Aufnahme …",
+    transcribing: "transkribiert …",
+    listening: "hört zu",
+    hearing: "hört dich …",
+    failed: "Fehler",
+    model_menu: "Modell",
+    key_menu: "Push-to-talk-Taste",
+    lang_menu: "Sprache",
+    lang_auto: "Automatisch erkennen",
+    insert_menu: "Einfügemethode",
+    insert_paste: "Einfügen (Zwischenablage)",
+    insert_type: "Tippen (Tastenanschläge)",
+    history_menu: "Letzte Diktate",
+    history_empty: "(noch keine)",
+    copied: copied_de(),
+    listen: "Dauerzuhören",
+    autostart: autostart_de(),
+    open_logs: "Logs öffnen",
+    quit: "Beenden",
+    model_loading: "lade {model} — beim ersten Mal werden {size} heruntergeladen",
+    nothing_heard: "nichts gehört",
+    update_check: "Nach Updates suchen",
+    update_install: "Update installieren: v{version}",
+    update_running: "das Update wird installiert …",
+    up_to_date: "hushkey ist aktuell",
+    update_failed: "Update fehlgeschlagen",
+};
+
+/// (model name, download size) for the Model menu, as in the Python app.
+pub const MODELS: &[(&str, &str)] = &[
+    ("tiny", "~75 MB"),
+    ("base", "~150 MB"),
+    ("small", "~500 MB"),
+    ("medium", "~1.5 GB"),
+    ("large-v3-turbo", "~1.6 GB"),
+    ("large-v3", "~3 GB"),
+];
+
+/// (code, label) for the Language menu; None is auto-detect.
+pub const LANGUAGES: &[(Option<&str>, &str)] = &[
+    (None, ""),
+    (Some("de"), "Deutsch"),
+    (Some("en"), "English"),
+    (Some("it"), "Italiano"),
+    (Some("es"), "Español"),
+    (Some("fr"), "Français"),
+    (Some("kn"), "Kannada (ಕನ್ನಡ)"),
+    (Some("zh"), "中文 (Chinese)"),
+];
+
+/// (config name, label) for the key menu: keys that do nothing when held.
+/// Every key `config::KEYS` accepts, so the menu can always show which one
+/// is set. A key missing here would leave the submenu unchecked and the
+/// next click on it would discard the setting — which is what happened to
+/// `right_alt`, the key a handover from the Python app brings over from
+/// its `alt_r`/`alt_gr`.
+pub const KEY_LABELS: &[(&str, &str)] = &[
+    ("caps_lock", "Caps Lock"),
+    ("right_ctrl", "Right Ctrl"),
+    ("right_alt", "Right Alt"),
+    ("scroll_lock", "Scroll Lock"),
+    ("insert", "Insert"),
+    ("f8", "F8"),
+    ("f9", "F9"),
+    ("f10", "F10"),
+    ("f11", "F11"),
+    ("f12", "F12"),
+];
+
+#[cfg(windows)]
+pub fn current() -> &'static Strings {
+    // 0x07: German, in the primary-language bits of the UI language id.
+    let lang = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
+    if lang & 0x3FF == 0x07 {
+        &DE
+    } else {
+        &EN
+    }
+}
+
+/// German if the locale says so (the first of LC_ALL, LC_MESSAGES, LANG
+/// that is set; LANGUAGE lists preferences first).
+#[cfg(target_os = "linux")]
+pub fn current() -> &'static Strings {
+    let lang = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .find(|v| !v.is_empty())
+        .unwrap_or_default();
+    if lang.starts_with("de") {
+        &DE
+    } else {
+        &EN
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn current() -> &'static Strings {
+    if crate::platform::prefers_german() {
+        &DE
+    } else {
+        &EN
+    }
+}
+
+/// `template` with `{name}` replaced by `value`.
+pub fn fill(template: &str, pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .fold(template.to_string(), |text, (name, value)| {
+            text.replace(&format!("{{{name}}}"), value)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_key_in_the_menu_is_a_known_key() {
+        for (name, _) in KEY_LABELS {
+            assert!(crate::config::virtual_key(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_key_the_settings_accept_has_a_menu_entry() {
+        // Without one, Tray::sync cannot check the configured key: the
+        // submenu shows nothing as active and the next click drops it.
+        for (name, _) in crate::config::KEYS {
+            assert!(
+                KEY_LABELS.iter().any(|(labelled, _)| labelled == name),
+                "{name} is configurable but has no label"
+            );
+        }
+    }
+
+    #[test]
+    fn templates_fill_in() {
+        assert_eq!(
+            fill(DE.model_loading, &[("model", "tiny"), ("size", "~75 MB")]),
+            "lade tiny — beim ersten Mal werden ~75 MB heruntergeladen"
+        );
+    }
+}

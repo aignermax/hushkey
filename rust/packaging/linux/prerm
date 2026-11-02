@@ -1,0 +1,13 @@
+#!/bin/sh
+# hushkey prerm: stop running copies so the binary can be replaced.
+#
+# Only on a real removal, and only processes of this very program: an
+# upgrade leaves the running one alone, which keeps a dictation in progress
+# from being cut off (a running program keeps its old file anyway).
+set -e
+case "${1:-}" in
+  remove|deconfigure)
+    pkill -x -f '^/usr/bin/hushkey' >/dev/null 2>&1 || true
+    ;;
+esac
+exit 0
