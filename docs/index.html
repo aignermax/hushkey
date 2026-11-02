@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hushkey — hold a key, speak, release</title>
+<meta name="description" content="Local, offline push-to-talk dictation for Windows, Linux and macOS. Hold a key, speak, release — the text lands in whatever window has focus. Nothing leaves your machine.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🎙️</text></svg>">
+<style>
+  :root {
+    --bg: #fdfdfc;
+    --fg: #1a1a18;
+    --muted: #5e5e58;
+    --line: #e2e2dd;
+    --card: #ffffff;
+    --accent: #1f6f4a;
+    --accent-fg: #ffffff;
+    --code-bg: #f4f4f1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16161a;
+      --fg: #ececea;
+      --muted: #a0a09a;
+      --line: #2e2e34;
+      --card: #1e1e23;
+      --accent: #4ab380;
+      --accent-fg: #0c0c0e;
+      --code-bg: #26262c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16161a;
+    --fg: #ececea;
+    --muted: #a0a09a;
+    --line: #2e2e34;
+    --card: #1e1e23;
+    --accent: #4ab380;
+    --accent-fg: #0c0c0e;
+    --code-bg: #26262c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 56rem; margin: 0 auto; padding: 0 1.25rem; }
+  header { padding: 4.5rem 0 3rem; text-align: center; }
+  h1 { font-size: clamp(2.2rem, 7vw, 3.4rem); margin: 0 0 .4rem; letter-spacing: -0.02em; }
+  .tagline { font-size: clamp(1.05rem, 3vw, 1.3rem); color: var(--muted); margin: 0 auto; max-width: 34rem; }
+  h2 { font-size: 1.45rem; margin: 3.5rem 0 1rem; letter-spacing: -0.01em; }
+  h3 { font-size: 1rem; margin: 0 0 .35rem; }
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent); }
+
+  /* downloads */
+  .downloads { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin: 1.5rem 0; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: .7rem;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+  }
+  .card .os { font-weight: 600; font-size: 1.1rem; margin-bottom: .15rem; }
+  .card .note { color: var(--muted); font-size: .875rem; margin: 0 0 1rem; flex: 1; }
+  .btn {
+    display: block;
+    text-align: center;
+    background: var(--accent);
+    color: var(--accent-fg);
+    text-decoration: none;
+    font-weight: 600;
+    padding: .6rem 1rem;
+    border-radius: .45rem;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn.primary { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .btn.secondary {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--line);
+    font-weight: 500;
+    margin-top: .5rem;
+    font-size: .9rem;
+  }
+  .alt { color: var(--muted); font-size: .85rem; margin: .5rem 0 0; text-align: center; }
+  .alt a { color: var(--muted); }
+
+  /* steps */
+  ol.steps { padding-left: 1.2rem; }
+  ol.steps li { margin-bottom: .5rem; }
+
+  code, kbd {
+    background: var(--code-bg);
+    border-radius: .3rem;
+    padding: .12rem .4rem;
+    font: .9em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    border-radius: .5rem;
+    padding: .9rem 1rem;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  .scroll { overflow-x: auto; }
+
+  footer {
+    margin-top: 4rem;
+    padding: 2rem 0 3rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: .9rem;
+    text-align: center;
+  }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header>
+  <h1>hushkey</h1>
+  <p class="tagline">Hold a key, speak, release — the text lands in whatever
+  window has focus. Offline, on your machine, in 100+&nbsp;languages.</p>
+</header>
+
+<h2>Download</h2>
+
+<p id="pick" class="alt" hidden></p>
+
+<div class="downloads">
+  <div class="card">
+    <div class="os">Windows</div>
+    <p class="note">Installer, no admin rights needed. Sets up autostart.</p>
+    <a class="btn" id="dl-windows"
+       href="https://github.com/aignermax/hushkey/releases/latest">Download for Windows</a>
+  </div>
+
+  <div class="card">
+    <div class="os">Linux</div>
+    <p class="note">Debian/Ubuntu package for 64-bit PCs. Double-click it, or
+    <code>sudo apt install ./hushkey_*.deb</code>.</p>
+    <!-- Every button starts at the release page: it is right whatever the
+         latest release is called. The script below turns them into direct
+         downloads once it knows what that release actually carries. -->
+    <a class="btn" id="dl-linux"
+       href="https://github.com/aignermax/hushkey/releases/latest">Download .deb (amd64)</a>
+    <a class="btn secondary" href="https://github.com/aignermax/hushkey/releases/latest">Other architectures &amp; plain binary</a>
+  </div>
+
+  <div class="card">
+    <div class="os">macOS</div>
+    <p class="note">Apple Silicon. For an Intel Mac, pick the x86_64 build
+    from the release page.</p>
+    <a class="btn" id="dl-macos"
+       href="https://github.com/aignermax/hushkey/releases/latest">Download for macOS</a>
+  </div>
+</div>
+
+<p class="alt">Prefer a one-liner?
+<code>curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash</code><br>
+Or see <a href="https://github.com/aignermax/hushkey/releases/latest">every file in the latest release</a>,
+checksums included.</p>
+
+<script>
+// Name the visitor's system, and point the Linux button at the actual .deb
+// (its file name carries the version). Every button already works without
+// this: each links to the latest release, which is never wrong.
+(function () {
+  "use strict";
+  var ua = navigator.userAgent;
+  var guess = /Win/.test(ua) ? "windows" : /Mac/.test(ua) ? "macos"
+            : /Linux|X11|CrOS/.test(ua) ? "linux" : null;
+  if (guess) {
+    var names = {windows: "Windows", macos: "macOS", linux: "Linux"};
+    var pick = document.getElementById("pick");
+    pick.textContent = "Looks like you are on " + names[guess] + ".";
+    pick.hidden = false;
+    var button = document.getElementById("dl-" + guess);
+    if (button) { button.classList.add("primary"); }
+  }
+  fetch("https://api.github.com/repos/aignermax/hushkey/releases/latest")
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (release) {
+      var version = String(release.tag_name || "").replace(/^v/, "");
+      var assets = release.assets || [];
+      var byName = function (pattern) {
+        return assets.filter(function (a) { return pattern.test(a.name); })[0];
+      };
+      // Only point at a file the release really has; anything missing keeps
+      // its link to the release page.
+      var direct = {
+        windows: byName(/^hushkey-windows-x86_64\.exe$/),
+        linux: byName(/^hushkey_.*_amd64\.deb$/),
+        macos: byName(/^hushkey-macos-arm64\.zip$/)
+      };
+      Object.keys(direct).forEach(function (os) {
+        var button = document.getElementById("dl-" + os);
+        if (direct[os] && button) { button.href = direct[os].browser_download_url; }
+      });
+      if (version) {
+        var note = document.createElement("p");
+        note.className = "alt";
+        note.textContent = "Latest version: " + version;
+        document.getElementById("pick").after(note);
+      }
+    })
+    .catch(function () { /* the static links stand on their own */ });
+})();
+</script>
+
+<h2>How it works</h2>
+
+<ol class="steps">
+  <li>Hold your key — <kbd>Caps&nbsp;Lock</kbd> unless you pick another one.</li>
+  <li>Speak. A small overlay shows that hushkey is listening.</li>
+  <li>Let go. The transcript is pasted into the focused window.</li>
+</ol>
+
+<p>The speech model runs on your own machine. After the one-time model
+download (about 0.5–1.5&nbsp;GB on first use), hushkey needs no network at
+all — nothing you say is sent anywhere. A GPU is used when there is one,
+otherwise the CPU does the work.</p>
+
+<h2>What you need</h2>
+
+<div class="scroll">
+<table>
+  <tr><th>Windows</th><td>Windows 10 or newer, 64-bit.</td></tr>
+  <tr><th>Linux</th><td>A desktop session (X11 or Wayland), glibc 2.35 or
+    newer — Ubuntu 22.04 and later, Debian 12 and later. Dictating reads the
+    key from <code>/dev/input</code>, so the installer puts you in the
+    <code>input</code> group; that takes one logout to apply.</td></tr>
+  <tr><th>macOS</th><td>macOS 13 or newer. Allow hushkey under
+    Accessibility when asked — that is what lets it see the key and type
+    for you.</td></tr>
+</table>
+</div>
+
+<h2>Questions</h2>
+
+<h3>Does anything I say leave my computer?</h3>
+<p>No. Recognition happens locally. The only downloads are the speech model
+on first use and update checks against GitHub, which you can switch off.</p>
+
+<h3>Which languages?</h3>
+<p>Everything whisper handles — over 100 languages. German and English are
+what hushkey is tested with most.</p>
+
+<h3>Can I change the key?</h3>
+<p>Yes, in the tray menu. Caps Lock is the default because few people miss
+it; Right Alt, Right Ctrl and Scroll Lock are offered too.</p>
+
+<h3>How do I remove it?</h3>
+<p>Windows: through the app list. Linux: <code>sudo apt remove hushkey</code>,
+or <code>hushkey --uninstall</code> for a plain-binary install. macOS:
+<code>hushkey --uninstall</code>. Your settings and the downloaded model
+stay unless you delete them yourself.</p>
+
+<footer>
+  <p><a href="https://github.com/aignermax/hushkey">Source on GitHub</a> ·
+     <a href="https://github.com/aignermax/hushkey/releases">Releases</a> ·
+     <a href="https://github.com/aignermax/hushkey/issues">Report a problem</a></p>
+  <p>Free software. Your voice stays yours.</p>
+</footer>
+
+</div>
+</body>
+</html>
