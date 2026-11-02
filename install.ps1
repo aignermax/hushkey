@@ -28,12 +28,15 @@ $Tmp = Join-Path $env:TEMP ("hushkey-install-" + [guid]::NewGuid().ToString("N")
 New-Item -ItemType Directory -Force $Tmp | Out-Null
 try {
     if (-not $Exe) {
-        if ($Pre) {
-            $releases = Invoke-RestMethod -Headers $Headers "https://api.github.com/repos/$Repo/releases?per_page=30"
-            $release = $releases | Where-Object { -not $_.draft -and ($_.assets.name -contains $Asset) } | Select-Object -First 1
-        } else {
-            $release = Invoke-RestMethod -Headers $Headers "https://api.github.com/repos/$Repo/releases/latest"
-        }
+        # The newest release that carries this system's program and its
+        # checksums — not simply the latest one: a release still building its
+        # files, or one from before the native program, has none, and the
+        # Python updater lands here either way. Pre-releases only with -Pre.
+        $releases = Invoke-RestMethod -Headers $Headers "https://api.github.com/repos/$Repo/releases?per_page=30"
+        $release = $releases | Where-Object {
+            -not $_.draft -and ($Pre -or -not $_.prerelease) -and
+            ($_.assets.name -contains $Asset) -and ($_.assets.name -contains "SHA256SUMS")
+        } | Select-Object -First 1
         if (-not $release) { throw "no release of $Repo carries $Asset" }
         $url = ($release.assets | Where-Object name -eq $Asset).browser_download_url
         $sumsUrl = ($release.assets | Where-Object name -eq "SHA256SUMS").browser_download_url
@@ -55,6 +58,9 @@ try {
     # A window program: '&' would not wait for it, and Start-Process -Wait
     # would also wait for the hushkey it starts (a child), forever.
     $p = Start-Process -FilePath $Exe -ArgumentList "--install", "--from-python" -PassThru
+    # Without the handle cached now, Windows PowerShell 5.1 can report no exit
+    # code for a process that ended before it looked ($null, which is not 0).
+    $null = $p.Handle
     $p.WaitForExit()
     if ($p.ExitCode -ne 0) {
         throw "hushkey --install failed (exit $($p.ExitCode)); see $env:LOCALAPPDATA\hushkey-rs\hushkey.log"

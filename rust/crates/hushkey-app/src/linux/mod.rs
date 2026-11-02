@@ -11,6 +11,7 @@ mod overlay;
 mod selection;
 pub mod setup;
 mod uinput;
+mod xkey;
 
 use std::cell::Cell;
 use std::path::Path;

@@ -2,7 +2,9 @@
 //! its own thread. X11 has no reliable global key-up and Wayland gives
 //! clients no global keys at all; the kernel devices work under both.
 //! Reading them needs the `input` group (the Python installer's udev rule
-//! and group, or `sudo usermod -aG input $USER`).
+//! and group, or `sudo usermod -aG input $USER`). Without it an X11
+//! session still works: the X server reports the key instead
+//! ([`super::xkey`]), as it did for the Python hushkey.
 //!
 //! The devices are not grabbed: the key keeps reaching the desktop. So a
 //! Caps Lock hold has toggled Caps Lock like a tap would; a hold that was
@@ -21,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use evdev::{Device, EventType, KeyCode};
 
-use super::{insert, uinput};
+use super::{insert, uinput, xkey};
 use crate::log;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,15 +109,43 @@ fn nodes() -> std::io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-struct Watcher {
+/// The key's state, whichever way it is read.
+struct Press {
     key: KeyCode,
     on_key: Box<dyn Fn(KeyEvent) + Send>,
+    /// The key is down (on any keyboard) since then.
+    pressed: Option<Instant>,
+}
+
+impl Press {
+    fn down(&mut self) {
+        if self.pressed.is_none() {
+            self.pressed = Some(Instant::now());
+            (self.on_key)(KeyEvent::Down);
+        }
+    }
+
+    fn up(&mut self) {
+        let Some(pressed) = self.pressed.take() else {
+            return;
+        };
+        if self.key == KeyCode::KEY_CAPSLOCK && pressed.elapsed() >= HOLD {
+            // The hold toggled Caps Lock on its way; toggle it back.
+            if let Err(e) = insert::chord(&[KeyCode::KEY_CAPSLOCK], "Caps_Lock") {
+                log::line(&format!("caps lock not restored: {e}"));
+            }
+        }
+        (self.on_key)(KeyEvent::Up);
+    }
+}
+
+struct Watcher {
+    key: KeyCode,
+    press: Press,
     devices: HashMap<PathBuf, Device>,
     /// Nodes looked at that are not keyboards, so a rescan only opens new
     /// ones.
     skipped: Vec<PathBuf>,
-    /// The key is down (on any keyboard) since then.
-    pressed: Option<Instant>,
 }
 
 impl Watcher {
@@ -147,26 +177,6 @@ impl Watcher {
         Ok(denied)
     }
 
-    fn down(&mut self) {
-        if self.pressed.is_none() {
-            self.pressed = Some(Instant::now());
-            (self.on_key)(KeyEvent::Down);
-        }
-    }
-
-    fn up(&mut self) {
-        let Some(pressed) = self.pressed.take() else {
-            return;
-        };
-        if self.key == KeyCode::KEY_CAPSLOCK && pressed.elapsed() >= HOLD {
-            // The hold toggled Caps Lock on its way; toggle it back.
-            if let Err(e) = insert::chord(&[KeyCode::KEY_CAPSLOCK], "Caps_Lock") {
-                log::line(&format!("caps lock not restored: {e}"));
-            }
-        }
-        (self.on_key)(KeyEvent::Up);
-    }
-
     /// Read what `path` has; false if the device went away.
     fn read(&mut self, path: &PathBuf) -> bool {
         let Some(device) = self.devices.get_mut(path) else {
@@ -187,8 +197,8 @@ impl Watcher {
         }
         for value in changes {
             match value {
-                1 => self.down(),
-                0 => self.up(),
+                1 => self.press.down(),
+                0 => self.press.up(),
                 _ => {}
             }
         }
@@ -199,7 +209,7 @@ impl Watcher {
         self.devices.remove(path);
         log::line(&format!("key: {} went away", path.display()));
         // A key held on a keyboard that vanished is never released.
-        self.up();
+        self.press.up();
     }
 
     fn run(mut self, stop: Arc<AtomicBool>) {
@@ -255,22 +265,23 @@ impl Hotkey {
     ) -> Result<Hotkey, String> {
         let mut watcher = Watcher {
             key,
-            on_key: Box::new(on_key),
+            press: Press {
+                key,
+                on_key: Box::new(on_key),
+                pressed: None,
+            },
             devices: HashMap::new(),
             skipped: Vec::new(),
-            pressed: None,
         };
         let denied = watcher.scan().map_err(|e| {
             format!("/dev/input: {e}; hushkey reads the key from the keyboard devices there")
         })?;
         if watcher.devices.is_empty() {
             if denied > 0 {
-                return Err(
-                    "hushkey may not read the keyboard (/dev/input/event*): add \
-                     yourself to the 'input' group (sudo usermod -aG input $USER) \
-                     and log in again"
-                        .into(),
-                );
+                if xkey::available() {
+                    return Self::from_x11(watcher.press);
+                }
+                return Err(NO_ACCESS.into());
             }
             // A Bluetooth keyboard asleep, say: the rescans find it later.
             log::line("key: no keyboard found yet; looking again every 2 s");
@@ -291,6 +302,51 @@ impl Hotkey {
             thread: Some(thread),
         })
     }
+}
+
+/// What to do when neither /dev/input nor an X server can tell the key.
+const NO_ACCESS: &str = "hushkey may not read the keyboard (/dev/input/event*): add \
+     yourself to the 'input' group (sudo usermod -aG input $USER) and log in again";
+
+impl Hotkey {
+    /// The key from the X server, for an X11 session without /dev/input.
+    fn from_x11(mut press: Press) -> Result<Hotkey, String> {
+        // X keycodes are evdev codes + 8 on every evdev-based server.
+        let keys = xkey::XKeys::open(u32::from(press.key.code()) + 8)
+            .map_err(|e| format!("{NO_ACCESS} ({e})"))?;
+        log::line("key: /dev/input is not readable; the X server reports the key");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("hushkey-hotkey".into())
+            .spawn({
+                let stop = stop.clone();
+                move || keys.run(stop, |down| if down { press.down() } else { press.up() })
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Hotkey {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+/// Whether the push-to-talk key can be read in this session: a keyboard
+/// in /dev/input is readable, or the X server reports keys.
+pub fn readable() -> Result<(), String> {
+    let readable = nodes()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| std::fs::File::open(p).is_ok());
+    if readable {
+        return Ok(());
+    }
+    if xkey::available() {
+        // Caps Lock: any key does, this only asks whether XInput 2 answers.
+        return xkey::XKeys::open(u32::from(KeyCode::KEY_CAPSLOCK.code()) + 8)
+            .map(drop)
+            .map_err(|e| format!("{NO_ACCESS} ({e})"));
+    }
+    Err(NO_ACCESS.into())
 }
 
 impl Drop for Hotkey {

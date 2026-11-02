@@ -132,6 +132,7 @@ pub fn run(after_update: bool) -> ExitCode {
         listening: None,
         listen_generation: 0,
         draining: None,
+        resume_after_drain: false,
         hearing: false,
         load_generation: 0,
         busy: false,
@@ -190,6 +191,9 @@ struct App {
     /// utterance still counts (one stopped by switching listening off
     /// does not).
     draining: Option<u64>,
+    /// Listening is to start again once the draining session has let go of
+    /// the microphone.
+    resume_after_drain: bool,
     /// Someone is speaking (between SpeechStart and SpeechEnd).
     hearing: bool,
     /// Numbers engine loads; only the newest one's result is used.
@@ -301,7 +305,17 @@ impl App {
                 // Listening needs it, and it keeps whisper from inventing
                 // text in a dictation's pauses.
                 engine.vad_model = Some(model::ensure_vad_model().map_err(|e| e.to_string())?);
-                Engine::new(engine).map(Arc::new).map_err(|e| e.to_string())
+                let engine = Engine::new(engine)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())?;
+                // Only a GPU has pipelines to build; on the CPU this would
+                // just be seconds of work.
+                if config.use_gpu
+                    && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"))
+                {
+                    warm_up(&engine);
+                }
+                Ok(engine)
             })();
             let _ = tx.send(Msg::Loaded(generation, result));
         });
@@ -424,6 +438,11 @@ impl App {
                         Event::Stopped => {
                             self.draining = None;
                             self.history.close();
+                            if std::mem::take(&mut self.resume_after_drain)
+                                && self.config.mode == Mode::Listen
+                            {
+                                self.set_listening(true);
+                            }
                         }
                         _ => {}
                     }
@@ -560,7 +579,8 @@ impl App {
                 self.config.language = code.map(str::to_string);
                 self.save(|c| c.language = code.map(str::to_string));
                 if self.listening.is_some() {
-                    // A session keeps its language: restart it.
+                    // A session keeps its language: restart it (once the
+                    // old one has stopped, see set_listening).
                     self.stop_listening(true);
                     self.set_listening(true);
                 }
@@ -636,8 +656,12 @@ impl App {
     /// without (listening switched off) it is dropped.
     fn stop_listening(&mut self, keep_last: bool) {
         if let Some(mut session) = self.listening.take() {
+            let (tx, generation) = (self.tx.clone(), self.listen_generation);
             std::thread::spawn(move || {
                 let _ = session.stop();
+                // The session says Stopped itself, unless it had ended
+                // already; a second one is ignored.
+                let _ = tx.send(Msg::Listen(generation, Event::Stopped));
             });
             if keep_last {
                 self.draining = Some(self.listen_generation);
@@ -651,6 +675,7 @@ impl App {
 
     fn set_listening(&mut self, on: bool) {
         if !on {
+            self.resume_after_drain = false;
             self.stop_listening(false);
             if self.config.mode != Mode::PushToTalk {
                 self.config.mode = Mode::PushToTalk;
@@ -669,6 +694,13 @@ impl App {
             return; // starts once the model is loaded
         };
         if self.listening.is_some() {
+            return;
+        }
+        if self.draining.is_some() {
+            // The stopping session still holds the microphone: two would
+            // capture at once, or the second fail to open it. Start once
+            // it has stopped.
+            self.resume_after_drain = true;
             return;
         }
         match self.start_listening(engine) {
@@ -787,4 +819,27 @@ fn brain(config: &Config) -> Result<Option<Box<dyn Brain>>, String> {
         max_history: 20,
         ca_cert_pem,
     })?)))
+}
+
+/// One transcription right after loading, so the first dictation does not
+/// pay for the GPU's start: a Vulkan driver without its shader cache (the
+/// first start, or after a driver update) builds its pipelines then, about
+/// 3 s on a laptop GPU. A quiet tone rather than silence, which whisper
+/// skips without running the model.
+fn warm_up(engine: &Engine) {
+    let started = Instant::now();
+    let tone: Vec<f32> = (0..2 * 16_000)
+        .map(|i| (i as f32 * 0.07).sin() * 0.02)
+        .collect();
+    let options = TranscribeOptions {
+        keep_pauses: true,
+        ..TranscribeOptions::accurate()
+    };
+    match engine.transcribe(&tone, &options) {
+        Ok(_) => log::line(&format!(
+            "model warmed up in {} ms",
+            started.elapsed().as_millis()
+        )),
+        Err(e) => log::line(&format!("warm-up failed: {e}")),
+    }
 }

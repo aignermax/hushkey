@@ -49,14 +49,57 @@ def test_the_handover_runs_logs_and_clears_the_update_marker(home, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         ran.append(cmd)
-        return subprocess.CompletedProcess(cmd, 3)
+        return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(tray.subprocess, "run", fake_run)
-    assert tray.main() == 0  # failures must not loop a service manager
+    assert tray.main() == 0
     assert ran == [tray.handover_command()]
     assert not (state / "update-pending").exists()
     log = (state / "update.log").read_text()
-    assert "handover finished rc=3" in log
+    assert "handover finished rc=0" in log
+
+
+class FakeDaemon:
+    def __init__(self):
+        self.terminated = False
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def terminate(self):
+        self.terminated = True
+
+
+def test_a_failed_handover_keeps_dictation_and_tries_again(home, monkeypatch):
+    results = iter([3, 1, 0])
+    ran, pauses, notes, daemons = [], [], [], []
+
+    def fake_run(cmd, **kwargs):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, next(results))
+
+    def fake_daemon():
+        daemons.append(FakeDaemon())
+        return daemons[-1]
+
+    monkeypatch.setattr(tray.subprocess, "run", fake_run)
+    monkeypatch.setattr(tray.time, "sleep", pauses.append)
+    monkeypatch.setattr(tray, "python_dictation", fake_daemon)
+    monkeypatch.setattr(tray, "notify", lambda *a: notes.append(a))
+    assert tray.main() == 0
+    assert len(ran) == 3
+    # Paused in between (no service-manager restart loop), told the user
+    # once, and kept one Python dictation running until the handover held.
+    assert pauses == list(tray.RETRY_PAUSES[:2])
+    assert len(notes) == 1
+    assert len(daemons) == 1 and daemons[0].terminated
+    log = (Path(tray.state_dir()) / "update.log").read_text()
+    assert "rc=3" in log and "rc=0" in log
+
+
+def test_the_python_dictation_is_only_started_where_it_is_left(home, monkeypatch):
+    monkeypatch.setattr(tray, "DIR", str(home))
+    assert tray.python_dictation() is None
 
 
 def test_the_update_helper_still_imports():

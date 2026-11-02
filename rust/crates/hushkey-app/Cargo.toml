@@ -43,7 +43,7 @@ gtk = "0.18"
 # The key from /dev/input, and a uinput keyboard for the paste chord.
 evdev = "0.13"
 arboard = { version = "3", default-features = false }
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xinput", "xtest"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

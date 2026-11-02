@@ -1,5 +1,6 @@
 //! Installing on Windows: the program in `%LOCALAPPDATA%\Programs\hushkey`,
-//! a Start Menu shortcut, and the Python hushkey switched off.
+//! a Start Menu shortcut, an entry in Settings > Apps, and the Python
+//! hushkey switched off.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,13 @@ pub fn packaged() -> bool {
     false
 }
 
+/// Whether this program can work here, so that a Python hushkey may be
+/// switched off for it. Nothing to check: the permissions it needs are
+/// asked for when it starts.
+pub fn ready() -> Result<(), String> {
+    Ok(())
+}
+
 /// Whether a Python hushkey is still set up to start itself. Only the
 /// Linux package can be installed without running `--install`, so here the
 /// handover is always complete by the time the program runs.
@@ -42,6 +50,104 @@ pub fn old_package_installed() -> bool {
 
 pub fn installed_exe() -> PathBuf {
     local_app_data().join(r"Programs\hushkey\hushkey.exe")
+}
+
+/// Settings > Apps lists per-user programs from here.
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\hushkey";
+/// The Python hushkey's Inno Setup entry (its AppId, per-user install).
+const PYTHON_UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{7F3A9C2E-4B6D-4E1A-9C5F-2D8E6A1B3F47}_is1";
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Set a string (`Some`) or number value under HKCU\`key`, creating the key.
+fn set_value(key: &str, name: &str, text: Option<&str>, number: u32) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::{
+        RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
+    };
+    let (key_w, name_w) = (wide(key), wide(name));
+    let status = match text {
+        Some(text) => {
+            let data = wide(text);
+            unsafe {
+                RegSetKeyValueW(
+                    HKEY_CURRENT_USER,
+                    key_w.as_ptr(),
+                    name_w.as_ptr(),
+                    REG_SZ,
+                    data.as_ptr().cast(),
+                    (data.len() * 2) as u32,
+                )
+            }
+        }
+        None => unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                key_w.as_ptr(),
+                name_w.as_ptr(),
+                REG_DWORD,
+                (&number as *const u32).cast(),
+                4,
+            )
+        },
+    };
+    if status == windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("registry {key}\\{name}: error {status}"))
+    }
+}
+
+/// Whether HKCU\`key` exists.
+fn key_exists(key: &str) -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+    let key_w = wide(key);
+    let mut handle: HKEY = std::ptr::null_mut();
+    let status =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key_w.as_ptr(), 0, KEY_READ, &mut handle) };
+    if status == windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        unsafe { RegCloseKey(handle) };
+        true
+    } else {
+        false
+    }
+}
+
+/// The entry in Settings > Apps: its Uninstall button runs
+/// `hushkey.exe --uninstall`.
+fn register_app(exe: &Path) -> Result<(), String> {
+    let exe_text = exe.display().to_string();
+    let dir = exe.parent().unwrap_or(exe).display().to_string();
+    let uninstall = format!("\"{exe_text}\" --uninstall");
+    for (name, value) in [
+        ("DisplayName", "hushkey"),
+        ("DisplayVersion", env!("CARGO_PKG_VERSION")),
+        ("Publisher", "hushkey"),
+        ("URLInfoAbout", "https://hushkey.eu"),
+        ("DisplayIcon", exe_text.as_str()),
+        ("InstallLocation", dir.as_str()),
+        ("UninstallString", uninstall.as_str()),
+        ("QuietUninstallString", uninstall.as_str()),
+    ] {
+        set_value(UNINSTALL_KEY, name, Some(value), 0)?;
+    }
+    set_value(UNINSTALL_KEY, "NoModify", None, 1)?;
+    set_value(UNINSTALL_KEY, "NoRepair", None, 1)?;
+    Ok(())
+}
+
+fn unregister_app() -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+    let key = wide(UNINSTALL_KEY);
+    let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+    match status {
+        windows_sys::Win32::Foundation::ERROR_SUCCESS
+        | windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND => Ok(()),
+        _ => Err(format!("registry {UNINSTALL_KEY}: error {status}")),
+    }
 }
 
 /// A program run without a console window, waited for.
@@ -103,7 +209,7 @@ pub fn register(exe: &Path) -> Result<(), String> {
     )?;
     // The development installer's entry, if any.
     let _ = std::fs::remove_file(start_menu().join("hushkey (Rust).lnk"));
-    Ok(())
+    register_app(exe)
 }
 
 /// A path inside a single-quoted PowerShell string.
@@ -113,9 +219,34 @@ fn ps_quote(path: &Path) -> String {
 
 pub fn unregister() -> Result<(), String> {
     match std::fs::remove_file(start_menu().join("hushkey.lnk")) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-        _ => Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+        _ => {}
     }
+    unregister_app()
+}
+
+/// Remove the installed program once this process, which is it, has
+/// exited: Windows cannot delete a running program, and Settings > Apps
+/// runs the installed one to uninstall.
+pub fn remove_after_exit(exe: &Path) -> Result<(), String> {
+    let dir = exe.parent().unwrap_or(exe);
+    // A few seconds for this process to end, then the file and its folder
+    // (empty by then, except copies an update moved aside).
+    let script = format!(
+        "ping -n 4 127.0.0.1 >nul & del /f /q \"{}\" \"{}\\hushkey.exe.old*\" & rmdir \"{}\"",
+        exe.display(),
+        dir.display(),
+        dir.display()
+    );
+    Command::new("cmd.exe")
+        .raw_arg(format!("/d /c {script}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("cmd.exe: {e}"))
 }
 
 /// Stop every other hushkey.exe of this user (the Python app runs as
@@ -173,6 +304,21 @@ pub fn retire_python() -> Result<(), String> {
         &["-NoProfile", "-NonInteractive", "-Command", stop],
     ) {
         problems.push(e);
+    }
+    // Its entry in Settings > Apps stays, so its files can still be
+    // removed — but under a name that says so: next to this program's own
+    // "hushkey" entry, two of the same name would look like one program
+    // installed twice. (Its uninstaller no longer touches this program,
+    // see uninstall.ps1 -Purge.)
+    if key_exists(PYTHON_UNINSTALL_KEY) {
+        if let Err(e) = set_value(
+            PYTHON_UNINSTALL_KEY,
+            "DisplayName",
+            Some("hushkey - old Python version (files only)"),
+            0,
+        ) {
+            problems.push(e);
+        }
     }
     if problems.is_empty() {
         Ok(())

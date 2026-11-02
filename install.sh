@@ -41,16 +41,19 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 if [ -z "$EXE" ]; then
-  if [ "$PRE" = 1 ]; then
-    API="https://api.github.com/repos/$REPO/releases?per_page=30"
-  else
-    API="https://api.github.com/repos/$REPO/releases/latest"
-  fi
-  # The newest listed release with this system's asset (no JSON tool needed:
-  # the download URLs name both the tag and the asset).
-  URL="$(curl -fsSL -H "User-Agent: hushkey-installer" "$API" \
+  # The newest release that carries this system's program — not simply the
+  # latest one: a release still building its files, or one from before the
+  # native program, has none, and the Python updater lands here either way.
+  # Pre-releases (a tag with a '-') only with --pre. No JSON tool needed:
+  # the download URLs name both the tag and the asset.
+  URLS="$(curl -fsSL -H "User-Agent: hushkey-installer" \
+    "https://api.github.com/repos/$REPO/releases?per_page=30" \
     | grep -o "https://github.com/$REPO/releases/download/[^\"]*/$ASSET\"" \
-    | head -n1 | tr -d '"')" || true
+    | tr -d '"')" || true
+  if [ "$PRE" != 1 ]; then
+    URLS="$(printf '%s\n' "$URLS" | grep -v "/releases/download/[^/]*-[^/]*/")" || true
+  fi
+  URL="$(printf '%s\n' "$URLS" | head -n1)"
   if [ -z "$URL" ]; then
     echo "ERROR: no release of $REPO carries $ASSET" >&2
     exit 1

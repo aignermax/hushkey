@@ -176,11 +176,19 @@ pub fn type_text(text: &str) -> Result<(), String> {
 }
 
 /// Press `keys` (evdev codes) on the uinput keyboard, or, if there is
-/// none, `keysyms` through xdotool on X11. xdotool's keys go through the
-/// X server, not the kernel, so the key watcher never sees them either.
+/// none, through the X server's XTEST extension on X11 (xdotool's
+/// `keysyms` as the last resort). Keys sent through the X server do not
+/// reach the evdev key watcher, and the X11 one ignores the XTEST device.
 pub fn chord(keys: &[KeyCode], keysyms: &str) -> Result<(), String> {
     uinput::chord(keys).or_else(|e| {
-        if !wayland() && on_path("xdotool") {
+        if wayland() || std::env::var_os("DISPLAY").is_none() {
+            return Err(e);
+        }
+        let e = match xtest_chord(keys) {
+            Ok(()) => return Ok(()),
+            Err(x) => format!("{e}; {x}"),
+        };
+        if on_path("xdotool") {
             let status = Command::new("xdotool")
                 .args(["key", keysyms])
                 .stdin(Stdio::null())
@@ -194,6 +202,44 @@ pub fn chord(keys: &[KeyCode], keysyms: &str) -> Result<(), String> {
         }
         Err(e)
     })
+}
+
+/// Press `keys` in order and release them in reverse through XTEST. X
+/// keycodes are evdev codes + 8, so these are keys by position, like the
+/// uinput keyboard's.
+fn xtest_chord(keys: &[KeyCode]) -> Result<(), String> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let x = |e: &dyn std::fmt::Display| format!("XTEST: {e}");
+    let (conn, screen) = x11rb::connect(None).map_err(|e| x(&e))?;
+    let root = conn.setup().roots[screen].root;
+    conn.xtest_get_version(2, 2)
+        .map_err(|e| x(&e))?
+        .reply()
+        .map_err(|e| x(&e))?;
+    let send = |kind: u8, key: &KeyCode| -> Result<(), String> {
+        let code = u8::try_from(key.code() + 8).map_err(|_| x(&"key out of range"))?;
+        conn.xtest_fake_input(kind, code, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .map_err(|e| x(&e))?;
+        conn.flush().map_err(|e| x(&e))?;
+        // As on the uinput keyboard: some apps miss a modifier pressed in
+        // the same instant as the key.
+        std::thread::sleep(Duration::from_millis(12));
+        Ok(())
+    };
+    for key in keys {
+        send(KEY_PRESS_EVENT, key)?;
+    }
+    for key in keys.iter().rev() {
+        send(KEY_RELEASE_EVENT, key)?;
+    }
+    // A round trip: the server has taken every key before this returns.
+    conn.get_input_focus()
+        .map_err(|e| x(&e))?
+        .reply()
+        .map_err(|e| x(&e))?;
+    Ok(())
 }
 
 /// Ctrl+V; Ctrl+Shift+V into X11 terminals (which get pasted text only

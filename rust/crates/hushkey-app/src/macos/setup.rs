@@ -31,6 +31,13 @@ pub fn packaged() -> bool {
     false
 }
 
+/// Whether this program can work here, so that a Python hushkey may be
+/// switched off for it. Nothing to check: the permissions it needs are
+/// asked for when it starts.
+pub fn ready() -> Result<(), String> {
+    Ok(())
+}
+
 /// Whether a Python hushkey is still set up to start itself. Only the
 /// Linux package can be installed without running `--install`, so here the
 /// handover is always complete by the time the program runs.

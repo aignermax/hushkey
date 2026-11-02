@@ -211,6 +211,12 @@ pub fn launch(exe: &Path, args: &[&str]) -> Result<(), String> {
     command.spawn().map(drop).map_err(err(exe))
 }
 
+/// Whether this program can work in this session, so that a Python
+/// hushkey may be switched off for it: it has to read the push-to-talk key.
+pub fn ready() -> Result<(), String> {
+    super::hotkey::readable()
+}
+
 /// Whether a Python hushkey is still set up to start itself.
 ///
 /// Its systemd unit or its autostart entry being there is enough: both
@@ -238,13 +244,20 @@ pub fn old_package_installed() -> bool {
     if !out.status.success() {
         return false;
     }
-    let version = String::from_utf8_lossy(&out.stdout);
-    // Older than what is running means the Python package. Comparing against
-    // a fixed "0.11.0" would call this very program's own package old while
-    // it is a pre-release (semver puts 0.11.0-rc.1 below 0.11.0) — and the
-    // advice that follows is to remove the hushkey package.
-    let running = crate::update::Version::current();
-    crate::update::Version::parse(version.trim()).is_some_and(|v| v < running)
+    python_package_version(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// Whether a hushkey package version is one of the Python era: 0.10.x and
+/// older. Compared by number, not with semver's `<`: that puts
+/// 0.11.0-rc.1 below 0.11.0 and would call this program's own pre-release
+/// package old — and the advice that follows is to remove the package.
+fn python_package_version(version: &str) -> bool {
+    let mut parts = version.split(['.', '-', '+', '~']);
+    let mut number = || parts.next().and_then(|p| p.parse::<u64>().ok());
+    match (number(), number()) {
+        (Some(major), Some(minor)) => (major, minor) < (0, 11),
+        _ => false,
+    }
 }
 
 /// The Python hushkey's state folder (settings, history).
@@ -331,6 +344,24 @@ mod tests {
             "\"/home/a b/50%%/hushkey\""
         );
         assert_eq!(exec_arg(Path::new("/x/$y")), "\"/x/\\\\$y\"");
+    }
+
+    #[test]
+    fn only_python_era_packages_count_as_old() {
+        for old in ["0.7.5", "0.10.10", "0.10.0~rc1", "0.1.0"] {
+            assert!(python_package_version(old), "{old}");
+        }
+        for native in [
+            "0.11.0",
+            "0.11.0~rc.1",
+            "0.11.0-rc.3",
+            "0.12.4",
+            "1.0.0",
+            "",
+            "x",
+        ] {
+            assert!(!python_package_version(native), "{native}");
+        }
     }
 
     #[test]
