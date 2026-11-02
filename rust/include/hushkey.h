@@ -154,7 +154,7 @@ typedef void (*HkEventCallback)(const HkEvent *event, void *user_data);
 
 // An answer from the host's own brain.
 //
-// The host fills this in during `HkBrainReplyCallback`. Its strings must
+// The host fills this in during [`HkBrainReplyCallback`]. Its strings must
 // stay valid until that brain is asked again or the session ends,
 // whichever comes first — hushkey copies what it needs before returning.
 typedef struct {
@@ -172,8 +172,7 @@ typedef struct {
 // Answers an utterance. Called on hushkey's brain thread, one call at a
 // time, never from the thread that started the session — the host must
 // not assume its own main thread here.
-typedef void (*HkBrainReplyCallback)(const char *utterance,
-                                     HkBrainAnswer *answer, void *user_data);
+typedef void (*HkBrainReplyCallback)(const char *utterance, HkBrainAnswer *answer, void *user_data);
 
 // Settings for `hk_listen_start`. Initialize with `hk_listen_config_init`.
 typedef struct {
