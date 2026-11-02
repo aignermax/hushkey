@@ -162,13 +162,17 @@
   <div class="card">
     <div class="os">macOS</div>
     <p class="note">Apple Silicon. For an Intel Mac, pick the x86_64 build
-    from the release page.</p>
+    from the release page. First start: <strong>right-click the app and
+    choose Open</strong> — see below.</p>
     <a class="btn" id="dl-macos"
        href="https://github.com/aignermax/hushkey/releases/latest">Download for macOS</a>
   </div>
 </div>
 
-<p class="alt">Prefer a one-liner?
+<p class="alt">On macOS and Linux the one-liner saves a step (it clears
+macOS' quarantine flag and sets up input access on Linux):</p>
+
+<p class="alt">
 <code>curl -fsSL https://raw.githubusercontent.com/aignermax/hushkey/master/install.sh | bash</code><br>
 Or see <a href="https://github.com/aignermax/hushkey/releases/latest">every file in the latest release</a>,
 checksums included.</p>
@@ -261,6 +265,17 @@ what hushkey is tested with most.</p>
 <h3>Can I change the key?</h3>
 <p>Yes, in the tray menu. Caps Lock is the default because few people miss
 it; Right Alt, Right Ctrl and Scroll Lock are offered too.</p>
+
+<h3>macOS says the app cannot be opened — what now?</h3>
+<p>macOS quarantines anything downloaded from a browser, and hushkey is not
+signed with an Apple developer certificate. On the first start, right-click
+(or Control-click) hushkey in Finder and choose <strong>Open</strong>, then
+confirm — after that it opens normally. The one-line install below avoids
+this, because it clears the quarantine flag itself.</p>
+
+<p>macOS will then ask for <strong>Microphone</strong> and
+<strong>Accessibility</strong> access. Both are needed: one to hear you, the
+other to see your key and type for you.</p>
 
 <h3>How do I remove it?</h3>
 <p>Windows: through the app list. Linux: <code>sudo apt remove hushkey</code>,
