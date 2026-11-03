@@ -9,6 +9,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The `wl-copy` that owns the clipboard, as far as hushkey knows.
 static WL_COPY: Mutex<Option<Child>> = Mutex::new(None);
+/// The `wl-copy --primary` that owns the primary selection.
+static WL_COPY_PRIMARY: Mutex<Option<Child>> = Mutex::new(None);
 /// The X11 clipboard; kept for the process's life, as it serves the text.
 static X11: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
@@ -40,16 +43,26 @@ fn with_x11<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, String>) -> 
 /// The clipboard's text, if it holds text.
 pub fn read_text() -> Option<String> {
     if use_wl_clipboard() {
-        wl_paste()
+        wl_paste(false)
     } else {
         with_x11(|c| c.get_text().map_err(|e| e.to_string())).ok()
     }
 }
 
-fn wl_paste() -> Option<String> {
+/// The primary selection's text (what middle click and terminals'
+/// Shift+Insert paste). Wayland with wl-clipboard only.
+pub fn read_primary() -> Option<String> {
+    use_wl_clipboard().then(|| wl_paste(true)).flatten()
+}
+
+fn wl_paste(primary: bool) -> Option<String> {
     // Text only: an image restored as text would be garbage.
+    let mut args = vec!["--no-newline", "--type", "text/plain"];
+    if primary {
+        args.push("--primary");
+    }
     let mut child = Command::new("wl-paste")
-        .args(["--no-newline", "--type", "text/plain"])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -84,14 +97,39 @@ fn wl_paste() -> Option<String> {
 /// copied.
 pub fn write_text(text: &str) -> Result<(), String> {
     if use_wl_clipboard() {
-        wl_copy(text)
+        wl_copy(text, false)
     } else {
         with_x11(|c| c.set_text(text).map_err(|e| format!("clipboard: {e}")))
     }
 }
 
-fn wl_copy(text: &str) -> Result<(), String> {
-    let mut owner = WL_COPY.lock().unwrap();
+/// Set once `wl-copy --primary` failed (it exits at once where the
+/// compositor has no primary selection), so that later pastes skip it:
+/// asking again would only cost each paste time.
+static NO_PRIMARY: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`write_primary`] can work: Wayland with wl-clipboard, on a
+/// compositor that has a primary selection (as far as is known yet).
+pub fn primary_available() -> bool {
+    use_wl_clipboard() && !NO_PRIMARY.load(Ordering::Relaxed)
+}
+
+/// Put `text` in the primary selection. Wayland with wl-clipboard only;
+/// fails where the compositor has no primary selection.
+pub fn write_primary(text: &str) -> Result<(), String> {
+    if !primary_available() {
+        return Err("no primary selection".into());
+    }
+    let written = wl_copy(text, true);
+    if written.is_err() {
+        NO_PRIMARY.store(true, Ordering::Relaxed);
+    }
+    written
+}
+
+fn wl_copy(text: &str, primary: bool) -> Result<(), String> {
+    let owner = if primary { &WL_COPY_PRIMARY } else { &WL_COPY };
+    let mut owner = owner.lock().unwrap();
     // The previous one exits by itself once the new one owns the
     // clipboard; reap it if it already has, never signal it.
     if let Some(mut previous) = owner.take() {
@@ -107,6 +145,7 @@ fn wl_copy(text: &str) -> Result<(), String> {
             // This process stays the owner (not a fork), so whether it
             // still is can be seen.
             .args(["--foreground", "--type", "text/plain"])
+            .args(primary.then_some("--primary"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -123,8 +162,13 @@ fn wl_copy(text: &str) -> Result<(), String> {
     drop(stdin);
     std::thread::sleep(HANDOFF);
     if let Ok(Some(status)) = child.try_wait() {
+        let what = if primary {
+            "primary selection"
+        } else {
+            "clipboard"
+        };
         return Err(format!(
-            "wl-copy exited at once ({status}): the text is not on the clipboard"
+            "wl-copy exited at once ({status}): the text is not in the {what}"
         ));
     }
     *owner = Some(child);
@@ -135,15 +179,26 @@ fn wl_copy(text: &str) -> Result<(), String> {
 /// (nothing was copied over it since).
 pub fn holds(text: &str) -> bool {
     if use_wl_clipboard() {
-        // wl-copy exits when it loses the clipboard.
-        WL_COPY
-            .lock()
-            .unwrap()
-            .as_mut()
-            .is_some_and(|c| c.try_wait().ok().flatten().is_none())
+        wl_owns(&WL_COPY)
     } else {
         with_x11(|c| c.get_text().map_err(|e| e.to_string())).is_ok_and(|t| t == text)
     }
+}
+
+/// Whether the primary selection still holds what [`write_primary`] put
+/// there.
+pub fn holds_primary() -> bool {
+    use_wl_clipboard() && wl_owns(&WL_COPY_PRIMARY)
+}
+
+/// Whether hushkey's `wl-copy` still runs: it exits when it loses its
+/// selection.
+fn wl_owns(owner: &Mutex<Option<Child>>) -> bool {
+    owner
+        .lock()
+        .unwrap()
+        .as_mut()
+        .is_some_and(|c| c.try_wait().ok().flatten().is_none())
 }
 
 #[cfg(test)]
