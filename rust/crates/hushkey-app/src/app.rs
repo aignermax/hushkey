@@ -41,6 +41,8 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
 /// How long a notice ("copied …") stays in the overlay.
 const NOTICE: Duration = Duration::from_secs(2);
+/// A failure to act on stays longer.
+const FAILURE_NOTICE: Duration = Duration::from_secs(8);
 /// Updates are looked for at start and then this often.
 const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -63,8 +65,12 @@ enum Msg {
     Inserted(Result<Restore, String>),
     /// An update check found this (`.1`: asked for from the menu).
     UpdateChecked(Result<Option<Release>, String>, bool),
-    /// An update was put in place: the program to start, or why not.
-    UpdateInstalled(Result<std::path::PathBuf, String>),
+    /// An update was put in place: the program to start (`None`: the
+    /// password dialog was dismissed), or why not.
+    UpdateInstalled(Result<Option<std::path::PathBuf>, String>),
+    /// The Python hushkey's leftovers were removed (`false`: the password
+    /// dialog was dismissed), or why not.
+    OldRemoved(Result<bool, String>),
 }
 
 pub fn run(after_update: bool) -> ExitCode {
@@ -78,7 +84,7 @@ pub fn run(after_update: bool) -> ExitCode {
             std::thread::sleep(Duration::from_millis(200));
             running = platform::already_running();
         }
-        platform::setup::clean_after_update();
+        crate::setup::after_update();
         log::line(&format!("updated to {}", env!("CARGO_PKG_VERSION")));
     }
     // Asked once more it would find our own lock (Windows, Linux).
@@ -98,7 +104,8 @@ pub fn run(after_update: bool) -> ExitCode {
         Ok(h) => h,
         Err(e) => return platform::fatal(&e),
     };
-    let mut tray = match Tray::new(s, &config, autostart::enabled()) {
+    let old_version = crate::setup::python_leftovers();
+    let mut tray = match Tray::new(s, &config, autostart::enabled(), old_version) {
         Ok(t) => t,
         Err(e) => return platform::fatal(&e),
     };
@@ -139,6 +146,7 @@ pub fn run(after_update: bool) -> ExitCode {
         notice_until: None,
         update: None,
         updating: false,
+        removing_old: false,
         quit_requested: false,
         next_update_check: Instant::now() + Duration::from_secs(30),
     };
@@ -206,6 +214,8 @@ struct App {
     update: Option<Release>,
     /// An update is being downloaded and put in place.
     updating: bool,
+    /// The Python hushkey's leftovers are being removed.
+    removing_old: bool,
     /// The updated program is starting; this one goes.
     quit_requested: bool,
     next_update_check: Instant,
@@ -411,7 +421,14 @@ impl App {
                     }
                 }
             },
-            Msg::UpdateInstalled(Ok(exe)) => {
+            Msg::UpdateInstalled(Ok(None)) => {
+                log::line("update cancelled at the password dialog");
+                self.updating = false;
+                // Replaces "installing the update …", which has no end.
+                self.notice(GREY, self.s.update_cancelled);
+                self.idle();
+            }
+            Msg::UpdateInstalled(Ok(Some(exe))) => {
                 log::line(&format!("update in place, restarting: {}", exe.display()));
                 match platform::setup::launch(&exe, &["--after-update"]) {
                     Ok(()) => self.quit_requested = true,
@@ -426,8 +443,43 @@ impl App {
             Msg::UpdateInstalled(Err(e)) => {
                 log::line(&format!("update failed: {e}"));
                 self.updating = false;
-                self.notice(GREY, self.s.update_failed);
+                let text = if e.starts_with(crate::setup::PACKAGE_BUSY) {
+                    self.s.package_busy
+                } else {
+                    self.s.update_failed
+                };
+                self.failure_notice(text);
                 self.idle();
+            }
+            Msg::OldRemoved(result) => {
+                self.removing_old = false;
+                match result {
+                    Ok(true) => {
+                        log::line("the old version is removed");
+                        self.tray.old_version_removed();
+                        self.notice(GREY, self.s.removed_old);
+                    }
+                    Ok(false) => {
+                        // Dismissed; the entry stays for later.
+                        self.tray.old_version_busy(false);
+                        self.overlay.hide();
+                    }
+                    Err(e) => {
+                        log::line(&format!("removing the old version: {e}"));
+                        let text = if e.contains(crate::setup::PACKAGE_BUSY) {
+                            self.s.package_busy
+                        } else {
+                            self.s.remove_old_failed
+                        };
+                        self.failure_notice(text);
+                        // What could go did; the entry stays only for the rest.
+                        if crate::setup::python_leftovers() {
+                            self.tray.old_version_busy(false);
+                        } else {
+                            self.tray.old_version_removed();
+                        }
+                    }
+                }
             }
             Msg::Listen(generation, event) => {
                 if generation == self.listen_generation && self.listening.is_some() {
@@ -454,6 +506,13 @@ impl App {
     fn notice(&mut self, colour: [u8; 3], text: &str) {
         self.overlay.show(colour, text);
         self.notice_until = Some(Instant::now() + NOTICE);
+    }
+
+    /// A notice that something did not work, long enough to be read; the
+    /// details are in the log.
+    fn failure_notice(&mut self, text: &str) {
+        self.overlay.show(GREY, text);
+        self.notice_until = Some(Instant::now() + FAILURE_NOTICE);
     }
 
     fn idle(&mut self) {
@@ -611,16 +670,28 @@ impl App {
                 Some(_) => {}
                 None => self.check_update(true),
             },
+            Action::RemoveOld if !self.removing_old => {
+                self.removing_old = true;
+                // The entry says so while it runs (that can take minutes),
+                // and cannot be picked twice.
+                self.tray.old_version_busy(true);
+                self.notice(GREY, self.s.removing_old);
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::OldRemoved(crate::setup::remove_python()));
+                });
+            }
+            Action::RemoveOld => {}
             Action::Quit => {}
         }
         self.tray.sync(&self.config, autostart::enabled());
     }
 
     fn check_update(&self, asked: bool) {
-        // A packaged install is updated with the package manager; offering
-        // to replace /usr/bin/hushkey would fail, and silently diverge from
-        // what dpkg has on record if it did not.
-        if platform::setup::packaged() {
+        // A program some other package manager put in /usr is that one's
+        // to update (hushkey's own .deb updates through apt, see
+        // update::install).
+        if !platform::setup::updates_itself() {
             let _ = self.tx.send(Msg::UpdateChecked(Ok(None), asked));
             return;
         }

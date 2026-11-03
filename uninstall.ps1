@@ -29,7 +29,10 @@ if ($Purge) {
     $menu = Join-Path ([Environment]::GetFolderPath("Programs")) "hushkey.lnk"
     if (Test-Path $menu) {
         $target = (New-Object -ComObject WScript.Shell).CreateShortcut($menu).TargetPath
-        if ($target -and $target.StartsWith($PSScriptRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        # The oldest installers used the native program's own folder: its
+        # hushkey.exe there is not ours to take.
+        if ($target -and $target.StartsWith($PSScriptRoot, [StringComparison]::OrdinalIgnoreCase) `
+                -and -not $target.EndsWith("hushkey.exe", [StringComparison]::OrdinalIgnoreCase)) {
             Remove-Item $menu -Force -ErrorAction SilentlyContinue
         }
     }

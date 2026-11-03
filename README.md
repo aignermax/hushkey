@@ -70,8 +70,12 @@ them.
 
 **Coming from the Python hushkey (whisper-ptt)?** Nothing to do: its updater
 offers this version, and installing it moves you over, keeping your model,
-key, language and recent dictations. The Python app is switched off; its
-folder stays and can be deleted.
+key, language and recent dictations. The Python app is switched off; what it
+leaves behind (its folder with a Python environment of 2–3 GB, its engines,
+and on Linux its .deb, on Windows its entry in Settings › Apps) goes with one
+click on *Remove the old hushkey version* in the tray menu, which is there
+only while something is left. Removing the old .deb asks for your password in
+the usual system dialog.
 
 ## Use
 
@@ -96,7 +100,8 @@ login**, **logs**, and **updates**.
 hushkey looks for a newer release at start and every four hours and offers it
 in the tray menu (*Install update: v…*); nothing installs unasked. Installing
 downloads the new program, checks it against the release's `SHA256SUMS`,
-swaps it in and restarts. While you run a pre-release, newer pre-releases are
+swaps it in and restarts. Installed from the `.deb`, the update is the next
+`.deb`, installed through apt after the system's password dialog. While you run a pre-release, newer pre-releases are
 offered too; `"updates": "pre"` or `"off"` in `config.json` changes that.
 
 ## Advanced settings

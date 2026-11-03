@@ -46,9 +46,52 @@ pub fn python_still_autostarts() -> bool {
 }
 
 /// Whether a Python-era hushkey package is still registered. Only Linux
-/// ever had one.
-pub fn old_package_installed() -> bool {
+/// and Windows ever had one.
+pub fn python_package() -> bool {
     false
+}
+
+pub fn remove_python_package() -> Result<bool, String> {
+    Ok(true)
+}
+
+pub const PYTHON_PACKAGE_BY_HAND: &str = "";
+
+/// Folders the Python hushkey may have shared with other files: none here.
+pub fn python_shared_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Where the Python hushkey's install.sh put it: its sources and its
+/// Python environment.
+pub fn python_install_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/share"))
+        .join("whisper-ptt")
+}
+
+/// The Python hushkey's own data folder: the engines it downloaded and
+/// `acceleration.json`. Nothing of this program's is in it.
+pub fn python_data_dir() -> PathBuf {
+    home().join("Library/Application Support/hushkey")
+}
+
+/// Updates always install here: the app is in the user's folder.
+pub fn updates_itself() -> bool {
+    true
+}
+
+/// Whether `name` is the release asset an update installs here.
+pub fn update_asset(name: &str) -> bool {
+    name == ASSET
+}
+
+/// Put a downloaded and checked update in place (`_sha256`: checked
+/// already, and the file is the user's own).
+pub fn install_update(file: &Path, _sha256: &str) -> Result<Option<PathBuf>, String> {
+    place(file).map(Some)
 }
 
 pub fn installed_exe() -> PathBuf {

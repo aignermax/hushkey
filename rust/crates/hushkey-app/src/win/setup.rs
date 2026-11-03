@@ -42,10 +42,100 @@ pub fn python_still_autostarts() -> bool {
     false
 }
 
-/// Whether a Python-era hushkey package is still registered. Only Linux
-/// ever had one.
-pub fn old_package_installed() -> bool {
-    false
+/// Whether the Python hushkey's own entry in Settings > Apps is still
+/// there (its Inno Setup install, per user).
+pub fn python_package() -> bool {
+    key_exists(PYTHON_UNINSTALL_KEY)
+}
+
+/// Run the Python hushkey's uninstaller, without a window or questions:
+/// it stops the Python processes, removes its Python environment
+/// (uninstall.ps1 -Purge) and its files, and its entry in Settings > Apps.
+/// It needs no administrator: the install was per user. Never `Ok(false)`
+/// here — nothing asks.
+pub fn remove_python_package() -> Result<bool, String> {
+    let command = get_string(PYTHON_UNINSTALL_KEY, "UninstallString").unwrap_or_default();
+    let uninstaller = PathBuf::from(command.trim().trim_matches('"'));
+    if command.trim().is_empty() || !uninstaller.is_file() {
+        // Its folder was deleted by hand (the README said it could be):
+        // only the entry is left, and nothing can run it.
+        delete_key(PYTHON_UNINSTALL_KEY)?;
+        crate::log::line("the old version's uninstaller was gone; its entry is removed");
+        return Ok(true);
+    }
+    let status = Command::new(&uninstaller)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("{}: {e}", uninstaller.display()))?;
+    if !status.success() {
+        return Err(format!("{}: {status}", uninstaller.display()));
+    }
+    // Inno's uninstaller hands the work to a copy of itself in %TEMP% and
+    // returns before it is done; removing a Python environment of some
+    // GB, with a virus scanner looking at every file, takes minutes. Its
+    // entry goes when it is done.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    while key_exists(PYTHON_UNINSTALL_KEY) {
+        if std::time::Instant::now() > deadline {
+            return Err("the old version's uninstaller is still running; try again later".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // The oldest installers used this program's own folder, and an
+    // uninstall.ps1 of then took the Start Menu entry along: put this
+    // program's entries back.
+    let installed = installed_exe();
+    if installed.is_file() {
+        if let Err(e) = register(&installed) {
+            crate::log::line(&format!("menu entry not restored: {e}"));
+        }
+    }
+    Ok(true)
+}
+
+/// How to remove the Python hushkey's entry without hushkey.
+pub const PYTHON_PACKAGE_BY_HAND: &str =
+    "Settings > Apps > \"hushkey - old Python version (files only)\" > Uninstall";
+
+/// Where the Python hushkey's installer put it.
+pub fn python_install_dir() -> PathBuf {
+    local_app_data().join(r"Programs\whisper-ptt")
+}
+
+/// Folders the Python hushkey may have lived in next to someone else's
+/// files: the oldest installers (0.3, 0.4) used this program's own
+/// folder. Only a Python environment in them is the Python hushkey's.
+pub fn python_shared_dirs() -> Vec<PathBuf> {
+    installed_exe()
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect()
+}
+
+/// The Python hushkey's own data folder: the GPU engines it downloaded
+/// and `acceleration.json`. This program's models are in it too
+/// (`models`), and stay.
+pub fn python_data_dir() -> PathBuf {
+    local_app_data().join("hushkey")
+}
+
+/// Updates always install here: the program is in the user's folder.
+pub fn updates_itself() -> bool {
+    true
+}
+
+/// Whether `name` is the release asset an update installs here.
+pub fn update_asset(name: &str) -> bool {
+    name == ASSET
+}
+
+/// Put a downloaded and checked update in place (`_sha256`: checked
+/// already, and the file is the user's own).
+pub fn install_update(file: &Path, _sha256: &str) -> Result<Option<PathBuf>, String> {
+    place(file).map(Some)
 }
 
 pub fn installed_exe() -> PathBuf {
@@ -99,6 +189,44 @@ fn set_value(key: &str, name: &str, text: Option<&str>, number: u32) -> Result<(
     }
 }
 
+/// A string value under HKCU\`key`.
+fn get_string(key: &str, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let (key_w, name_w) = (wide(key), wide(name));
+    let mut size: u32 = 0;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key_w.as_ptr(),
+            name_w.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if status != windows_sys::Win32::Foundation::ERROR_SUCCESS || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key_w.as_ptr(),
+            name_w.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
 /// Whether HKCU\`key` exists.
 fn key_exists(key: &str) -> bool {
     use windows_sys::Win32::System::Registry::{
@@ -140,13 +268,18 @@ fn register_app(exe: &Path) -> Result<(), String> {
 }
 
 fn unregister_app() -> Result<(), String> {
+    delete_key(UNINSTALL_KEY)
+}
+
+/// HKCU\`key` and everything under it gone (fine if it was not there).
+fn delete_key(key: &str) -> Result<(), String> {
     use windows_sys::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
-    let key = wide(UNINSTALL_KEY);
-    let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+    let key_w = wide(key);
+    let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key_w.as_ptr()) };
     match status {
         windows_sys::Win32::Foundation::ERROR_SUCCESS
         | windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND => Ok(()),
-        _ => Err(format!("registry {UNINSTALL_KEY}: error {status}")),
+        _ => Err(format!("registry {key}: error {status}")),
     }
 }
 
@@ -195,13 +328,17 @@ pub fn place(source: &Path) -> Result<PathBuf, String> {
 pub fn register(exe: &Path) -> Result<(), String> {
     let link = start_menu().join("hushkey.lnk");
     // Shortcuts are COM objects; PowerShell's WScript.Shell is the short way.
+    // CreateShortcut opens one that exists: the Python app's had tray.py as
+    // its argument and its own icon, neither of which may survive.
     let script = format!(
         "$l = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \
          $l.TargetPath = '{}'; $l.WorkingDirectory = '{}'; \
+         $l.Arguments = ''; $l.IconLocation = '{},0'; \
          $l.Description = 'Local push-to-talk dictation'; $l.Save()",
         ps_quote(&link),
         ps_quote(exe),
         ps_quote(exe.parent().unwrap_or(exe)),
+        ps_quote(exe),
     );
     quiet(
         "powershell.exe",

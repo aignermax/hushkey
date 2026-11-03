@@ -30,6 +30,12 @@ pub struct Strings {
     pub update_running: &'static str,
     pub up_to_date: &'static str,
     pub update_failed: &'static str,
+    pub remove_old: &'static str,
+    pub removing_old: &'static str,
+    pub removed_old: &'static str,
+    pub remove_old_failed: &'static str,
+    pub update_cancelled: &'static str,
+    pub package_busy: &'static str,
 }
 
 /// "Start with Windows" and the like, per system.
@@ -94,6 +100,12 @@ pub const EN: Strings = Strings {
     update_running: "installing the update …",
     up_to_date: "hushkey is up to date",
     update_failed: "update failed",
+    remove_old: "Remove the old hushkey version",
+    removing_old: "removing the old version …",
+    removed_old: "the old version is removed",
+    remove_old_failed: "the old version is not fully removed — see the logs",
+    update_cancelled: "update cancelled",
+    package_busy: "the package manager is busy — try again in a few minutes",
 };
 
 pub const DE: Strings = Strings {
@@ -125,6 +137,12 @@ pub const DE: Strings = Strings {
     update_running: "das Update wird installiert …",
     up_to_date: "hushkey ist aktuell",
     update_failed: "Update fehlgeschlagen",
+    remove_old: "Alte hushkey-Version entfernen",
+    removing_old: "die alte Version wird entfernt …",
+    removed_old: "die alte Version ist entfernt",
+    remove_old_failed: "die alte Version ist nicht ganz entfernt — siehe Logs",
+    update_cancelled: "Update abgebrochen",
+    package_busy: "die Paketverwaltung ist beschäftigt — in ein paar Minuten nochmal versuchen",
 };
 
 /// (model name, download size) for the Model menu, as in the Python app.
