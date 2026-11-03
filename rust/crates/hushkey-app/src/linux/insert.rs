@@ -14,6 +14,7 @@ use evdev::KeyCode;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, Window};
 
 use super::{clipboard, on_path, selection, uinput, wayland};
+use crate::log;
 
 /// How long the target's clipboard requests must stay quiet for the paste
 /// to count as finished. On X11 this follows an observed fetch rather than
@@ -367,16 +368,58 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
         }
         return Err(e);
     }
-    if let Err(e) = paste_chord() {
+    // Wayland does not say which window has the focus, and terminals take
+    // no Ctrl+V. Shift+Insert pastes in both: GTK, Qt, browsers and editors
+    // read the clipboard, terminals (VTE, kitty, foot, Alacritty) the
+    // primary selection. So the dictation goes into both.
+    // Some(previous primary text) once the dictation is in it.
+    let primary = wayland().then(|| {
+        let previous = if restore {
+            clipboard::read_primary()
+        } else {
+            None
+        };
+        match clipboard::write_primary(text) {
+            Ok(()) => Some(previous),
+            Err(e) => {
+                log::line(&format!("{e}; pasting with Ctrl+V"));
+                None
+            }
+        }
+    });
+    let primary = primary.flatten();
+    let pasted = if primary.is_some() {
+        chord(
+            &[KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_INSERT],
+            "shift+Insert",
+        )
+    } else {
+        paste_chord()
+    };
+    let previous_primary = primary.flatten();
+    if let Err(e) = pasted {
         if let Some(previous) = &previous {
             let _ = clipboard::write_text(previous);
         }
+        if let Some(previous) = &previous_primary {
+            let _ = clipboard::write_primary(previous);
+        }
         return Err(e);
     }
-    let Some(previous) = previous else {
+    if previous.is_none() && previous_primary.is_none() {
         return Ok(Restore::Nothing); // the dictation stays pasteable
-    };
+    }
     std::thread::sleep(SETTLE);
+    if let Some(previous) = &previous_primary {
+        if clipboard::holds_primary() {
+            if let Err(e) = clipboard::write_primary(previous) {
+                log::line(&format!("primary selection not restored: {e}"));
+            }
+        }
+    }
+    let Some(previous) = previous else {
+        return Ok(Restore::Nothing);
+    };
     if !clipboard::holds(text) {
         return Ok(Restore::CopiedOver);
     }
@@ -445,6 +488,18 @@ mod tests {
         worker.join().unwrap();
         pump(300);
         entry.text().to_string()
+    }
+
+    /// Wayland gives no way to focus a window from here: start one that
+    /// takes keys (a terminal, a text field) first, so it has the focus.
+    #[test]
+    #[ignore = "Wayland only, needs wl-clipboard; pastes into the focused window"]
+    fn wayland_pastes_and_restores_both_selections() {
+        clipboard::write_text("before").unwrap();
+        clipboard::write_primary("primary before").unwrap();
+        assert_eq!(paste("grüße 你好", true), Ok(Restore::Restored));
+        assert_eq!(clipboard::read_text().as_deref(), Some("before"));
+        assert_eq!(clipboard::read_primary().as_deref(), Some("primary before"));
     }
 
     #[test]
