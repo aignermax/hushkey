@@ -255,14 +255,10 @@ pub fn python_package() -> bool {
 
 /// Run `args` as root, the password asked for in the desktop's own
 /// dialog (polkit's `pkexec`); what they print goes to the log. `what`
-/// names the step in an error. `Ok(false)`: the user dismissed the
-/// dialog, and nothing ran.
-fn as_root(what: &str, args: &[&str]) -> Result<bool, String> {
-    let out = match Command::new("pkexec")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-    {
+/// names the step in an error; `input` is what they read (pkexec passes
+/// it on). `Ok(false)`: the user dismissed the dialog, and nothing ran.
+fn as_root(what: &str, args: &[&str], input: Stdio) -> Result<bool, String> {
+    let out = match Command::new("pkexec").args(args).stdin(input).output() {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(format!(
@@ -308,8 +304,10 @@ fn as_root(what: &str, args: &[&str]) -> Result<bool, String> {
 /// put back, also when the removal fails after the postrm ran. apt waits
 /// for a package manager that is busy (unattended upgrades after boot);
 /// dpkg alone is the way out where apt has other packages to complain
-/// about.
+/// about. `LC_ALL=C`: pkexec keeps the user's language, and
+/// [`as_root`] tells a busy package manager by apt's English words.
 const REMOVE_PYTHON_PACKAGE: &str = r#"set -e
+export LC_ALL=C
 version="$(dpkg-query -W -f='${Version}' hushkey 2>/dev/null)" || exit 0
 case "$version" in
     0.[0-9]|0.[0-9][.~+-]*|0.10|0.10[.~+-]*) ;;
@@ -346,6 +344,7 @@ pub fn remove_python_package() -> Result<bool, String> {
     as_root(
         "removing the old hushkey package",
         &["/bin/sh", "-c", REMOVE_PYTHON_PACKAGE],
+        Stdio::null(),
     )
 }
 
@@ -396,37 +395,36 @@ pub fn install_update(file: &Path, sha256: &str) -> Result<Option<PathBuf>, Stri
     if !packaged() {
         return place(file).map(Some);
     }
-    let path = file.to_str().ok_or("the update's path is not UTF-8")?;
+    // Root reads the file hushkey opened, not its path: what is at the
+    // path may be swapped once hushkey has checked it.
+    let opened = std::fs::File::open(file).map_err(err(file))?;
     let installed = as_root(
         "installing the update",
-        &[
-            "/bin/sh",
-            "-c",
-            INSTALL_PACKAGE,
-            "hushkey-update",
-            path,
-            sha256,
-        ],
+        &["/bin/sh", "-c", INSTALL_PACKAGE, "hushkey-update", sha256],
+        Stdio::from(opened),
     )?;
     Ok(installed.then(|| PathBuf::from("/usr/bin/hushkey")))
 }
 
-/// As root: the downloaded .deb (`$1`) installed if its hash is `$2`.
-/// The download sits in the user's folder, where anything the user runs
-/// could swap it after hushkey checked it — so root first copies it where
-/// only root can write and checks the copy. apt rather than dpkg: it also
-/// installs a library a new version may need, and waits for a busy
-/// package manager.
+/// As root: the .deb on standard input installed if its hash is `$1`.
+/// The download is the user's file, which anything the user runs could
+/// rewrite after hushkey checked it: root copies what it reads — at most
+/// the largest asset hushkey accepts — where only root can write, checks
+/// the copy, and removes it on every way out. apt rather than dpkg: it
+/// also installs a library a new version may need, and waits for a busy
+/// package manager. `LC_ALL=C`: see [`REMOVE_PYTHON_PACKAGE`].
 const INSTALL_PACKAGE: &str = r#"set -e
+export LC_ALL=C
+umask 077
 dir=/var/cache/hushkey
 mkdir -p "$dir"
 chmod 0755 "$dir"
 deb="$dir/update.deb"
+trap 'rm -f "$deb"' EXIT
 rm -f "$deb"
-install -m 0600 "$1" "$deb"
+head -c 536870913 > "$deb"
 actual="$(sha256sum "$deb" | cut -d' ' -f1)"
-if [ -z "$2" ] || [ "$actual" != "$2" ]; then
-    rm -f "$deb"
+if [ -z "$1" ] || [ "$actual" != "$1" ]; then
     echo "the update changed after it was checked; not installed" >&2
     exit 5
 fi
@@ -437,7 +435,6 @@ if command -v apt-get >/dev/null 2>&1; then
 else
     dpkg -i "$deb" || status=$?
 fi
-rm -f "$deb"
 exit "$status"
 "#;
 
@@ -777,7 +774,8 @@ mod tests {
             std::fs::write(&deb, "a package").unwrap();
             let script = INSTALL_PACKAGE.replace("/var/cache/hushkey", cache.to_str().unwrap());
             let status = Command::new("/bin/sh")
-                .args(["-c", &script, "hushkey-update", deb.to_str().unwrap(), hash])
+                .args(["-c", &script, "hushkey-update", hash])
+                .stdin(std::fs::File::open(&deb).unwrap())
                 .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
                 .env("STUB_LOG", dir.join("log"))
                 .status()
@@ -808,6 +806,9 @@ mod tests {
             let (code, ran, left, _) = run("deb-bad", wrong);
             assert_eq!((code, ran.as_str(), left), (5, "", false), "{wrong:?}");
         }
+        // Root reads no more than hushkey would have downloaded.
+        let bound = format!("head -c {} ", crate::update::MAX_ASSET + 1);
+        assert!(INSTALL_PACKAGE.contains(&bound), "{bound}");
     }
 
     #[test]

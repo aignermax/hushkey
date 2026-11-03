@@ -19,7 +19,7 @@ use crate::platform::setup;
 const RELEASES: &str = "https://api.github.com/repos/aignermax/hushkey/releases?per_page=30";
 const SUMS: &str = "SHA256SUMS";
 /// The largest asset accepted (the Windows Vulkan build is ~60 MB).
-const MAX_ASSET: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_ASSET: u64 = 512 * 1024 * 1024;
 
 /// A semantic version: numbers, then an optional pre-release (`rc.2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +254,10 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
         ));
     }
     let installed = setup::install_update(&file, &expected);
-    if installed.is_err() {
+    // Kept for installing by hand after a failure — only while it is
+    // still what was checked.
+    let still_checked = sha256_file(&file).is_ok_and(|hash| hash == expected);
+    if installed.is_err() && still_checked {
         crate::log::line(&format!("the checked download stays at {}", file.display()));
     } else {
         let _ = std::fs::remove_file(&file);
