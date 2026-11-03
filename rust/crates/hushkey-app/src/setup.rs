@@ -292,14 +292,90 @@ pub fn complete_python_handover() {
         log::line(&format!("the Python hushkey not fully switched off: {e}"));
     }
     // Its .deb, if it was installed that way, is the package manager's to
-    // remove: it still owns /opt/hushkey and a menu entry that now starts
-    // nothing. Said here too, for anyone reading the log after the fact.
-    if setup::old_package_installed() {
+    // remove, which takes the password: that waits for the user to pick
+    // it from the menu (see python_leftovers).
+    if setup::python_package() {
         log::line(
             "the old hushkey package is still installed; \
-             remove it with: sudo apt remove hushkey",
+             the menu offers to remove it",
         );
     }
+}
+
+/// Whether the Python hushkey left something behind that the menu should
+/// offer to remove: once it is switched off, its package (Linux .deb,
+/// Windows entry in Settings > Apps), its folder with a Python environment
+/// of some 2–3 GB, and the GPU engines it downloaded. Its settings and
+/// history (small, already taken over) stay.
+pub fn python_leftovers() -> bool {
+    !setup::python_still_autostarts() && (setup::python_package() || !python_files().is_empty())
+}
+
+/// Remove what [`python_leftovers`] found. `Ok(false)`: the user dismissed
+/// the password dialog the package asks for, and nothing was removed.
+pub fn remove_python() -> Result<bool, String> {
+    // Looked for first: the package's own uninstaller (Windows) takes
+    // some of the markers along, not the whole folder.
+    let files = python_files();
+    if setup::python_package() {
+        if !setup::remove_python_package()? {
+            log::line("removing the old version: cancelled");
+            return Ok(false);
+        }
+        log::line("removing the old version: its package is gone");
+    }
+    let mut problems = Vec::new();
+    for path in files {
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => log::line(&format!(
+                "removing the old version: {} gone",
+                path.display()
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => problems.push(format!("{}: {e}", path.display())),
+        }
+    }
+    // Only if nothing else is in it now (on Windows this program's models
+    // are).
+    let _ = std::fs::remove_dir(setup::python_data_dir());
+    if problems.is_empty() {
+        Ok(true)
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// The Python hushkey's files that are still there.
+fn python_files() -> Vec<std::path::PathBuf> {
+    python_files_in(&setup::python_install_dir(), &setup::python_data_dir())
+}
+
+fn python_files_in(install: &Path, data: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let venv = install.join(".venv");
+    if install.join("tray.py").is_file() || venv.is_dir() {
+        if install.join(".git").exists() {
+            // A git checkout may hold someone's own work: only the Python
+            // environment, which the installer made, goes.
+            if venv.is_dir() {
+                found.push(venv);
+            }
+        } else {
+            found.push(install.to_path_buf());
+        }
+    }
+    for name in ["engines", "acceleration.json"] {
+        let path = data.join(name);
+        if path.symlink_metadata().is_ok() {
+            found.push(path);
+        }
+    }
+    found
 }
 
 fn import_python(dir: &Path) {
@@ -364,6 +440,40 @@ mod tests {
             Ok(Start::Uninstall)
         );
         assert!(Start::from_args(&args(&["--instal"])).is_err());
+    }
+
+    #[test]
+    fn the_python_hushkeys_files_are_found_but_not_someones_checkout() {
+        let root = std::env::temp_dir().join(format!("hk-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (install, data) = (root.join("whisper-ptt"), root.join("hushkey"));
+        let found = || python_files_in(&install, &data);
+        // Nothing there, or a folder of that name that is no hushkey.
+        assert!(found().is_empty());
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("notes.txt"), "").unwrap();
+        assert!(found().is_empty());
+        // An installed one goes as a whole.
+        std::fs::write(install.join("tray.py"), "").unwrap();
+        assert_eq!(found(), vec![install.clone()]);
+        std::fs::remove_file(install.join("tray.py")).unwrap();
+        std::fs::create_dir_all(install.join(".venv/bin")).unwrap();
+        assert_eq!(found(), vec![install.clone()]);
+        // A git checkout keeps everything but the environment.
+        std::fs::create_dir_all(install.join(".git")).unwrap();
+        assert_eq!(found(), vec![install.join(".venv")]);
+        std::fs::remove_dir_all(install.join(".venv")).unwrap();
+        std::fs::write(install.join("tray.py"), "").unwrap();
+        assert!(found().is_empty());
+        // The engines and their settings, not the models next to them.
+        std::fs::create_dir_all(data.join("engines")).unwrap();
+        std::fs::create_dir_all(data.join("models")).unwrap();
+        std::fs::write(data.join("acceleration.json"), "{}").unwrap();
+        assert_eq!(
+            found(),
+            vec![data.join("engines"), data.join("acceleration.json")]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -63,8 +63,12 @@ enum Msg {
     Inserted(Result<Restore, String>),
     /// An update check found this (`.1`: asked for from the menu).
     UpdateChecked(Result<Option<Release>, String>, bool),
-    /// An update was put in place: the program to start, or why not.
-    UpdateInstalled(Result<std::path::PathBuf, String>),
+    /// An update was put in place: the program to start (`None`: the
+    /// password dialog was dismissed), or why not.
+    UpdateInstalled(Result<Option<std::path::PathBuf>, String>),
+    /// The Python hushkey's leftovers were removed (`false`: the password
+    /// dialog was dismissed), or why not.
+    OldRemoved(Result<bool, String>),
 }
 
 pub fn run(after_update: bool) -> ExitCode {
@@ -98,7 +102,8 @@ pub fn run(after_update: bool) -> ExitCode {
         Ok(h) => h,
         Err(e) => return platform::fatal(&e),
     };
-    let mut tray = match Tray::new(s, &config, autostart::enabled()) {
+    let old_version = crate::setup::python_leftovers();
+    let mut tray = match Tray::new(s, &config, autostart::enabled(), old_version) {
         Ok(t) => t,
         Err(e) => return platform::fatal(&e),
     };
@@ -139,6 +144,7 @@ pub fn run(after_update: bool) -> ExitCode {
         notice_until: None,
         update: None,
         updating: false,
+        removing_old: false,
         quit_requested: false,
         next_update_check: Instant::now() + Duration::from_secs(30),
     };
@@ -206,6 +212,8 @@ struct App {
     update: Option<Release>,
     /// An update is being downloaded and put in place.
     updating: bool,
+    /// The Python hushkey's leftovers are being removed.
+    removing_old: bool,
     /// The updated program is starting; this one goes.
     quit_requested: bool,
     next_update_check: Instant,
@@ -411,7 +419,12 @@ impl App {
                     }
                 }
             },
-            Msg::UpdateInstalled(Ok(exe)) => {
+            Msg::UpdateInstalled(Ok(None)) => {
+                log::line("update cancelled at the password dialog");
+                self.updating = false;
+                self.idle();
+            }
+            Msg::UpdateInstalled(Ok(Some(exe))) => {
                 log::line(&format!("update in place, restarting: {}", exe.display()));
                 match platform::setup::launch(&exe, &["--after-update"]) {
                     Ok(()) => self.quit_requested = true,
@@ -428,6 +441,25 @@ impl App {
                 self.updating = false;
                 self.notice(GREY, self.s.update_failed);
                 self.idle();
+            }
+            Msg::OldRemoved(result) => {
+                self.removing_old = false;
+                match result {
+                    Ok(true) => {
+                        log::line("the old version is removed");
+                        self.tray.old_version_removed();
+                        self.notice(GREY, self.s.removed_old);
+                    }
+                    Ok(false) => {} // dismissed; the entry stays for later
+                    Err(e) => {
+                        log::line(&format!("removing the old version: {e}"));
+                        self.notice(GREY, self.s.remove_old_failed);
+                        // What could go did; the entry stays only for the rest.
+                        if !crate::setup::python_leftovers() {
+                            self.tray.old_version_removed();
+                        }
+                    }
+                }
             }
             Msg::Listen(generation, event) => {
                 if generation == self.listen_generation && self.listening.is_some() {
@@ -611,16 +643,25 @@ impl App {
                 Some(_) => {}
                 None => self.check_update(true),
             },
+            Action::RemoveOld if !self.removing_old => {
+                self.removing_old = true;
+                self.notice(GREY, self.s.removing_old);
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::OldRemoved(crate::setup::remove_python()));
+                });
+            }
+            Action::RemoveOld => {}
             Action::Quit => {}
         }
         self.tray.sync(&self.config, autostart::enabled());
     }
 
     fn check_update(&self, asked: bool) {
-        // A packaged install is updated with the package manager; offering
-        // to replace /usr/bin/hushkey would fail, and silently diverge from
-        // what dpkg has on record if it did not.
-        if platform::setup::packaged() {
+        // A program some other package manager put in /usr is that one's
+        // to update (hushkey's own .deb updates through apt, see
+        // update::install).
+        if !platform::setup::updates_itself() {
             let _ = self.tx.send(Msg::UpdateChecked(Ok(None), asked));
             return;
         }

@@ -2,7 +2,9 @@
 //! the tray, and installed when the user picks it.
 //!
 //! A release qualifies when its tag is a version (`v0.11.0`,
-//! `v0.11.0-rc.2`) and it carries this system's asset and `SHA256SUMS`.
+//! `v0.11.0-rc.2`) and it carries this system's asset and `SHA256SUMS`:
+//! the program, or for an install from the Linux .deb the .deb, which
+//! apt installs after asking for the password.
 //! Pre-releases count only for a running pre-release, or with
 //! `"updates": "pre"` in the settings.
 
@@ -105,6 +107,8 @@ impl std::fmt::Display for Version {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: Version,
+    /// The asset's file name.
+    asset: String,
     asset_url: String,
     sums_url: String,
 }
@@ -139,18 +143,24 @@ pub fn check(include_pre: bool) -> Result<Option<Release>, String> {
         .map_err(|e| format!("releases: {e}"))?;
     let releases: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("releases: {e}"))?;
-    Ok(newest(&releases, setup::ASSET, include_pre).filter(|r| r.version > Version::current()))
+    Ok(newest(&releases, setup::update_asset, include_pre)
+        .filter(|r| r.version > Version::current()))
 }
 
-/// The highest qualifying release in a GitHub releases listing.
-fn newest(releases: &serde_json::Value, asset: &str, include_pre: bool) -> Option<Release> {
-    let url_of = |release: &serde_json::Value, name: &str| -> Option<String> {
-        release["assets"]
-            .as_array()?
-            .iter()
-            .find(|a| a["name"] == name)?["browser_download_url"]
-            .as_str()
-            .map(str::to_string)
+/// The highest qualifying release in a GitHub releases listing, with the
+/// first asset `wanted` takes.
+fn newest(
+    releases: &serde_json::Value,
+    wanted: impl Fn(&str) -> bool,
+    include_pre: bool,
+) -> Option<Release> {
+    // (name, download URL) of the first asset whose name passes `pick`.
+    let asset_of = |release: &serde_json::Value, pick: &dyn Fn(&str) -> bool| {
+        release["assets"].as_array()?.iter().find_map(|a| {
+            let name = a["name"].as_str().filter(|n| pick(n))?;
+            let url = a["browser_download_url"].as_str()?;
+            Some((name.to_string(), url.to_string()))
+        })
     };
     releases
         .as_array()?
@@ -161,21 +171,28 @@ fn newest(releases: &serde_json::Value, asset: &str, include_pre: bool) -> Optio
             if version.is_pre() && !include_pre {
                 return None;
             }
+            let (asset, asset_url) = asset_of(r, &wanted)?;
+            let (_, sums_url) = asset_of(r, &|n| n == SUMS)?;
             Some(Release {
                 version,
-                asset_url: url_of(r, asset)?,
-                sums_url: url_of(r, SUMS)?,
+                asset,
+                asset_url,
+                sums_url,
             })
         })
         .max_by(|a, b| a.version.cmp(&b.version))
 }
 
-/// The hash `SHA256SUMS` lists for `asset`.
+/// The hash `SHA256SUMS` lists for `asset`. GitHub renames a `~` in an
+/// uploaded file's name to `.` (`hushkey_0.12.0~rc.1_amd64.deb`), the
+/// list keeps the name it was made with: compared as GitHub would name it.
 fn listed_hash(sums: &str, asset: &str) -> Option<String> {
+    let as_github = |name: &str| name.replace('~', ".");
     sums.lines().find_map(|line| {
         let (hash, name) = line.split_once(char::is_whitespace)?;
         // sha256sum marks binary mode with '*'.
-        (name.trim().trim_start_matches('*') == asset).then(|| hash.to_ascii_lowercase())
+        let name = name.trim().trim_start_matches('*');
+        (as_github(name) == as_github(asset)).then(|| hash.to_ascii_lowercase())
     })
 }
 
@@ -195,8 +212,14 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 }
 
 /// Download `release`, check its hash, and put it in place of the
-/// installed program. Returns the installed executable, to be started.
-pub fn install(release: &Release) -> Result<PathBuf, String> {
+/// installed program. Returns the installed executable, to be started;
+/// `None` when the user dismissed the password dialog (the .deb).
+pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
+    let name = release.asset.as_str();
+    // The name comes from the release listing and becomes a file name.
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return Err(format!("unexpected asset name {name:?}"));
+    }
     let agent = agent();
     let sums = agent
         .get(&release.sums_url)
@@ -205,32 +228,30 @@ pub fn install(release: &Release) -> Result<PathBuf, String> {
         .into_body()
         .read_to_string()
         .map_err(|e| format!("{SUMS}: {e}"))?;
-    let expected =
-        listed_hash(&sums, setup::ASSET).ok_or(format!("{SUMS} lists no {}", setup::ASSET))?;
+    let expected = listed_hash(&sums, name).ok_or(format!("{SUMS} lists no {name}"))?;
 
     let dir = config::state_dir().join("update");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(setup::ASSET);
+    let file = dir.join(name);
     let mut body = agent
         .get(&release.asset_url)
         .call()
-        .map_err(|e| format!("{}: {e}", setup::ASSET))?
+        .map_err(|e| format!("{name}: {e}"))?
         .into_body()
         .into_reader()
         .take(MAX_ASSET);
     let mut out = std::fs::File::create(&file).map_err(|e| e.to_string())?;
-    std::io::copy(&mut body, &mut out).map_err(|e| format!("{}: {e}", setup::ASSET))?;
+    std::io::copy(&mut body, &mut out).map_err(|e| format!("{name}: {e}"))?;
     drop(out);
 
     let actual = sha256_file(&file)?;
     if actual != expected {
         let _ = std::fs::remove_file(&file);
         return Err(format!(
-            "{}: hash {actual} is not the listed {expected}",
-            setup::ASSET
+            "{name}: hash {actual} is not the listed {expected}"
         ));
     }
-    let installed = setup::place(&file);
+    let installed = setup::install_update(&file);
     let _ = std::fs::remove_file(&file);
     installed
 }
@@ -279,12 +300,14 @@ mod tests {
 
     #[test]
     fn the_newest_release_with_this_systems_asset_and_sums_wins() {
-        let stable = newest(&listing(), "app.exe", false).unwrap();
+        let app = |n: &str| n == "app.exe";
+        let stable = newest(&listing(), app, false).unwrap();
         assert_eq!(stable.version, v("0.11.0")); // 0.11.1 has no SHA256SUMS
+        assert_eq!(stable.asset, "app.exe");
         assert_eq!(stable.asset_url, "https://example.invalid/v0.11.0/app.exe");
-        let pre = newest(&listing(), "app.exe", true).unwrap();
+        let pre = newest(&listing(), app, true).unwrap();
         assert_eq!(pre.version, v("0.12.0-rc.1"));
-        assert!(newest(&listing(), "other.zip", true).is_none());
+        assert!(newest(&listing(), |n| n == "other.zip", true).is_none());
     }
 
     #[test]
@@ -299,5 +322,12 @@ mod tests {
             Some("aa11")
         );
         assert!(listed_hash(sums, "hushkey-macos-arm64.zip").is_none());
+        // A pre-release .deb: listed with dpkg's '~', served with '.'.
+        let sums = "cc33  hushkey_0.11.0~rc.3_amd64.deb\n";
+        assert_eq!(
+            listed_hash(sums, "hushkey_0.11.0.rc.3_amd64.deb").as_deref(),
+            Some("cc33")
+        );
+        assert!(listed_hash(sums, "hushkey_0.11.0.rc.3_arm64.deb").is_none());
     }
 }

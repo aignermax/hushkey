@@ -35,8 +35,8 @@ pub fn installed_exe() -> PathBuf {
 /// the menu entry in `/usr/share/applications`. hushkey then leaves both
 /// alone: it cannot write there as the user anyway, and replacing itself
 /// would leave dpkg's records pointing at a file it no longer wrote. Such
-/// an installation is updated with the package manager, so the update
-/// check stays quiet as well.
+/// an installation is updated with the package manager: an update offered
+/// in the menu is the next .deb, installed by apt ([`install_update`]).
 pub fn packaged() -> bool {
     std::env::current_exe()
         .map(|exe| exe.starts_with("/usr/") || exe.starts_with("/opt/"))
@@ -229,22 +229,127 @@ pub fn python_still_autostarts() -> bool {
         || config.join("autostart/whisper-ptt.desktop").exists()
 }
 
-/// Whether a Python-era hushkey package (0.10 or older) is still
-/// registered with dpkg. Only it can remove `/opt/hushkey` and the menu
-/// entry in `/usr/share/applications`, so this is worth saying out loud.
-pub fn old_package_installed() -> bool {
-    let Ok(out) = Command::new("dpkg-query")
-        .args(["-W", "-f=${Version}", "hushkey"])
+/// The version of the `hushkey` package dpkg has installed, if any (one
+/// removed down to its configuration files does not count).
+fn package_version() -> Option<String> {
+    let out = Command::new("dpkg-query")
+        .args(["-W", "-f=${db:Status-Status} ${Version}", "hushkey"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-    else {
-        return false;
-    };
+        .ok()?;
     if !out.status.success() {
-        return false;
+        return None;
     }
-    python_package_version(String::from_utf8_lossy(&out.stdout).trim())
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (status, version) = text.trim().split_once(' ')?;
+    (!matches!(status, "not-installed" | "config-files")).then(|| version.to_string())
+}
+
+/// Whether a Python-era hushkey package (0.10 or older) is still
+/// installed. Only dpkg can remove it (`/opt/hushkey`), which takes the
+/// administrator's password: [`remove_python_package`].
+pub fn python_package() -> bool {
+    package_version().is_some_and(|v| python_package_version(&v))
+}
+
+/// Run `args` as root, the password asked for in the desktop's own
+/// dialog (polkit's `pkexec`); what they print goes to the log.
+/// `Ok(false)`: the user dismissed the dialog, and nothing ran.
+fn as_root(args: &[&str]) -> Result<bool, String> {
+    let out = Command::new("pkexec")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("pkexec: {e}"))?;
+    let printed = [&out.stdout, &out.stderr]
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .join("\n");
+    for line in printed.lines().filter(|l| !l.trim().is_empty()) {
+        crate::log::line(&format!("  {line}"));
+    }
+    match out.status.code() {
+        Some(0) => Ok(true),
+        // pkexec's own codes: dismissed, and not allowed (or no dialog).
+        Some(126) => Ok(false),
+        Some(127) => Err("pkexec: not authorized, or no password dialog in this session".into()),
+        _ => Err(format!("{}: {}", args[0], out.status)),
+    }
+}
+
+/// As root: the Python-era package removed. Checked once more here, as
+/// the package may have changed since the menu was built. Its postrm
+/// deletes the udev rule that lets the `input` group use /dev/uinput —
+/// which this program types through on Wayland — so the rule is put
+/// back: the user granted that access, removing old files must not take
+/// it away.
+const REMOVE_PYTHON_PACKAGE: &str = r#"set -e
+version="$(dpkg-query -W -f='${Version}' hushkey 2>/dev/null)" || exit 0
+case "$version" in
+    0.[0-9]|0.[0-9][.~+-]*|0.10|0.10[.~+-]*) ;;
+    *) echo "hushkey $version is not the Python version; left alone" >&2; exit 3 ;;
+esac
+rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
+kept=""
+if [ -f "$rule" ]; then kept="$(cat "$rule")"; fi
+dpkg --remove hushkey
+if [ -n "$kept" ]; then printf '%s\n' "$kept" > "$rule"; fi
+"#;
+
+/// Remove the Python-era package, asking for the password.
+/// `Ok(false)`: the dialog was dismissed.
+pub fn remove_python_package() -> Result<bool, String> {
+    as_root(&["/bin/sh", "-c", REMOVE_PYTHON_PACKAGE])
+}
+
+/// Whether an update can be installed here: always for the program in the
+/// home folder, and for this program's own .deb through dpkg. Anything
+/// else in `/usr` or `/opt` belongs to a package manager hushkey does not
+/// know, and is left to it.
+pub fn updates_itself() -> bool {
+    !packaged() || package_version().is_some_and(|v| !python_package_version(&v))
+}
+
+/// dpkg's name for this system's architecture.
+#[cfg(target_arch = "x86_64")]
+const DEB_ARCH: &str = "amd64";
+#[cfg(target_arch = "aarch64")]
+const DEB_ARCH: &str = "arm64";
+
+/// Whether `name` is the release asset an update installs here: the
+/// program itself, or for an install from the .deb the .deb
+/// (`hushkey_0.12.0_amd64.deb`; GitHub shows a pre-release's `~` as `.`).
+pub fn update_asset(name: &str) -> bool {
+    if packaged() {
+        package_asset(name)
+    } else {
+        name == ASSET
+    }
+}
+
+fn package_asset(name: &str) -> bool {
+    name.starts_with("hushkey_")
+        && name.ends_with(&format!("_{DEB_ARCH}.deb"))
+        && !name.contains(['/', '\\'])
+}
+
+/// Put a downloaded and checked update in place: renamed over the program
+/// in the home folder, or for the .deb installed by apt (dpkg where there
+/// is no apt), which asks for the password. `Ok(None)`: the dialog was
+/// dismissed.
+pub fn install_update(file: &Path) -> Result<Option<PathBuf>, String> {
+    if !packaged() {
+        return place(file).map(Some);
+    }
+    let path = file.to_str().ok_or("the update's path is not UTF-8")?;
+    let args: &[&str] = if Path::new("/usr/bin/apt-get").exists() {
+        // apt rather than dpkg: it also installs a library a new version
+        // may have started to need.
+        &["/usr/bin/apt-get", "install", "-y", path]
+    } else {
+        &["/usr/bin/dpkg", "-i", path]
+    };
+    Ok(as_root(args)?.then(|| PathBuf::from("/usr/bin/hushkey")))
 }
 
 /// Whether a hushkey package version is one of the Python era: 0.10.x and
@@ -265,6 +370,19 @@ pub fn python_state_dir() -> PathBuf {
     dirs::state_dir()
         .unwrap_or_else(|| home().join(".local/state"))
         .join("whisper-ptt")
+}
+
+/// Where the Python hushkey was installed (by its install.sh, and by its
+/// .deb, which copied itself there): its sources and its Python
+/// environment of some 2–3 GB.
+pub fn python_install_dir() -> PathBuf {
+    data_dir().join("whisper-ptt")
+}
+
+/// The Python hushkey's own data folder: the GPU engines it downloaded
+/// and `acceleration.json`. Nothing of this program's is in it.
+pub fn python_data_dir() -> PathBuf {
+    data_dir().join("hushkey")
 }
 
 /// The Python hushkey off for good: its service stopped and its unit files
@@ -362,6 +480,90 @@ mod tests {
         ] {
             assert!(!python_package_version(native), "{native}");
         }
+    }
+
+    #[test]
+    fn a_package_update_is_this_systems_deb() {
+        assert!(package_asset(&format!("hushkey_0.12.0_{DEB_ARCH}.deb")));
+        // A pre-release, as GitHub names it.
+        assert!(package_asset(&format!(
+            "hushkey_0.12.0.rc.1_{DEB_ARCH}.deb"
+        )));
+        assert!(!package_asset(ASSET));
+        assert!(!package_asset("hushkey_0.12.0_mips.deb"));
+        assert!(!package_asset(&format!("hushkey_/../x_{DEB_ARCH}.deb")));
+    }
+
+    /// The root script, with stand-ins for dpkg-query and dpkg and the
+    /// udev rule in a scratch folder: (exit code, what dpkg was asked, the
+    /// rule afterwards).
+    fn remove_package_with(
+        version: Option<&str>,
+        rule: Option<&str>,
+    ) -> (i32, String, Option<String>) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "hk-rm-{}-{}",
+            std::process::id(),
+            version.unwrap_or("none")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (rule_path, log) = (dir.join("99.rules"), dir.join("dpkg.log"));
+        if let Some(text) = rule {
+            std::fs::write(&rule_path, text).unwrap();
+        }
+        let stub = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub(
+            "dpkg-query",
+            r#"[ -n "$STUB_VERSION" ] || exit 1; printf %s "$STUB_VERSION""#,
+        );
+        // Removing the package takes the rule along, as its postrm does.
+        stub("dpkg", r#"echo "$@" >> "$STUB_LOG"; rm -f "$STUB_RULE""#);
+        let script = REMOVE_PYTHON_PACKAGE.replace(
+            "/etc/udev/rules.d/99-whisper-ptt-uinput.rules",
+            rule_path.to_str().unwrap(),
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &script])
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .env("STUB_LOG", &log)
+            .env("STUB_RULE", &rule_path)
+            .env_remove("STUB_VERSION");
+        if let Some(v) = version {
+            command.env("STUB_VERSION", v);
+        }
+        let status = command.output().unwrap().status;
+        let result = (
+            status.code().unwrap(),
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            std::fs::read_to_string(&rule_path).ok(),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        result
+    }
+
+    #[test]
+    fn only_the_python_package_is_removed_and_the_uinput_rule_stays() {
+        let rule = "KERNEL==\"uinput\", GROUP=\"input\"\n";
+        let (code, dpkg, kept) = remove_package_with(Some("0.7.5"), Some(rule));
+        assert_eq!((code, dpkg.as_str()), (0, "--remove hushkey\n"));
+        assert_eq!(kept.as_deref(), Some(rule));
+        // Without a rule, none is made.
+        let (code, dpkg, kept) = remove_package_with(Some("0.10.10"), None);
+        assert_eq!((code, dpkg.as_str(), kept), (0, "--remove hushkey\n", None));
+        // This program's own package, or none at all: left alone.
+        for native in ["0.11.0", "0.11.0~rc.3", "1.0.0"] {
+            let (code, dpkg, _) = remove_package_with(Some(native), None);
+            assert_eq!((code, dpkg.as_str()), (3, ""), "{native}");
+        }
+        let (code, dpkg, _) = remove_package_with(None, None);
+        assert_eq!((code, dpkg.as_str()), (0, ""));
     }
 
     #[test]

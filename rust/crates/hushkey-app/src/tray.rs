@@ -1,6 +1,8 @@
 //! The tray icon (hushkey's logo with a state badge) and its menu, laid out
 //! like the Python app's: status, model, key, language, insert method,
-//! recent dictations, continuous listening, start with Windows, logs, quit.
+//! recent dictations, continuous listening, start with Windows, logs,
+//! updates, quit — and, while the Python hushkey left files behind, an
+//! entry that removes them.
 
 use std::collections::HashMap;
 
@@ -25,14 +27,19 @@ pub enum Action {
     OpenLogs,
     /// Install the offered update, or look for one.
     Update,
+    /// Remove what the Python hushkey left behind.
+    RemoveOld,
     Quit,
 }
 
 pub struct Tray {
     icon: TrayIcon,
+    menu: Menu,
     s: &'static Strings,
     status: MenuItem,
     update: MenuItem,
+    /// There while the Python hushkey's leftovers are.
+    remove_old: Option<MenuItem>,
     listen: CheckMenuItem,
     autostart: CheckMenuItem,
     models: Vec<(CheckMenuItem, &'static str)>,
@@ -59,7 +66,13 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl Tray {
-    pub fn new(s: &'static Strings, config: &Config, autostart: bool) -> Result<Tray, String> {
+    /// `old_version`: offer to remove the Python hushkey's leftovers.
+    pub fn new(
+        s: &'static Strings,
+        config: &Config,
+        autostart: bool,
+        old_version: bool,
+    ) -> Result<Tray, String> {
         let mut actions = HashMap::new();
         let mut check = |text: &str, action: Action| {
             let item = CheckMenuItem::new(text, true, false, None);
@@ -101,6 +114,10 @@ impl Tray {
         let open_logs = MenuItem::new(s.open_logs, true, None);
         let update = MenuItem::new(s.update_check, true, None);
         actions.insert(update.id().clone(), Action::Update);
+        let remove_old = old_version.then(|| MenuItem::new(s.remove_old, true, None));
+        if let Some(item) = &remove_old {
+            actions.insert(item.id().clone(), Action::RemoveOld);
+        }
         let quit = MenuItem::new(s.quit, true, None);
         actions.insert(open_logs.id().clone(), Action::OpenLogs);
         actions.insert(quit.id().clone(), Action::Quit);
@@ -133,21 +150,26 @@ impl Tray {
             &autostart_item,
             &open_logs,
             &update,
-            &PredefinedMenuItem::separator(),
-            &quit,
         ])
         .map_err(err)?;
+        if let Some(item) = &remove_old {
+            menu.append(item).map_err(err)?;
+        }
+        menu.append_items(&[&PredefinedMenuItem::separator(), &quit])
+            .map_err(err)?;
         let icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.clone()))
             .with_tooltip("hushkey")
             .with_icon(image(Badge::Loading))
             .build()
             .map_err(err)?;
         let mut tray = Tray {
             icon,
+            menu,
             s,
             status,
             update,
+            remove_old,
             listen,
             autostart: autostart_item,
             models,
@@ -167,8 +189,14 @@ impl Tray {
         self.actions.get(id).cloned()
     }
 
-    /// Tick the entries that match `config` (a click toggles a check item
-    /// by itself; this puts the radio-like groups right again).
+    /// The Python hushkey's leftovers are gone: so is their entry.
+    pub fn old_version_removed(&mut self) {
+        if let Some(item) = self.remove_old.take() {
+            let _ = self.menu.remove(&item);
+            self.actions.remove(item.id());
+        }
+    }
+
     /// The update entry: an offered version, or "check for updates".
     pub fn offer_update(&mut self, version: Option<&str>) {
         let text = match version {
@@ -178,6 +206,8 @@ impl Tray {
         self.update.set_text(menu_text(&text));
     }
 
+    /// Tick the entries that match `config` (a click toggles a check item
+    /// by itself; this puts the radio-like groups right again).
     pub fn sync(&mut self, config: &Config, autostart: bool) {
         for (item, name) in &self.models {
             item.set_checked(*name == config.model);

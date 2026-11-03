@@ -42,10 +42,63 @@ pub fn python_still_autostarts() -> bool {
     false
 }
 
-/// Whether a Python-era hushkey package is still registered. Only Linux
-/// ever had one.
-pub fn old_package_installed() -> bool {
-    false
+/// Whether the Python hushkey's own entry in Settings > Apps is still
+/// there (its Inno Setup install, per user).
+pub fn python_package() -> bool {
+    key_exists(PYTHON_UNINSTALL_KEY)
+}
+
+/// Run the Python hushkey's uninstaller, without a window or questions:
+/// it stops the Python processes, removes its Python environment
+/// (uninstall.ps1 -Purge) and its files, and its entry in Settings > Apps.
+/// It needs no administrator: the install was per user. Never `Ok(false)`
+/// here — nothing asks.
+pub fn remove_python_package() -> Result<bool, String> {
+    let command = get_string(PYTHON_UNINSTALL_KEY, "UninstallString")
+        .ok_or("the old version names no uninstaller")?;
+    let uninstaller = command.trim().trim_matches('"');
+    Command::new(uninstaller)
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("{uninstaller}: {e}"))?;
+    // Inno's uninstaller hands the work to a copy of itself in %TEMP% and
+    // may return before it is done: its entry goes when it is.
+    for _ in 0..240 {
+        if !key_exists(PYTHON_UNINSTALL_KEY) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(format!("{uninstaller} did not finish within two minutes"))
+}
+
+/// Where the Python hushkey's installer put it.
+pub fn python_install_dir() -> PathBuf {
+    local_app_data().join(r"Programs\whisper-ptt")
+}
+
+/// The Python hushkey's own data folder: the GPU engines it downloaded
+/// and `acceleration.json`. This program's models are in it too
+/// (`models`), and stay.
+pub fn python_data_dir() -> PathBuf {
+    local_app_data().join("hushkey")
+}
+
+/// Updates always install here: the program is in the user's folder.
+pub fn updates_itself() -> bool {
+    true
+}
+
+/// Whether `name` is the release asset an update installs here.
+pub fn update_asset(name: &str) -> bool {
+    name == ASSET
+}
+
+/// Put a downloaded and checked update in place.
+pub fn install_update(file: &Path) -> Result<Option<PathBuf>, String> {
+    place(file).map(Some)
 }
 
 pub fn installed_exe() -> PathBuf {
@@ -97,6 +150,44 @@ fn set_value(key: &str, name: &str, text: Option<&str>, number: u32) -> Result<(
     } else {
         Err(format!("registry {key}\\{name}: error {status}"))
     }
+}
+
+/// A string value under HKCU\`key`.
+fn get_string(key: &str, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let (key_w, name_w) = (wide(key), wide(name));
+    let mut size: u32 = 0;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key_w.as_ptr(),
+            name_w.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if status != windows_sys::Win32::Foundation::ERROR_SUCCESS || size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key_w.as_ptr(),
+            name_w.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != windows_sys::Win32::Foundation::ERROR_SUCCESS {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
 }
 
 /// Whether HKCU\`key` exists.
