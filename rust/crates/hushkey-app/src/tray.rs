@@ -192,8 +192,25 @@ impl Tray {
     /// The Python hushkey's leftovers are gone: so is their entry.
     pub fn old_version_removed(&mut self) {
         if let Some(item) = self.remove_old.take() {
-            let _ = self.menu.remove(&item);
+            if let Err(e) = self.menu.remove(&item) {
+                // Still shown, but greyed out: it has nothing left to do.
+                crate::log::line(&format!("menu entry not removed: {e}"));
+                item.set_enabled(false);
+            }
             self.actions.remove(item.id());
+        }
+    }
+
+    /// While the leftovers are being removed, the entry says so and cannot
+    /// be picked again.
+    pub fn old_version_busy(&mut self, busy: bool) {
+        if let Some(item) = &self.remove_old {
+            item.set_enabled(!busy);
+            item.set_text(if busy {
+                self.s.removing_old
+            } else {
+                self.s.remove_old
+            });
         }
     }
 

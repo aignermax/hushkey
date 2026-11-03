@@ -231,6 +231,8 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
     let expected = listed_hash(&sums, name).ok_or(format!("{SUMS} lists no {name}"))?;
 
     let dir = config::state_dir().join("update");
+    // A download an earlier failed update left for installing by hand.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join(name);
     let mut body = agent
@@ -251,8 +253,12 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
             "{name}: hash {actual} is not the listed {expected}"
         ));
     }
-    let installed = setup::install_update(&file);
-    let _ = std::fs::remove_file(&file);
+    let installed = setup::install_update(&file, &expected);
+    if installed.is_err() {
+        crate::log::line(&format!("the checked download stays at {}", file.display()));
+    } else {
+        let _ = std::fs::remove_file(&file);
+    }
     installed
 }
 

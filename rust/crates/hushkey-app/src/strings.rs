@@ -34,6 +34,8 @@ pub struct Strings {
     pub removing_old: &'static str,
     pub removed_old: &'static str,
     pub remove_old_failed: &'static str,
+    pub update_cancelled: &'static str,
+    pub package_busy: &'static str,
 }
 
 /// "Start with Windows" and the like, per system.
@@ -102,6 +104,8 @@ pub const EN: Strings = Strings {
     removing_old: "removing the old version …",
     removed_old: "the old version is removed",
     remove_old_failed: "the old version is not fully removed — see the logs",
+    update_cancelled: "update cancelled",
+    package_busy: "the package manager is busy — try again in a few minutes",
 };
 
 pub const DE: Strings = Strings {
@@ -137,6 +141,8 @@ pub const DE: Strings = Strings {
     removing_old: "die alte Version wird entfernt …",
     removed_old: "die alte Version ist entfernt",
     remove_old_failed: "die alte Version ist nicht ganz entfernt — siehe Logs",
+    update_cancelled: "Update abgebrochen",
+    package_busy: "die Paketverwaltung ist beschäftigt — in ein paar Minuten nochmal versuchen",
 };
 
 /// (model name, download size) for the Model menu, as in the Python app.

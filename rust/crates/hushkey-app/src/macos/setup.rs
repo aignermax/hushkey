@@ -55,6 +55,13 @@ pub fn remove_python_package() -> Result<bool, String> {
     Ok(true)
 }
 
+pub const PYTHON_PACKAGE_BY_HAND: &str = "";
+
+/// Folders the Python hushkey may have shared with other files: none here.
+pub fn python_shared_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// Where the Python hushkey's install.sh put it: its sources and its
 /// Python environment.
 pub fn python_install_dir() -> PathBuf {
@@ -81,8 +88,9 @@ pub fn update_asset(name: &str) -> bool {
     name == ASSET
 }
 
-/// Put a downloaded and checked update in place.
-pub fn install_update(file: &Path) -> Result<Option<PathBuf>, String> {
+/// Put a downloaded and checked update in place (`_sha256`: checked
+/// already, and the file is the user's own).
+pub fn install_update(file: &Path, _sha256: &str) -> Result<Option<PathBuf>, String> {
     place(file).map(Some)
 }
 

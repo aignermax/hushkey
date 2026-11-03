@@ -41,6 +41,8 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
 /// How long a notice ("copied …") stays in the overlay.
 const NOTICE: Duration = Duration::from_secs(2);
+/// A failure to act on stays longer.
+const FAILURE_NOTICE: Duration = Duration::from_secs(8);
 /// Updates are looked for at start and then this often.
 const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -82,7 +84,7 @@ pub fn run(after_update: bool) -> ExitCode {
             std::thread::sleep(Duration::from_millis(200));
             running = platform::already_running();
         }
-        platform::setup::clean_after_update();
+        crate::setup::after_update();
         log::line(&format!("updated to {}", env!("CARGO_PKG_VERSION")));
     }
     // Asked once more it would find our own lock (Windows, Linux).
@@ -422,6 +424,8 @@ impl App {
             Msg::UpdateInstalled(Ok(None)) => {
                 log::line("update cancelled at the password dialog");
                 self.updating = false;
+                // Replaces "installing the update …", which has no end.
+                self.notice(GREY, self.s.update_cancelled);
                 self.idle();
             }
             Msg::UpdateInstalled(Ok(Some(exe))) => {
@@ -439,7 +443,12 @@ impl App {
             Msg::UpdateInstalled(Err(e)) => {
                 log::line(&format!("update failed: {e}"));
                 self.updating = false;
-                self.notice(GREY, self.s.update_failed);
+                let text = if e.starts_with(crate::setup::PACKAGE_BUSY) {
+                    self.s.package_busy
+                } else {
+                    self.s.update_failed
+                };
+                self.failure_notice(text);
                 self.idle();
             }
             Msg::OldRemoved(result) => {
@@ -450,12 +459,23 @@ impl App {
                         self.tray.old_version_removed();
                         self.notice(GREY, self.s.removed_old);
                     }
-                    Ok(false) => {} // dismissed; the entry stays for later
+                    Ok(false) => {
+                        // Dismissed; the entry stays for later.
+                        self.tray.old_version_busy(false);
+                        self.overlay.hide();
+                    }
                     Err(e) => {
                         log::line(&format!("removing the old version: {e}"));
-                        self.notice(GREY, self.s.remove_old_failed);
+                        let text = if e.contains(crate::setup::PACKAGE_BUSY) {
+                            self.s.package_busy
+                        } else {
+                            self.s.remove_old_failed
+                        };
+                        self.failure_notice(text);
                         // What could go did; the entry stays only for the rest.
-                        if !crate::setup::python_leftovers() {
+                        if crate::setup::python_leftovers() {
+                            self.tray.old_version_busy(false);
+                        } else {
                             self.tray.old_version_removed();
                         }
                     }
@@ -486,6 +506,13 @@ impl App {
     fn notice(&mut self, colour: [u8; 3], text: &str) {
         self.overlay.show(colour, text);
         self.notice_until = Some(Instant::now() + NOTICE);
+    }
+
+    /// A notice that something did not work, long enough to be read; the
+    /// details are in the log.
+    fn failure_notice(&mut self, text: &str) {
+        self.overlay.show(GREY, text);
+        self.notice_until = Some(Instant::now() + FAILURE_NOTICE);
     }
 
     fn idle(&mut self) {
@@ -645,6 +672,9 @@ impl App {
             },
             Action::RemoveOld if !self.removing_old => {
                 self.removing_old = true;
+                // The entry says so while it runs (that can take minutes),
+                // and cannot be picked twice.
+                self.tray.old_version_busy(true);
                 self.notice(GREY, self.s.removing_old);
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {

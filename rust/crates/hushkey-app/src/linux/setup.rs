@@ -254,14 +254,23 @@ pub fn python_package() -> bool {
 }
 
 /// Run `args` as root, the password asked for in the desktop's own
-/// dialog (polkit's `pkexec`); what they print goes to the log.
-/// `Ok(false)`: the user dismissed the dialog, and nothing ran.
-fn as_root(args: &[&str]) -> Result<bool, String> {
-    let out = Command::new("pkexec")
+/// dialog (polkit's `pkexec`); what they print goes to the log. `what`
+/// names the step in an error. `Ok(false)`: the user dismissed the
+/// dialog, and nothing ran.
+fn as_root(what: &str, args: &[&str]) -> Result<bool, String> {
+    let out = match Command::new("pkexec")
         .args(args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("pkexec: {e}"))?;
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "{what}: pkexec, which asks for the password, is not installed"
+            ))
+        }
+        Err(e) => return Err(format!("{what}: pkexec: {e}")),
+    };
     let printed = [&out.stdout, &out.stderr]
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         .join("\n");
@@ -272,42 +281,89 @@ fn as_root(args: &[&str]) -> Result<bool, String> {
         Some(0) => Ok(true),
         // pkexec's own codes: dismissed, and not allowed (or no dialog).
         Some(126) => Ok(false),
-        Some(127) => Err("pkexec: not authorized, or no password dialog in this session".into()),
-        _ => Err(format!("{}: {}", args[0], out.status)),
+        Some(127) => Err(format!(
+            "{what}: not authorized, or this session has no password dialog"
+        )),
+        _ if printed.contains("Could not get lock") || printed.contains("dpkg frontend lock") => {
+            Err(format!("{} ({what})", crate::setup::PACKAGE_BUSY))
+        }
+        _ => {
+            let last = printed.lines().rev().find(|l| !l.trim().is_empty());
+            Err(format!(
+                "{what}: {}: {}",
+                out.status,
+                last.unwrap_or("").trim()
+            ))
+        }
     }
 }
 
 /// As root: the Python-era package removed. Checked once more here, as
-/// the package may have changed since the menu was built. Its postrm
-/// deletes the udev rule that lets the `input` group use /dev/uinput —
-/// which this program types through on Wayland — so the rule is put
-/// back: the user granted that access, removing old files must not take
-/// it away.
+/// the package may have changed since the menu was built.
+///
+/// Its prerm (0.10) switches off the Python hushkey of every user it set
+/// up: not while another user of this computer still dictates with it.
+/// Its postrm deletes the udev rule that lets the `input` group use
+/// /dev/uinput, which this program types through on Wayland: the rule is
+/// put back, also when the removal fails after the postrm ran. apt waits
+/// for a package manager that is busy (unattended upgrades after boot);
+/// dpkg alone is the way out where apt has other packages to complain
+/// about.
 const REMOVE_PYTHON_PACKAGE: &str = r#"set -e
 version="$(dpkg-query -W -f='${Version}' hushkey 2>/dev/null)" || exit 0
 case "$version" in
     0.[0-9]|0.[0-9][.~+-]*|0.10|0.10[.~+-]*) ;;
     *) echo "hushkey $version is not the Python version; left alone" >&2; exit 3 ;;
 esac
+others="$(getent passwd | while IFS=: read -r name _ _ _ _ home _; do
+    if [ -n "$home" ] && [ -f "$home/.local/share/whisper-ptt/.deb-managed" ] \
+        && [ -f "$home/.config/systemd/user/whisper-ptt.service" ]; then
+        printf '%s ' "$name"
+    fi
+done)"
+if [ -n "$others" ]; then
+    echo "the old version still runs for: $others- the package stays" >&2
+    exit 4
+fi
 rule=/etc/udev/rules.d/99-whisper-ptt-uinput.rules
 kept=""
 if [ -f "$rule" ]; then kept="$(cat "$rule")"; fi
-dpkg --remove hushkey
-if [ -n "$kept" ]; then printf '%s\n' "$kept" > "$rule"; fi
+status=0
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get -o DPkg::Lock::Timeout=300 remove -y hushkey || {
+        dpkg --remove hushkey && status=0 || status=$?
+    }
+else
+    dpkg --remove hushkey || status=$?
+fi
+if [ -n "$kept" ] && [ ! -f "$rule" ]; then printf '%s\n' "$kept" > "$rule"; fi
+exit "$status"
 "#;
 
 /// Remove the Python-era package, asking for the password.
 /// `Ok(false)`: the dialog was dismissed.
 pub fn remove_python_package() -> Result<bool, String> {
-    as_root(&["/bin/sh", "-c", REMOVE_PYTHON_PACKAGE])
+    as_root(
+        "removing the old hushkey package",
+        &["/bin/sh", "-c", REMOVE_PYTHON_PACKAGE],
+    )
 }
 
+/// How to remove the Python-era package without hushkey.
+pub const PYTHON_PACKAGE_BY_HAND: &str = "sudo apt remove hushkey (this also deletes \
+     /etc/udev/rules.d/99-whisper-ptt-uinput.rules; put it back if typing on Wayland needs it)";
+
 /// Whether an update can be installed here: always for the program in the
-/// home folder, and for this program's own .deb through dpkg. Anything
-/// else in `/usr` or `/opt` belongs to a package manager hushkey does not
-/// know, and is left to it.
+/// home folder, and for this program's own .deb through apt, where pkexec
+/// can ask for the password. Anything else in `/usr` or `/opt` belongs to
+/// a package manager hushkey does not know, and is left to it.
 pub fn updates_itself() -> bool {
-    !packaged() || package_version().is_some_and(|v| !python_package_version(&v))
+    if !packaged() {
+        return true;
+    }
+    let pkexec = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("pkexec").is_file()));
+    pkexec && package_version().is_some_and(|v| !python_package_version(&v))
 }
 
 /// dpkg's name for this system's architecture.
@@ -334,22 +390,62 @@ fn package_asset(name: &str) -> bool {
 }
 
 /// Put a downloaded and checked update in place: renamed over the program
-/// in the home folder, or for the .deb installed by apt (dpkg where there
-/// is no apt), which asks for the password. `Ok(None)`: the dialog was
-/// dismissed.
-pub fn install_update(file: &Path) -> Result<Option<PathBuf>, String> {
+/// in the home folder, or for the .deb installed as root, which asks for
+/// the password. `Ok(None)`: the dialog was dismissed.
+pub fn install_update(file: &Path, sha256: &str) -> Result<Option<PathBuf>, String> {
     if !packaged() {
         return place(file).map(Some);
     }
     let path = file.to_str().ok_or("the update's path is not UTF-8")?;
-    let args: &[&str] = if Path::new("/usr/bin/apt-get").exists() {
-        // apt rather than dpkg: it also installs a library a new version
-        // may have started to need.
-        &["/usr/bin/apt-get", "install", "-y", path]
-    } else {
-        &["/usr/bin/dpkg", "-i", path]
-    };
-    Ok(as_root(args)?.then(|| PathBuf::from("/usr/bin/hushkey")))
+    let installed = as_root(
+        "installing the update",
+        &[
+            "/bin/sh",
+            "-c",
+            INSTALL_PACKAGE,
+            "hushkey-update",
+            path,
+            sha256,
+        ],
+    )?;
+    Ok(installed.then(|| PathBuf::from("/usr/bin/hushkey")))
+}
+
+/// As root: the downloaded .deb (`$1`) installed if its hash is `$2`.
+/// The download sits in the user's folder, where anything the user runs
+/// could swap it after hushkey checked it — so root first copies it where
+/// only root can write and checks the copy. apt rather than dpkg: it also
+/// installs a library a new version may need, and waits for a busy
+/// package manager.
+const INSTALL_PACKAGE: &str = r#"set -e
+dir=/var/cache/hushkey
+mkdir -p "$dir"
+chmod 0755 "$dir"
+deb="$dir/update.deb"
+rm -f "$deb"
+install -m 0600 "$1" "$deb"
+actual="$(sha256sum "$deb" | cut -d' ' -f1)"
+if [ -z "$2" ] || [ "$actual" != "$2" ]; then
+    rm -f "$deb"
+    echo "the update changed after it was checked; not installed" >&2
+    exit 5
+fi
+chmod 0644 "$deb"
+status=0
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get -o DPkg::Lock::Timeout=300 install -y "$deb" || status=$?
+else
+    dpkg -i "$deb" || status=$?
+fi
+rm -f "$deb"
+exit "$status"
+"#;
+
+/// Folders the Python hushkey may have shared with other files: the
+/// oldest .debs (0.3–0.6) installed it into what later became its data
+/// folder. Only a Python environment in them is the Python hushkey's.
+pub fn python_shared_dirs() -> Vec<PathBuf> {
+    vec![python_data_dir()]
 }
 
 /// Whether a hushkey package version is one of the Python era: 0.10.x and
@@ -494,36 +590,67 @@ mod tests {
         assert!(!package_asset(&format!("hushkey_/../x_{DEB_ARCH}.deb")));
     }
 
-    /// The root script, with stand-ins for dpkg-query and dpkg and the
-    /// udev rule in a scratch folder: (exit code, what dpkg was asked, the
-    /// rule afterwards).
-    fn remove_package_with(
-        version: Option<&str>,
-        rule: Option<&str>,
-    ) -> (i32, String, Option<String>) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "hk-rm-{}-{}",
-            std::process::id(),
-            version.unwrap_or("none")
-        ));
+    /// A scratch folder with stand-in programs (`name`, shell body).
+    fn stubs(tag: &str, programs: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hk-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (rule_path, log) = (dir.join("99.rules"), dir.join("dpkg.log"));
-        if let Some(text) = rule {
-            std::fs::write(&rule_path, text).unwrap();
-        }
-        let stub = |name: &str, body: &str| {
+        for (name, body) in programs {
             let path = dir.join(name);
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        stub(
-            "dpkg-query",
-            r#"[ -n "$STUB_VERSION" ] || exit 1; printf %s "$STUB_VERSION""#,
-        );
-        // Removing the package takes the rule along, as its postrm does.
-        stub("dpkg", r#"echo "$@" >> "$STUB_LOG"; rm -f "$STUB_RULE""#);
+        }
+        dir
+    }
+
+    /// How the package removal goes in [`run_removal`].
+    #[derive(Default)]
+    struct Removal<'a> {
+        version: Option<&'a str>,
+        rule: Option<&'a str>,
+        /// apt-get's exit code; None: there is no apt-get.
+        apt: Option<i32>,
+        dpkg: i32,
+        /// Another user still runs the Python hushkey from the package.
+        other_user: bool,
+    }
+
+    /// The root script, with stand-ins for every program it runs and the
+    /// udev rule in a scratch folder: (exit code, what was run, the rule
+    /// afterwards).
+    fn run_removal(tag: &str, case: Removal) -> (i32, String, Option<String>) {
+        // Removing takes the rule along, as the postrm does, also when the
+        // removal then fails.
+        let remove =
+            r#"echo "$(basename "$0") $*" >> "$STUB_LOG"; rm -f "$STUB_RULE"; exit "$STUB_CODE""#;
+        let mut programs = vec![
+            (
+                "dpkg-query",
+                r#"[ -n "$STUB_VERSION" ] || exit 1; printf %s "$STUB_VERSION""#,
+            ),
+            (
+                "getent",
+                r#"echo "root:x:0:0:root:/root:/bin/sh"; [ -z "$STUB_HOME" ] || echo "bob:x:1001:1001::$STUB_HOME:/bin/sh""#,
+            ),
+            ("dpkg", r#"STUB_CODE=$STUB_DPKG; . "$STUB_DIR/remove""#),
+            ("remove", remove),
+            ("cat", r#"exec /bin/cat "$@""#),
+            ("basename", r#"exec /usr/bin/basename "$@""#),
+        ];
+        if case.apt.is_some() {
+            programs.push(("apt-get", r#"STUB_CODE=$STUB_APT; . "$STUB_DIR/remove""#));
+        }
+        let dir = stubs(tag, &programs);
+        let (rule_path, log, other) = (dir.join("99.rules"), dir.join("log"), dir.join("bob"));
+        if let Some(text) = case.rule {
+            std::fs::write(&rule_path, text).unwrap();
+        }
+        if case.other_user {
+            std::fs::create_dir_all(other.join(".local/share/whisper-ptt")).unwrap();
+            std::fs::write(other.join(".local/share/whisper-ptt/.deb-managed"), "").unwrap();
+            std::fs::create_dir_all(other.join(".config/systemd/user")).unwrap();
+            std::fs::write(other.join(".config/systemd/user/whisper-ptt.service"), "").unwrap();
+        }
         let script = REMOVE_PYTHON_PACKAGE.replace(
             "/etc/udev/rules.d/99-whisper-ptt-uinput.rules",
             rule_path.to_str().unwrap(),
@@ -531,13 +658,22 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", &script])
-            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            // Only the stand-ins: whether apt-get exists is the case's.
+            .env("PATH", &dir)
+            .env("STUB_DIR", &dir)
             .env("STUB_LOG", &log)
             .env("STUB_RULE", &rule_path)
-            .env_remove("STUB_VERSION");
-        if let Some(v) = version {
-            command.env("STUB_VERSION", v);
-        }
+            .env("STUB_APT", case.apt.unwrap_or(0).to_string())
+            .env("STUB_DPKG", case.dpkg.to_string())
+            .env(
+                "STUB_HOME",
+                if case.other_user {
+                    other.as_os_str()
+                } else {
+                    std::ffi::OsStr::new("")
+                },
+            )
+            .env("STUB_VERSION", case.version.unwrap_or(""));
         let status = command.output().unwrap().status;
         let result = (
             status.code().unwrap(),
@@ -550,20 +686,128 @@ mod tests {
 
     #[test]
     fn only_the_python_package_is_removed_and_the_uinput_rule_stays() {
-        let rule = "KERNEL==\"uinput\", GROUP=\"input\"\n";
-        let (code, dpkg, kept) = remove_package_with(Some("0.7.5"), Some(rule));
-        assert_eq!((code, dpkg.as_str()), (0, "--remove hushkey\n"));
-        assert_eq!(kept.as_deref(), Some(rule));
-        // Without a rule, none is made.
-        let (code, dpkg, kept) = remove_package_with(Some("0.10.10"), None);
-        assert_eq!((code, dpkg.as_str(), kept), (0, "--remove hushkey\n", None));
+        let rule = "KERNEL==\"uinput\", GROUP=\"input\"";
+        let apt = "apt-get -o DPkg::Lock::Timeout=300 remove -y hushkey\n";
+        let dpkg = "dpkg --remove hushkey\n";
+        // Through apt, which waits for a busy package manager.
+        let (code, ran, kept) = run_removal(
+            "apt",
+            Removal {
+                version: Some("0.7.5"),
+                rule: Some(rule),
+                apt: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!((code, ran.as_str()), (0, apt));
+        assert_eq!(kept.as_deref().map(str::trim_end), Some(rule));
+        // Without apt, dpkg; without a rule, none is made.
+        let (code, ran, kept) = run_removal(
+            "dpkg",
+            Removal {
+                version: Some("0.10.10"),
+                ..Default::default()
+            },
+        );
+        assert_eq!((code, ran.as_str(), kept), (0, dpkg, None));
+        // apt failing (another package's trouble): dpkg alone.
+        let (code, ran, _) = run_removal(
+            "fallback",
+            Removal {
+                version: Some("0.7.5"),
+                apt: Some(100),
+                ..Default::default()
+            },
+        );
+        assert_eq!((code, ran), (0, format!("{apt}{dpkg}")));
+        // Both failing after the postrm ran: the rule is back all the same,
+        // and the failure is reported.
+        let (code, _, kept) = run_removal(
+            "fail",
+            Removal {
+                version: Some("0.7.5"),
+                rule: Some(rule),
+                apt: Some(100),
+                dpkg: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, 2);
+        assert_eq!(kept.as_deref().map(str::trim_end), Some(rule));
         // This program's own package, or none at all: left alone.
         for native in ["0.11.0", "0.11.0~rc.3", "1.0.0"] {
-            let (code, dpkg, _) = remove_package_with(Some(native), None);
-            assert_eq!((code, dpkg.as_str()), (3, ""), "{native}");
+            let (code, ran, _) = run_removal(
+                "native",
+                Removal {
+                    version: Some(native),
+                    apt: Some(0),
+                    ..Default::default()
+                },
+            );
+            assert_eq!((code, ran.as_str()), (3, ""), "{native}");
         }
-        let (code, dpkg, _) = remove_package_with(None, None);
-        assert_eq!((code, dpkg.as_str()), (0, ""));
+        let (code, ran, _) = run_removal(
+            "none",
+            Removal {
+                apt: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!((code, ran.as_str()), (0, ""));
+        // Not while another user still dictates with it.
+        let (code, ran, _) = run_removal(
+            "shared",
+            Removal {
+                version: Some("0.10.10"),
+                apt: Some(0),
+                other_user: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!((code, ran.as_str()), (4, ""));
+    }
+
+    #[test]
+    fn an_update_package_is_installed_only_as_it_was_checked() {
+        let apt = r#"echo "$*" >> "$STUB_LOG""#;
+        let run = |tag: &str, hash: &str| {
+            let dir = stubs(tag, &[("apt-get", apt)]);
+            let cache = dir.join("cache");
+            let deb = dir.join("download.deb");
+            std::fs::write(&deb, "a package").unwrap();
+            let script = INSTALL_PACKAGE.replace("/var/cache/hushkey", cache.to_str().unwrap());
+            let status = Command::new("/bin/sh")
+                .args(["-c", &script, "hushkey-update", deb.to_str().unwrap(), hash])
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .env("STUB_LOG", dir.join("log"))
+                .status()
+                .unwrap();
+            let ran = std::fs::read_to_string(dir.join("log")).unwrap_or_default();
+            let left = cache.join("update.deb").exists();
+            std::fs::remove_dir_all(&dir).unwrap();
+            (status.code().unwrap(), ran, left, cache)
+        };
+        // sha256 of "a package"
+        let hash = "3ea2ea9ebea34d2c80bd2a0a4ba54bc2a6a9d3b1bf2e8a9c1a2fdf1dde0d9e2f";
+        let actual = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(b"a package"))
+        };
+        assert_ne!(hash, actual, "the wrong hash must differ");
+        let (code, ran, left, cache) = run("deb-ok", &actual);
+        assert_eq!(code, 0);
+        assert_eq!(
+            ran,
+            format!(
+                "-o DPkg::Lock::Timeout=300 install -y {}\n",
+                cache.join("update.deb").display()
+            )
+        );
+        assert!(!left, "the copy goes after installing");
+        for wrong in [hash, ""] {
+            let (code, ran, left, _) = run("deb-bad", wrong);
+            assert_eq!((code, ran.as_str(), left), (5, "", false), "{wrong:?}");
+        }
     }
 
     #[test]
