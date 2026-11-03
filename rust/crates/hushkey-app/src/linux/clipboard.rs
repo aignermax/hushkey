@@ -9,6 +9,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -102,14 +103,28 @@ pub fn write_text(text: &str) -> Result<(), String> {
     }
 }
 
+/// Set once `wl-copy --primary` failed (it exits at once where the
+/// compositor has no primary selection), so that later pastes skip it:
+/// asking again would only cost each paste time.
+static NO_PRIMARY: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`write_primary`] can work: Wayland with wl-clipboard, on a
+/// compositor that has a primary selection (as far as is known yet).
+pub fn primary_available() -> bool {
+    use_wl_clipboard() && !NO_PRIMARY.load(Ordering::Relaxed)
+}
+
 /// Put `text` in the primary selection. Wayland with wl-clipboard only;
 /// fails where the compositor has no primary selection.
 pub fn write_primary(text: &str) -> Result<(), String> {
-    if use_wl_clipboard() {
-        wl_copy(text, true)
-    } else {
-        Err("no primary selection through wl-clipboard".into())
+    if !primary_available() {
+        return Err("no primary selection".into());
     }
+    let written = wl_copy(text, true);
+    if written.is_err() {
+        NO_PRIMARY.store(true, Ordering::Relaxed);
+    }
+    written
 }
 
 fn wl_copy(text: &str, primary: bool) -> Result<(), String> {

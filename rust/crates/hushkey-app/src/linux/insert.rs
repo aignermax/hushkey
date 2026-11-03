@@ -356,9 +356,21 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
             Ok(offer) => return paste_watched(&offer, previous),
             // The selection would not come over: carry on with the plain
             // path, which is no worse than before.
-            Err(e) => crate::log::line(&format!("clipboard: {e}; pasting unwatched")),
+            Err(e) => log::line(&format!("clipboard: {e}; pasting unwatched")),
         }
     }
+    // Wayland does not say which window has the focus, and terminals take
+    // no Ctrl+V. Shift+Insert pastes in both: GTK, Qt, browsers and editors
+    // read the clipboard, terminals (VTE, kitty, foot, Alacritty) the
+    // primary selection. So the dictation goes into both. The previous
+    // primary is read before anything is written: a manager that syncs the
+    // two would otherwise hand back the dictation as the previous one.
+    let use_primary = wayland() && clipboard::primary_available();
+    let previous_primary = if use_primary && restore {
+        clipboard::read_primary()
+    } else {
+        None
+    };
     if let Err(e) = clipboard::write_text(text) {
         // The attempt may have emptied the clipboard: put the old text back.
         if let Some(previous) = &previous {
@@ -368,27 +380,18 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
         }
         return Err(e);
     }
-    // Wayland does not say which window has the focus, and terminals take
-    // no Ctrl+V. Shift+Insert pastes in both: GTK, Qt, browsers and editors
-    // read the clipboard, terminals (VTE, kitty, foot, Alacritty) the
-    // primary selection. So the dictation goes into both.
-    // Some(previous primary text) once the dictation is in it.
-    let primary = wayland().then(|| {
-        let previous = if restore {
-            clipboard::read_primary()
-        } else {
-            None
-        };
-        match clipboard::write_primary(text) {
-            Ok(()) => Some(previous),
+    // One after the other, not at once: on GNOME each wl-copy takes the
+    // focus for a moment to set its selection, and two would compete.
+    let primary = use_primary
+        && match clipboard::write_primary(text) {
+            Ok(()) => true,
             Err(e) => {
                 log::line(&format!("{e}; pasting with Ctrl+V"));
-                None
+                false
             }
-        }
-    });
-    let primary = primary.flatten();
-    let pasted = if primary.is_some() {
+        };
+    let previous_primary = previous_primary.filter(|_| primary);
+    let pasted = if primary {
         chord(
             &[KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_INSERT],
             "shift+Insert",
@@ -396,7 +399,6 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
     } else {
         paste_chord()
     };
-    let previous_primary = primary.flatten();
     if let Err(e) = pasted {
         if let Some(previous) = &previous {
             let _ = clipboard::write_text(previous);
@@ -410,6 +412,12 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
         return Ok(Restore::Nothing); // the dictation stays pasteable
     }
     std::thread::sleep(SETTLE);
+    // Whether the clipboard still holds the dictation, asked before
+    // anything is put back. A manager that syncs clipboard and primary took
+    // the clipboard over when the primary was written (so hushkey's owner
+    // is gone), but with the same text: that is no copy by the user.
+    let clipboard_ours = previous.is_some()
+        && (clipboard::holds(text) || clipboard::read_text().as_deref() == Some(text));
     if let Some(previous) = &previous_primary {
         if clipboard::holds_primary() {
             if let Err(e) = clipboard::write_primary(previous) {
@@ -417,10 +425,12 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
             }
         }
     }
+    // The clipboard last: under a syncing manager the last write wins in
+    // both, and the clipboard is what Ctrl+V pastes.
     let Some(previous) = previous else {
         return Ok(Restore::Nothing);
     };
-    if !clipboard::holds(text) {
+    if !clipboard_ours {
         return Ok(Restore::CopiedOver);
     }
     Ok(match clipboard::write_text(&previous) {
