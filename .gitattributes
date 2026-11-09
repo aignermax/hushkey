@@ -4,3 +4,5 @@
 packaging/linux/postinst text eol=lf
 packaging/linux/prerm text eol=lf
 packaging/linux/postrm text eol=lf
+# Test data compared byte for byte (an xz archive and what it holds).
+rust/crates/hushkey-app/tests/data/* binary
