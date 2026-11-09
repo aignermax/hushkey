@@ -5,7 +5,7 @@ name: bridge
 
 on:
   push:
-    branches: [master, dev]
+    branches: [master]
     paths: ["tray.py", "update_helper.py", "install.*", "uninstall.*", "tests/**", ".github/workflows/bridge.yml"]
   pull_request:
     paths: ["tray.py", "update_helper.py", "install.*", "uninstall.*", "tests/**", ".github/workflows/bridge.yml"]
