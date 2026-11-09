@@ -540,7 +540,8 @@
       var assets = release.assets || [];
       var find = function (re) { return assets.filter(function (a) { return re.test(a.name); })[0]; };
       var direct = {
-        windows: find(/^hushkey-windows-x86_64\.exe$/),
+        // The small setup (~6 MB); releases before 0.11.3 had the program only.
+        windows: find(/^hushkey-setup-windows-x86_64\.exe$/) || find(/^hushkey-windows-x86_64\.exe$/),
         macos: find(/^hushkey-macos-arm64\.zip$/),
         "macos-intel": find(/^hushkey-macos-x86_64\.zip$/),
         linux: find(/^hushkey_.*_amd64\.deb$/)

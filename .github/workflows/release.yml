@@ -3,6 +3,12 @@ name: release
 # The Rust app for every system, attached to the release of a v* tag
 # (a pre-release when the tag has a suffix: v0.11.0-rc.1). The app updates
 # itself from these assets, and install.ps1 / install.sh download them.
+#
+# The Windows and Linux programs are ~45-58 MB, nearly all Vulkan shaders;
+# xz packs them to ~6 MB. So each also goes up as <asset>.xz, which the
+# updater (0.11.3 on) downloads instead, and Windows gets a small setup
+# (hushkey-setup-windows-x86_64.exe) for the first download. The plain
+# files stay: earlier versions update from them.
 # Pull requests that touch the build, and runs by hand (workflow_dispatch),
 # build without publishing.
 
@@ -109,6 +115,45 @@ jobs:
           esac
           ls -l dist
 
+      - name: Compress (Windows, Linux)
+        if: runner.os != 'macOS'
+        run: |
+          # No BCJ filter: the updater's decoder (lzma-rs) reads LZMA2 only.
+          xz -9e -T0 -k "dist/${{ matrix.asset }}"
+          xz -t "dist/${{ matrix.asset }}.xz"
+          packed="$(xz -dc "dist/${{ matrix.asset }}.xz" | sha256sum | cut -d' ' -f1)"
+          plain="$(sha256sum "dist/${{ matrix.asset }}" | cut -d' ' -f1)"
+          test "$packed" = "$plain"
+          ls -l dist
+
+      - name: Setup (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ver = (Select-String -Path rust/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $numeric = ($ver -split '-')[0] + ".0"
+          $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "rust/target" }
+          # The icon build.rs made for the program.
+          $icon = (Get-ChildItem "$target/release/build/hushkey-app-*/out/hushkey.ico" | Select-Object -First 1).FullName
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DVersion=$ver" "/DFileVersion=$numeric" `
+            "/DSource=$((Resolve-Path dist/${{ matrix.asset }}).Path)" "/DIcon=$icon" "/O$((Resolve-Path dist).Path)" `
+            rust/packaging/windows/setup.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: The setup installs the program (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $p = Start-Process dist/hushkey-setup-windows-x86_64.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -PassThru
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "setup exit $($p.ExitCode)" }
+          $installed = "$env:LOCALAPPDATA\Programs\hushkey\hushkey.exe"
+          if ((Get-FileHash $installed).Hash -ne (Get-FileHash dist/${{ matrix.asset }}).Hash) { throw "installed program differs" }
+          Get-Process hushkey -ErrorAction SilentlyContinue | Stop-Process -Force
+
       - name: The program starts (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -142,7 +187,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.xz
+            dist/hushkey-setup-*.exe
 
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
@@ -185,7 +233,7 @@ jobs:
             echo
             echo "| System | File |"
             echo "|---|---|"
-            echo "| **Windows** 10+, 64-bit | [hushkey-windows-x86_64.exe]($base/hushkey-windows-x86_64.exe) |"
+            echo "| **Windows** 10+, 64-bit | [hushkey-setup-windows-x86_64.exe]($base/hushkey-setup-windows-x86_64.exe) (the program alone: [hushkey-windows-x86_64.exe]($base/hushkey-windows-x86_64.exe)) |"
             [ -n "$deb_amd64" ] && echo "| **Linux** Debian/Ubuntu, 64-bit | [$deb_amd64]($base/$deb_amd64) |"
             [ -n "$deb_arm64" ] && echo "| **Linux** Debian/Ubuntu, ARM | [$deb_arm64]($base/$deb_arm64) |"
             echo "| **Linux** any distribution | [hushkey-linux-x86_64]($base/hushkey-linux-x86_64) · [aarch64]($base/hushkey-linux-aarch64) |"

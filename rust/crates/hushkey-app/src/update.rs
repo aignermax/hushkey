@@ -7,6 +7,11 @@
 //! apt installs after asking for the password.
 //! Pre-releases count only for a running pre-release, or with
 //! `"updates": "pre"` in the settings.
+//!
+//! Where a release also carries the asset compressed (`<asset>.xz`), that
+//! is downloaded instead: the Windows and Linux programs are mostly Vulkan
+//! shaders, which xz shrinks from ~58 MB to ~6 MB. The hash checked is the
+//! compressed file's, as `SHA256SUMS` lists it.
 
 use std::cmp::Ordering;
 use std::io::Read;
@@ -18,8 +23,11 @@ use crate::platform::setup;
 
 const RELEASES: &str = "https://api.github.com/repos/aignermax/hushkey/releases?per_page=30";
 const SUMS: &str = "SHA256SUMS";
-/// The largest asset accepted (the Windows Vulkan build is ~60 MB).
+/// The largest asset accepted (the Windows Vulkan build is ~60 MB), also
+/// once decompressed.
 pub(crate) const MAX_ASSET: u64 = 512 * 1024 * 1024;
+/// The suffix of a compressed asset.
+const XZ: &str = ".xz";
 
 /// A semantic version: numbers, then an optional pre-release (`rc.2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +170,8 @@ fn newest(
             Some((name.to_string(), url.to_string()))
         })
     };
+    // The asset compressed, where the release has it.
+    let compressed = |n: &str| n.strip_suffix(XZ).is_some_and(&wanted);
     releases
         .as_array()?
         .iter()
@@ -171,7 +181,7 @@ fn newest(
             if version.is_pre() && !include_pre {
                 return None;
             }
-            let (asset, asset_url) = asset_of(r, &wanted)?;
+            let (asset, asset_url) = asset_of(r, &compressed).or_else(|| asset_of(r, &wanted))?;
             let (_, sums_url) = asset_of(r, &|n| n == SUMS)?;
             Some(Release {
                 version,
@@ -253,6 +263,18 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
             "{name}: hash {actual} is not the listed {expected}"
         ));
     }
+    // Checked as downloaded; what is installed is the file inside.
+    let (file, expected) = match name.strip_suffix(XZ) {
+        Some(inner) => {
+            let unpacked = dir.join(inner);
+            let result = decompress(&file, &unpacked);
+            let _ = std::fs::remove_file(&file);
+            result.map_err(|e| format!("{name}: {e}"))?;
+            let hash = sha256_file(&unpacked)?;
+            (unpacked, hash)
+        }
+        None => (file, expected),
+    };
     let installed = setup::install_update(&file, &expected);
     // Kept for installing by hand after a failure — only while it is
     // still what was checked.
@@ -263,6 +285,46 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
         let _ = std::fs::remove_file(&file);
     }
     installed
+}
+
+/// Unpack the xz file `from` into `to`, at most [`MAX_ASSET`] bytes.
+fn decompress(from: &Path, to: &Path) -> Result<(), String> {
+    let input = std::fs::File::open(from).map_err(|e| e.to_string())?;
+    let output = std::fs::File::create(to).map_err(|e| e.to_string())?;
+    let mut limited = Limited {
+        inner: std::io::BufWriter::new(output),
+        left: MAX_ASSET,
+    };
+    let result = lzma_rs::xz_decompress(&mut std::io::BufReader::new(input), &mut limited)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::io::Write::flush(&mut limited.inner).map_err(|e| e.to_string()));
+    if result.is_err() {
+        drop(limited);
+        let _ = std::fs::remove_file(to);
+    }
+    result
+}
+
+/// A writer that refuses more than `left` bytes (a hostile archive must
+/// not fill the disk).
+struct Limited<W> {
+    inner: W,
+    left: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for Limited<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() as u64 > self.left {
+            return Err(std::io::Error::other("larger than any hushkey release"));
+        }
+        let n = self.inner.write(buf)?;
+        self.left -= n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +379,87 @@ mod tests {
         let pre = newest(&listing(), app, true).unwrap();
         assert_eq!(pre.version, v("0.12.0-rc.1"));
         assert!(newest(&listing(), |n| n == "other.zip", true).is_none());
+    }
+
+    #[test]
+    fn the_compressed_asset_is_preferred_where_there_is_one() {
+        let release = |assets: &[&str]| {
+            serde_json::json!([{
+                "tag_name": "v0.12.0",
+                "draft": false,
+                "assets": assets.iter().map(|name| serde_json::json!({
+                    "name": name,
+                    "browser_download_url": format!("https://example.invalid/{name}"),
+                })).collect::<Vec<_>>(),
+            }])
+        };
+        let app = |n: &str| n == "app.exe";
+        // Listed before the plain file or after it: the .xz wins.
+        for assets in [
+            &["app.exe", "app.exe.xz", "SHA256SUMS"][..],
+            &["SHA256SUMS", "app.exe.xz", "app.exe"][..],
+        ] {
+            assert_eq!(
+                newest(&release(assets), app, false).unwrap().asset,
+                "app.exe.xz"
+            );
+        }
+        // Older releases have the plain file only.
+        let plain = newest(&release(&["app.exe", "SHA256SUMS"]), app, false).unwrap();
+        assert_eq!(plain.asset, "app.exe");
+        // Another program's archive does not count.
+        assert!(newest(&release(&["other.exe.xz", "SHA256SUMS"]), app, false).is_none());
+    }
+
+    #[test]
+    fn what_xz_compressed_is_unpacked() {
+        let dir = std::env::temp_dir().join(format!("hk-xz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Made by `xz -9e`, as the release workflow makes the assets.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/fixture.txt");
+        let out = dir.join("fixture.txt");
+        decompress(&fixture.with_extension("txt.xz"), &out).unwrap();
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(&fixture).unwrap()
+        );
+
+        // A damaged archive fails and leaves nothing behind.
+        let mut damaged = std::fs::read(fixture.with_extension("txt.xz")).unwrap();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 0xff;
+        let bad = dir.join("bad.xz");
+        std::fs::write(&bad, damaged).unwrap();
+        assert!(decompress(&bad, &dir.join("bad")).is_err());
+        assert!(!dir.join("bad").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A release-sized archive (`xz -9e` of the real program) unpacks
+    /// intact, and fast enough: `HUSHKEY_XZ_SAMPLE=<program>` with
+    /// `<program>.xz` beside it, `cargo test -p hushkey-app xz -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_release_sized_archive_unpacks() {
+        let program = std::path::PathBuf::from(std::env::var("HUSHKEY_XZ_SAMPLE").unwrap());
+        let out = std::env::temp_dir().join(format!("hk-xz-big-{}", std::process::id()));
+        let started = std::time::Instant::now();
+        decompress(&program.with_extension("exe.xz"), &out).unwrap();
+        let took = started.elapsed();
+        assert_eq!(sha256_file(&out).unwrap(), sha256_file(&program).unwrap());
+        std::fs::remove_file(&out).ok();
+        eprintln!("unpacked in {took:?}");
+        assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    }
+
+    #[test]
+    fn unpacking_stops_at_the_size_limit() {
+        let mut limited = Limited {
+            inner: Vec::new(),
+            left: 4,
+        };
+        assert!(std::io::Write::write_all(&mut limited, b"1234").is_ok());
+        assert!(std::io::Write::write_all(&mut limited, b"5").is_err());
     }
 
     #[test]
