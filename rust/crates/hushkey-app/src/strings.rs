@@ -226,7 +226,7 @@ pub static FR: Strings = Strings {
     recording: "enregistrement …",
     transcribing: "transcription …",
     listening: "à l'écoute",
-    hearing: "je t'écoute …",
+    hearing: "je vous écoute …",
     failed: "erreur",
     model_menu: "Modèle",
     key_menu: "Touche push-to-talk",
@@ -337,10 +337,10 @@ pub static KN: Strings = Strings {
     package_busy: "ಪ್ಯಾಕೇಜ್ ನಿರ್ವಾಹಕ ಕಾರ್ಯನಿರತವಾಗಿದೆ — ಕೆಲವು ನಿಮಿಷಗಳ ನಂತರ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ",
 };
 
-/// The words for a language code (`de`, `de-AT`, `zh_CN.UTF-8`, `kn`);
-/// English for any language without its own. Chinese means the simplified
-/// script: Traditional Chinese (Taiwan, Hong Kong, Macau, `Hant`) gets
-/// English rather than the wrong script.
+/// The words for a language code (`de`, `de-AT`, `zh_CN.UTF-8`, `kn`),
+/// or None for a language without its own (the caller shows English).
+/// Chinese means the simplified script: Traditional Chinese (Taiwan, Hong
+/// Kong, Macau, `Hant`) has none rather than the wrong script.
 pub fn for_language(code: &str) -> Option<&'static Strings> {
     let code = code.trim();
     let primary = code
@@ -370,12 +370,19 @@ pub fn for_language(code: &str) -> Option<&'static Strings> {
     .map(|(_, strings)| strings)
 }
 
-/// The words in the system's language: the first of its preferred
-/// languages that has them, else English.
+/// The words in the system's language, else English.
 pub fn current() -> &'static Strings {
-    system_languages()
-        .iter()
-        .find_map(|code| for_language(code))
+    for_system(&system_languages())
+}
+
+/// The words for the first of the user's languages (the one the system
+/// shows itself in), else English. Later entries do not count: they are
+/// fallbacks or keyboard languages, and a Traditional Chinese user whose
+/// list continues with `zh` must not get simplified characters.
+fn for_system(languages: &[String]) -> &'static Strings {
+    languages
+        .first()
+        .and_then(|code| for_language(code))
         .unwrap_or(&EN)
 }
 
@@ -424,8 +431,10 @@ fn linux_languages(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
         .filter_map(|v| env(v))
         .find(|v| !v.is_empty())
         .unwrap_or_default();
+    // An explicit C locale silences LANGUAGE (as in gettext); an unset one
+    // does not, so a session that only sets LANGUAGE is still heard.
     let base = locale.split(['.', '@']).next().unwrap_or("");
-    if base.is_empty() || base == "C" || base == "POSIX" {
+    if base == "C" || base == "POSIX" {
         return Vec::new();
     }
     let mut languages: Vec<String> = env("LANGUAGE")
@@ -434,7 +443,9 @@ fn linux_languages(env: impl Fn(&str) -> Option<String>) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect();
-    languages.push(locale);
+    if !locale.is_empty() {
+        languages.push(locale);
+    }
     languages
 }
 
@@ -569,6 +580,24 @@ mod tests {
             linux_languages(env(&[("LC_ALL", "fr_FR.UTF-8"), ("LANG", "de_DE.UTF-8")])),
             ["fr_FR.UTF-8"]
         );
+        // Only LANGUAGE set (no locale at all): still heard.
+        assert_eq!(linux_languages(env(&[("LANGUAGE", "de")])), ["de"]);
+    }
+
+    #[test]
+    fn only_the_first_language_counts() {
+        let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let pick = |l: &[&str]| for_system(&list(l)) as *const Strings;
+        assert_eq!(pick(&["de-DE", "en-US"]), &DE as *const _);
+        // Traditional Chinese, then plain zh (Ubuntu's zh_TW:zh): English,
+        // not simplified characters.
+        assert_eq!(pick(&["zh_TW", "zh", "zh_TW.UTF-8"]), &EN as *const _);
+        assert_eq!(pick(&["zh-Hant-TW", "zh-Hans-CN"]), &EN as *const _);
+        // A language without words, then one with: the system's language
+        // decides, so English (not a keyboard language further down).
+        assert_eq!(pick(&["pt-BR", "de-DE"]), &EN as *const _);
+        assert_eq!(pick(&["ja-JP", "fr-FR"]), &EN as *const _);
+        assert_eq!(pick(&[]), &EN as *const _);
     }
 
     #[test]
