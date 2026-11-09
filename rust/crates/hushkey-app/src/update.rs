@@ -7,6 +7,12 @@
 //! apt installs after asking for the password.
 //! Pre-releases count only for a running pre-release, or with
 //! `"updates": "pre"` in the settings.
+//!
+//! Where a release also carries the program compressed (`<asset>.xz`),
+//! that is downloaded instead: the Windows and Linux programs are mostly
+//! Vulkan shaders, which xz shrinks from ~58 MB to ~6.5 MB. The hash
+//! checked is the compressed file's, as `SHA256SUMS` lists it; should
+//! unpacking fail anyway, the plain program is downloaded after all.
 
 use std::cmp::Ordering;
 use std::io::Read;
@@ -18,8 +24,13 @@ use crate::platform::setup;
 
 const RELEASES: &str = "https://api.github.com/repos/aignermax/hushkey/releases?per_page=30";
 const SUMS: &str = "SHA256SUMS";
-/// The largest asset accepted (the Windows Vulkan build is ~60 MB).
+/// The largest asset accepted (the Windows Vulkan build is ~60 MB), also
+/// once unpacked. The release workflow packs in 8 MiB xz blocks, and the
+/// decoder holds a block in memory at a time, so unpacking costs tens of
+/// MB, not the program's size (the archive is the one SHA256SUMS lists).
 pub(crate) const MAX_ASSET: u64 = 512 * 1024 * 1024;
+/// The suffix of a compressed asset.
+const XZ: &str = ".xz";
 
 /// A semantic version: numbers, then an optional pre-release (`rc.2`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +122,8 @@ pub struct Release {
     asset: String,
     asset_url: String,
     sums_url: String,
+    /// The uncompressed asset (name, URL) when `asset` is its `.xz`.
+    plain: Option<(String, String)>,
 }
 
 fn agent() -> ureq::Agent {
@@ -162,6 +175,12 @@ fn newest(
             Some((name.to_string(), url.to_string()))
         })
     };
+    // The program compressed, where the release has it (packages are
+    // compressed already and installed by root from what was checked).
+    let compressed = |n: &str| {
+        n.strip_suffix(XZ)
+            .is_some_and(|plain| !plain.ends_with(".deb") && wanted(plain))
+    };
     releases
         .as_array()?
         .iter()
@@ -171,13 +190,16 @@ fn newest(
             if version.is_pre() && !include_pre {
                 return None;
             }
-            let (asset, asset_url) = asset_of(r, &wanted)?;
+            let plain = asset_of(r, &wanted);
+            let (asset, asset_url) = asset_of(r, &compressed).or_else(|| plain.clone())?;
             let (_, sums_url) = asset_of(r, &|n| n == SUMS)?;
+            let plain = plain.filter(|(name, _)| *name != asset);
             Some(Release {
                 version,
                 asset,
                 asset_url,
                 sums_url,
+                plain,
             })
         })
         .max_by(|a, b| a.version.cmp(&b.version))
@@ -215,11 +237,6 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 /// installed program. Returns the installed executable, to be started;
 /// `None` when the user dismissed the password dialog (the .deb).
 pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
-    let name = release.asset.as_str();
-    // The name comes from the release listing and becomes a file name.
-    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
-        return Err(format!("unexpected asset name {name:?}"));
-    }
     let agent = agent();
     let sums = agent
         .get(&release.sums_url)
@@ -228,15 +245,67 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
         .into_body()
         .read_to_string()
         .map_err(|e| format!("{SUMS}: {e}"))?;
-    let expected = listed_hash(&sums, name).ok_or(format!("{SUMS} lists no {name}"))?;
-
     let dir = config::state_dir().join("update");
     // A download an earlier failed update left for installing by hand.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let checked = fetch(&agent, &sums, &dir, &release.asset, &release.asset_url)?;
+    // (file to install, its hash, whether that hash is SHA256SUMS' own)
+    let (file, expected, listed) = match release.asset.strip_suffix(XZ) {
+        None => (checked.0, checked.1, true),
+        Some(inner) => {
+            let unpacked = dir.join(inner);
+            let result = decompress(&checked.0, &unpacked);
+            let _ = std::fs::remove_file(&checked.0);
+            match (result, &release.plain) {
+                (Ok(hash), _) => (unpacked, hash, false),
+                (Err(e), Some((name, url))) => {
+                    crate::log::line(&format!(
+                        "{}: {e}; downloading {name} instead",
+                        release.asset
+                    ));
+                    let (file, hash) = fetch(&agent, &sums, &dir, name, url)?;
+                    (file, hash, true)
+                }
+                (Err(e), None) => return Err(format!("{}: {e}", release.asset)),
+            }
+        }
+    };
+    let installed = setup::install_update(&file, &expected);
+    // Kept for installing by hand after a failure — only while it is
+    // still what was checked (or unpacked from it).
+    let still_checked = sha256_file(&file).is_ok_and(|hash| hash == expected);
+    if installed.is_err() && still_checked {
+        let how = if listed {
+            "checked download"
+        } else {
+            "program unpacked from the checked download"
+        };
+        crate::log::line(&format!("the {how} stays at {}", file.display()));
+    } else {
+        let _ = std::fs::remove_file(&file);
+    }
+    installed
+}
+
+/// Download the asset `name` from `url` into `dir` and check it against
+/// `sums`. Returns the file and its (listed) hash.
+fn fetch(
+    agent: &ureq::Agent,
+    sums: &str,
+    dir: &Path,
+    name: &str,
+    url: &str,
+) -> Result<(PathBuf, String), String> {
+    // The name comes from the release listing and becomes a file name.
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return Err(format!("unexpected asset name {name:?}"));
+    }
+    let expected = listed_hash(sums, name).ok_or(format!("{SUMS} lists no {name}"))?;
     let file = dir.join(name);
     let mut body = agent
-        .get(&release.asset_url)
+        .get(url)
         .call()
         .map_err(|e| format!("{name}: {e}"))?
         .into_body()
@@ -245,7 +314,6 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
     let mut out = std::fs::File::create(&file).map_err(|e| e.to_string())?;
     std::io::copy(&mut body, &mut out).map_err(|e| format!("{name}: {e}"))?;
     drop(out);
-
     let actual = sha256_file(&file)?;
     if actual != expected {
         let _ = std::fs::remove_file(&file);
@@ -253,16 +321,56 @@ pub fn install(release: &Release) -> Result<Option<PathBuf>, String> {
             "{name}: hash {actual} is not the listed {expected}"
         ));
     }
-    let installed = setup::install_update(&file, &expected);
-    // Kept for installing by hand after a failure — only while it is
-    // still what was checked.
-    let still_checked = sha256_file(&file).is_ok_and(|hash| hash == expected);
-    if installed.is_err() && still_checked {
-        crate::log::line(&format!("the checked download stays at {}", file.display()));
-    } else {
-        let _ = std::fs::remove_file(&file);
+    Ok((file, expected))
+}
+
+/// Unpack the xz file `from` into `to`, at most [`MAX_ASSET`] bytes.
+/// Returns the unpacked file's SHA-256, taken while writing it.
+fn decompress(from: &Path, to: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let input = std::fs::File::open(from).map_err(|e| e.to_string())?;
+    let output = std::fs::File::create(to).map_err(|e| e.to_string())?;
+    let mut limited = Limited {
+        inner: std::io::BufWriter::new(output),
+        left: MAX_ASSET,
+        hash: Sha256::new(),
+    };
+    let result = lzma_rs::xz_decompress(&mut std::io::BufReader::new(input), &mut limited)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::io::Write::flush(&mut limited.inner).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => Ok(format!("{:x}", limited.hash.finalize())),
+        Err(e) => {
+            drop(limited);
+            let _ = std::fs::remove_file(to);
+            Err(e)
+        }
     }
-    installed
+}
+
+/// A writer that refuses more than `left` bytes (an archive must not fill
+/// the disk) and hashes what it writes.
+struct Limited<W> {
+    inner: W,
+    left: u64,
+    hash: sha2::Sha256,
+}
+
+impl<W: std::io::Write> std::io::Write for Limited<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        if buf.len() as u64 > self.left {
+            return Err(std::io::Error::other("larger than any hushkey release"));
+        }
+        let n = self.inner.write(buf)?;
+        self.hash.update(&buf[..n]);
+        self.left -= n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +425,118 @@ mod tests {
         let pre = newest(&listing(), app, true).unwrap();
         assert_eq!(pre.version, v("0.12.0-rc.1"));
         assert!(newest(&listing(), |n| n == "other.zip", true).is_none());
+    }
+
+    #[test]
+    fn the_compressed_asset_is_preferred_where_there_is_one() {
+        let release = |assets: &[&str]| {
+            serde_json::json!([{
+                "tag_name": "v0.12.0",
+                "draft": false,
+                "assets": assets.iter().map(|name| serde_json::json!({
+                    "name": name,
+                    "browser_download_url": format!("https://example.invalid/{name}"),
+                })).collect::<Vec<_>>(),
+            }])
+        };
+        let app = |n: &str| n == "app.exe";
+        // Listed before the plain file or after it: the .xz wins.
+        for assets in [
+            &["app.exe", "app.exe.xz", "SHA256SUMS"][..],
+            &["SHA256SUMS", "app.exe.xz", "app.exe"][..],
+        ] {
+            assert_eq!(
+                newest(&release(assets), app, false).unwrap().asset,
+                "app.exe.xz"
+            );
+        }
+        let picked = newest(
+            &release(&["app.exe", "app.exe.xz", "SHA256SUMS"]),
+            app,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            picked.plain,
+            Some(("app.exe".into(), "https://example.invalid/app.exe".into()))
+        );
+        // Older releases have the plain file only.
+        let plain = newest(&release(&["app.exe", "SHA256SUMS"]), app, false).unwrap();
+        assert_eq!(plain.asset, "app.exe");
+        assert_eq!(plain.plain, None);
+        // A package is never taken compressed.
+        let deb = |n: &str| n == "hushkey_0.12.0_amd64.deb";
+        let picked = newest(
+            &release(&[
+                "hushkey_0.12.0_amd64.deb",
+                "hushkey_0.12.0_amd64.deb.xz",
+                "SHA256SUMS",
+            ]),
+            deb,
+            false,
+        )
+        .unwrap();
+        assert_eq!(picked.asset, "hushkey_0.12.0_amd64.deb");
+        // Another program's archive does not count.
+        assert!(newest(&release(&["other.exe.xz", "SHA256SUMS"]), app, false).is_none());
+    }
+
+    #[test]
+    fn what_xz_compressed_is_unpacked() {
+        let dir = std::env::temp_dir().join(format!("hk-xz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Made by `xz -9e`, as the release workflow makes the assets.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/fixture.txt");
+        let out = dir.join("fixture.txt");
+        let hash = decompress(&fixture.with_extension("txt.xz"), &out).unwrap();
+        assert_eq!(hash, sha256_file(&fixture).unwrap());
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(&fixture).unwrap()
+        );
+
+        // A damaged archive fails and leaves nothing behind.
+        let mut damaged = std::fs::read(fixture.with_extension("txt.xz")).unwrap();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 0xff;
+        let bad = dir.join("bad.xz");
+        std::fs::write(&bad, damaged).unwrap();
+        assert!(decompress(&bad, &dir.join("bad")).is_err());
+        assert!(!dir.join("bad").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A release-sized archive unpacks intact with this decoder (not only
+    /// with the xz tool), and fast enough: `HUSHKEY_XZ_SAMPLE=<program>`
+    /// with `<program>.xz` beside it, `cargo test -p hushkey-app
+    /// a_release_sized -- --ignored`. The release workflow runs it on the
+    /// archives it publishes.
+    #[test]
+    #[ignore]
+    fn a_release_sized_archive_unpacks() {
+        let program = std::path::PathBuf::from(std::env::var("HUSHKEY_XZ_SAMPLE").unwrap());
+        let mut archive = program.clone().into_os_string();
+        archive.push(XZ);
+        let out = std::env::temp_dir().join(format!("hk-xz-big-{}", std::process::id()));
+        let started = std::time::Instant::now();
+        let hash = decompress(Path::new(&archive), &out).unwrap();
+        let took = started.elapsed();
+        assert_eq!(hash, sha256_file(&program).unwrap());
+        assert_eq!(sha256_file(&out).unwrap(), hash);
+        std::fs::remove_file(&out).ok();
+        eprintln!("unpacked in {took:?}");
+        assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    }
+
+    #[test]
+    fn unpacking_stops_at_the_size_limit() {
+        let mut limited = Limited {
+            inner: Vec::new(),
+            left: 4,
+            hash: <sha2::Sha256 as sha2::Digest>::new(),
+        };
+        assert!(std::io::Write::write_all(&mut limited, b"1234").is_ok());
+        assert!(std::io::Write::write_all(&mut limited, b"5").is_err());
     }
 
     #[test]

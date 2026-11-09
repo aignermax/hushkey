@@ -27,6 +27,8 @@ dirs.workspace = true
 png = "0.18"
 sha2 = "0.10"
 ureq.workspace = true
+# Updates come xz-compressed (pure Rust: no C library to build).
+lzma-rs = "0.3"
 
 [build-dependencies]
 png = "0.18"
