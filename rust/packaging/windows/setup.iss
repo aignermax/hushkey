@@ -1,7 +1,7 @@
 ; hushkey-setup-windows-x86_64.exe: the first download on Windows.
 ;
-; The program is ~58 MB, nearly all of it Vulkan shaders, which LZMA2 packs
-; to ~6 MB. This setup only carries it compressed: it unpacks hushkey.exe to
+; The program is ~12 MB, mostly Vulkan shaders, which LZMA2 packs to
+; ~3 MB. This setup only carries it compressed: it unpacks hushkey.exe to
 ; a temporary folder and runs `hushkey.exe --install`, so the program still
 ; installs itself (Start Menu, Settings > Apps entry with its own uninstall,
 ; autostart) exactly as when the plain .exe is opened. No uninstaller of its

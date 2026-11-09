@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 
 use whisper_rs::{
@@ -108,6 +108,8 @@ pub struct Engine {
     state: Mutex<WhisperState>,
     vad: Option<Mutex<WhisperVadContext>>,
     config: EngineConfig,
+    /// Whether the model runs on a GPU (see [`Engine::on_gpu`]).
+    on_gpu: bool,
     /// The last prompt and its tokens: sessions reuse one prompt for every
     /// call, and passing tokens (borrowed by whisper-rs) avoids the copy
     /// `set_initial_prompt` leaks on each call.
@@ -176,8 +178,14 @@ impl Engine {
         if !config.model.is_file() {
             return Err(Error::ModelNotFound(config.model.display().to_string()));
         }
+        // hushkey's Vulkan releases carry the shaders for f32/f16 weights
+        // only (rust/packaging/glslc-trim, which sets this variable for the
+        // build): there a quantized model runs on the CPU.
+        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
+        let use_gpu = config.use_gpu && !(trimmed && quantized_weights(&config.model));
+        let on_gpu = use_gpu && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"));
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(config.use_gpu).gpu_device(config.gpu_device);
+        params.use_gpu(use_gpu).gpu_device(config.gpu_device);
         let load_error = |reason: String| Error::ModelLoad {
             path: config.model.clone(),
             reason,
@@ -214,12 +222,19 @@ impl Engine {
             state: Mutex::new(state),
             vad,
             config,
+            on_gpu,
             prompt_tokens: Mutex::new(None),
         })
     }
 
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Whether the model runs on a GPU: asked for, built with a GPU
+    /// backend, and not a quantized model in a build without its shaders.
+    pub fn on_gpu(&self) -> bool {
+        self.on_gpu
     }
 
     /// Whether a VAD model is loaded (needed for continuous listening).
@@ -423,4 +438,53 @@ fn threads(configured: usize) -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4)
+}
+
+/// Whether a GGML whisper model stores its weights quantized: the header's
+/// `ftype` is 0 for f32, 1 for f16, more for the quantized types (plus 1000
+/// per quantization version). A file that does not read as a GGML model
+/// counts as not quantized; loading it reports the problem.
+fn quantized_weights(path: &Path) -> bool {
+    let mut header = [0u8; 48];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header));
+    if read.is_err() {
+        return false;
+    }
+    let word = |i: usize| u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+    // "ggml", n_vocab … n_mels (10 numbers), ftype.
+    word(0) == 0x6767_6d6c && word(11) % 1000 > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantized_weights_are_told_by_the_header() {
+        let dir = std::env::temp_dir().join(format!("hk-ftype-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = |name: &str, magic: u32, ftype: u32| {
+            // ggml-tiny.bin's hyperparameters.
+            let mut bytes = magic.to_le_bytes().to_vec();
+            for n in [51865u32, 1500, 384, 6, 4, 448, 384, 6, 4, 80, ftype] {
+                bytes.extend(n.to_le_bytes());
+            }
+            bytes.extend([0u8; 16]);
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        const GGML: u32 = 0x6767_6d6c;
+        assert!(!quantized_weights(&model("f32.bin", GGML, 0)));
+        assert!(!quantized_weights(&model("f16.bin", GGML, 1)));
+        // q5_0 as quantize writes it (quantization version 2).
+        assert!(quantized_weights(&model("q5_0.bin", GGML, 2008)));
+        assert!(quantized_weights(&model("q8_0.bin", GGML, 7)));
+        assert!(!quantized_weights(&model("other.bin", 0x4655_4747, 8)));
+        assert!(!quantized_weights(&dir.join("missing.bin")));
+        std::fs::write(dir.join("short.bin"), b"ggml").unwrap();
+        assert!(!quantized_weights(&dir.join("short.bin")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

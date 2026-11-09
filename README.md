@@ -21,7 +21,7 @@ Or take the file for your system straight from the
 
 | System | File | What it is |
 |---|---|---|
-| **Windows** 10+, 64-bit | `hushkey-setup-windows-x86_64.exe` | Setup, ~6 MB: installs the program. (`hushkey-windows-x86_64.exe` is the program itself, ~58 MB; run once, it installs itself too.) |
+| **Windows** 10+, 64-bit | `hushkey-setup-windows-x86_64.exe` | Setup, ~5 MB: installs the program. (`hushkey-windows-x86_64.exe` is the program itself, ~12 MB; run once, it installs itself too.) |
 | **Linux** Debian/Ubuntu, 64-bit | `hushkey_<version>_amd64.deb` | Package: `sudo apt install ./hushkey_*.deb` |
 | **Linux** Debian/Ubuntu, ARM | `hushkey_<version>_arm64.deb` | Same, for a Raspberry Pi and the like |
 | **Linux** any distribution | `hushkey-linux-x86_64`, `…-aarch64` | Plain program: `chmod +x` it, then `./hushkey --install` |
