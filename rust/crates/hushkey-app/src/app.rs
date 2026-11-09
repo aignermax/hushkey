@@ -320,10 +320,12 @@ impl App {
                     .map_err(|e| e.to_string())?;
                 // Only a GPU has pipelines to build; on the CPU this would
                 // just be seconds of work.
-                if config.use_gpu
+                if engine.on_gpu() {
+                    warm_up(&engine);
+                } else if config.use_gpu
                     && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"))
                 {
-                    warm_up(&engine);
+                    log::line("quantized model: it runs on the CPU in this build");
                 }
                 Ok(engine)
             })();

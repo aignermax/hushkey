@@ -9,12 +9,13 @@
 //!
 //! The release workflow puts this program in the real glslc's place (that
 //! one moves to `real-glslc`, named in `HUSHKEY_REAL_GLSLC`), so CMake finds
-//! it however it looks. whisper.cpp's shader generator
-//! then runs it once per shader with `-o <dir>/<shader name>.spv`: shaders
-//! named for a quantized type get a SPIR-V header and nothing else (the
-//! generator needs a non-empty file to define the symbol), everything else
-//! goes to the real glslc unchanged. hushkey-core runs quantized models on
-//! the CPU, so these placeholders are never compiled into a pipeline.
+//! it however it looks. whisper.cpp's shader generator then runs it once per
+//! shader with `-o <dir>/<shader name>.spv`: shaders named for a quantized
+//! type get a SPIR-V header and nothing else (the generator needs a
+//! non-empty file to define the symbol), everything else goes to the real
+//! glslc unchanged. The workflow also sets `HUSHKEY_TRIMMED_SHADERS`, which
+//! makes hushkey-core run quantized models on the CPU, so these placeholders
+//! are never compiled into a pipeline.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -45,12 +46,51 @@ fn dropped(name: &str) -> bool {
     })
 }
 
+/// The value after `flag` (`-o <file>`, `-MF <file>`).
+fn value<'a>(args: &'a [OsString], flag: &str) -> Option<&'a Path> {
+    let at = args.iter().position(|a| a == flag)?;
+    args.get(at + 1).map(Path::new)
+}
+
 /// The output file of a glslc call (`-o <file>`), unless it writes to
 /// stdout.
 fn output(args: &[OsString]) -> Option<&Path> {
-    let at = args.iter().position(|a| a == "-o")?;
-    let out = Path::new(args.get(at + 1)?);
-    (out != Path::new("-")).then_some(out)
+    value(args, "-o").filter(|out| *out != Path::new("-"))
+}
+
+/// The shader source: the argument that is neither a flag nor a flag's
+/// value.
+fn input(args: &[OsString]) -> Option<&Path> {
+    let mut after_flag = false;
+    for arg in args {
+        if std::mem::take(&mut after_flag) {
+            continue;
+        }
+        if arg == "-o" || arg == "-MF" {
+            after_flag = true;
+        } else if !arg.to_string_lossy().starts_with('-') {
+            return Some(Path::new(arg));
+        }
+    }
+    None
+}
+
+/// A path in a Make rule.
+fn make_path(path: &Path) -> String {
+    path.to_string_lossy().replace(' ', "\\ ")
+}
+
+/// Writes the placeholder to `out`, and with `-MF <file>` the dependency
+/// file glslc would: whisper.cpp's build reads it to know when an included
+/// source changed.
+fn placeholder(args: &[OsString], out: &Path) -> std::io::Result<()> {
+    let bytes: Vec<u8> = PLACEHOLDER.iter().flat_map(|w| w.to_le_bytes()).collect();
+    std::fs::write(out, bytes)?;
+    if let Some(depfile) = value(args, "-MF") {
+        let source = input(args).map(make_path).unwrap_or_default();
+        std::fs::write(depfile, format!("{}: {source}\n", make_path(out)))?;
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -58,8 +98,7 @@ fn main() -> ExitCode {
     if let Some(out) = output(&args) {
         let name = out.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         if dropped(name) {
-            let bytes: Vec<u8> = PLACEHOLDER.iter().flat_map(|w| w.to_le_bytes()).collect();
-            return match std::fs::write(out, bytes) {
+            return match placeholder(&args, out) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("glslc-trim: {}: {e}", out.display());
@@ -74,7 +113,8 @@ fn main() -> ExitCode {
     };
     match Command::new(&real).args(&args).status() {
         Ok(status) => match status.code() {
-            Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
+            // A crash's NTSTATUS on Windows is negative: still a failure.
+            Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
             None => ExitCode::FAILURE,
         },
         Err(e) => {
@@ -135,5 +175,38 @@ mod tests {
         // CMake's extension probes write to stdout.
         assert_eq!(output(&args(&["-o", "-", "test.comp"])), None);
         assert_eq!(output(&args(&["--version"])), None);
+    }
+
+    #[test]
+    fn a_placeholder_comes_with_its_dependency_file() {
+        let dir = std::env::temp_dir().join(format!("glslc-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("dequant_q4_0.spv");
+        let depfile = dir.join("dequant.cpp.d");
+        // As whisper.cpp's generator calls glslc.
+        let args: Vec<OsString> = [
+            "-fshader-stage=compute",
+            "--target-env=vulkan1.2",
+            "my shaders/dequant.comp",
+            "-o",
+            out.to_str().unwrap(),
+            "-O",
+            "-MD",
+            "-MF",
+            depfile.to_str().unwrap(),
+            "-DDATA_A_Q4_0=1",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        placeholder(&args, &out).unwrap();
+        let spirv = std::fs::read(&out).unwrap();
+        assert_eq!(spirv.len(), 20);
+        assert_eq!(&spirv[..4], &0x0723_0203u32.to_le_bytes());
+        assert_eq!(
+            std::fs::read_to_string(&depfile).unwrap(),
+            format!("{}: my\\ shaders/dequant.comp\n", out.display())
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

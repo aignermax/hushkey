@@ -108,6 +108,8 @@ pub struct Engine {
     state: Mutex<WhisperState>,
     vad: Option<Mutex<WhisperVadContext>>,
     config: EngineConfig,
+    /// Whether the model runs on a GPU (see [`Engine::on_gpu`]).
+    on_gpu: bool,
     /// The last prompt and its tokens: sessions reuse one prompt for every
     /// call, and passing tokens (borrowed by whisper-rs) avoids the copy
     /// `set_initial_prompt` leaks on each call.
@@ -177,9 +179,11 @@ impl Engine {
             return Err(Error::ModelNotFound(config.model.display().to_string()));
         }
         // hushkey's Vulkan releases carry the shaders for f32/f16 weights
-        // only (rust/packaging/glslc-trim): a quantized model runs on the CPU.
-        let use_gpu =
-            config.use_gpu && !(cfg!(feature = "vulkan") && quantized_weights(&config.model));
+        // only (rust/packaging/glslc-trim, which sets this variable for the
+        // build): there a quantized model runs on the CPU.
+        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
+        let use_gpu = config.use_gpu && !(trimmed && quantized_weights(&config.model));
+        let on_gpu = use_gpu && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"));
         let mut params = WhisperContextParameters::default();
         params.use_gpu(use_gpu).gpu_device(config.gpu_device);
         let load_error = |reason: String| Error::ModelLoad {
@@ -218,12 +222,19 @@ impl Engine {
             state: Mutex::new(state),
             vad,
             config,
+            on_gpu,
             prompt_tokens: Mutex::new(None),
         })
     }
 
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Whether the model runs on a GPU: asked for, built with a GPU
+    /// backend, and not a quantized model in a build without its shaders.
+    pub fn on_gpu(&self) -> bool {
+        self.on_gpu
     }
 
     /// Whether a VAD model is loaded (needed for continuous listening).

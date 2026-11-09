@@ -10,7 +10,7 @@
 //!
 //! Where a release also carries the program compressed (`<asset>.xz`),
 //! that is downloaded instead: the Windows and Linux programs are mostly
-//! Vulkan shaders, which xz shrinks from ~58 MB to ~6.5 MB. The hash
+//! Vulkan shaders, which xz shrinks to a fifth or less. The hash
 //! checked is the compressed file's, as `SHA256SUMS` lists it; should
 //! unpacking fail anyway, the plain program is downloaded after all.
 

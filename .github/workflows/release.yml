@@ -4,8 +4,9 @@ name: release
 # (a pre-release when the tag has a suffix: v0.11.0-rc.1). The app updates
 # itself from these assets, and install.ps1 / install.sh download them.
 #
-# The Windows and Linux programs are ~45-58 MB, nearly all Vulkan shaders;
-# xz packs them to ~6 MB. So each also goes up as <asset>.xz, which the
+# The Windows and Linux programs are ~12 MB, mostly Vulkan shaders (those
+# for quantized weights are left out, see glslc-trim below); xz packs them
+# to ~3 MB. So each also goes up as <asset>.xz, which the
 # updater (0.11.3 on) downloads instead, and Windows gets a small setup
 # (hushkey-setup-windows-x86_64.exe) for the first download. The plain
 # files stay: earlier versions update from them.
@@ -20,7 +21,8 @@ on:
     tags: ["v*"]
   # A trial build (nothing published) when the build itself changes.
   pull_request:
-    paths: [".github/workflows/release.yml", "rust/packaging/**", "rust/Cargo.toml", "rust/crates/hushkey-app/**"]
+    paths: [".github/workflows/release.yml", "rust/packaging/**", "rust/Cargo.toml", "rust/crates/hushkey-app/**",
+            "rust/crates/hushkey-core/**", "rust/crates/hushkey-cli/**"]
   workflow_dispatch:
 
 jobs:
@@ -100,6 +102,8 @@ jobs:
       # ~49 MB of the program's SPIR-V that hushkey's f16 models never use
       # (see rust/packaging/glslc-trim). It takes the real glslc's place, so
       # whichever way CMake looks for glslc, it finds this one.
+      # HUSHKEY_TRIMMED_SHADERS tells hushkey-core, which then runs quantized
+      # models on the CPU.
       - name: Shader compiler that leaves out quantized types (Windows, Linux)
         if: matrix.features == 'vulkan'
         shell: pwsh
@@ -107,14 +111,19 @@ jobs:
           $manifest = "rust/packaging/glslc-trim/Cargo.toml"
           cargo test --release --manifest-path $manifest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --release --manifest-path $manifest
+          # Its own target folder: CARGO_TARGET_DIR is the app's.
+          $target = Join-Path $env:RUNNER_TEMP glslc-trim
+          cargo build --release --manifest-path $manifest --target-dir $target
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $glslc = (Get-Command glslc).Source
           $exe = Split-Path $glslc -Leaf
+          $trim = Join-Path $target "release/$exe"
+          if (-not (Test-Path $trim)) { throw "no $trim" }
           $real = Join-Path (Split-Path $glslc) "real-$exe"
           Move-Item $glslc $real
-          Copy-Item "rust/packaging/glslc-trim/target/release/$exe" $glslc
+          Copy-Item $trim $glslc
           "HUSHKEY_REAL_GLSLC=$real" >> $env:GITHUB_ENV
+          "HUSHKEY_TRIMMED_SHADERS=1" >> $env:GITHUB_ENV
 
       - name: Build
         working-directory: rust
@@ -136,7 +145,7 @@ jobs:
           ls -l dist
 
       # Should CMake have found the real glslc after all, the program would
-      # carry every shader again (~45-58 MB instead of ~10).
+      # carry every shader again (~45-58 MB instead of ~12).
       - name: The quantized shaders are left out (Windows, Linux)
         if: matrix.features == 'vulkan'
         run: |
@@ -204,6 +213,30 @@ jobs:
           chmod +x dist/${{ matrix.asset }}
           ldd dist/${{ matrix.asset }}
           dist/${{ matrix.asset }} --version | grep -F "$(grep -m1 '^version' rust/Cargo.toml | cut -d'"' -f2)"
+
+      # The left-out shaders must be ones whisper never asks for: a real
+      # transcription on a Vulkan device (lavapipe, Mesa's CPU-side driver,
+      # which ggml-vulkan uses only when named). A quantized model runs on
+      # the CPU instead of reaching a placeholder.
+      - name: The trimmed shaders transcribe (Linux, lavapipe)
+        if: runner.os == 'Linux'
+        working-directory: rust
+        run: |
+          sudo apt-get install -y mesa-vulkan-drivers
+          cargo build --release -p hushkey-cli --features ${{ matrix.features }}
+          data="$RUNNER_TEMP/speech"
+          mkdir -p "$data"
+          curl -sSfL -o "$data/ggml-tiny.bin" https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+          curl -sSfL -o "$data/ggml-tiny-q5_1.bin" https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          curl -sSfL -o "$data/jfk.wav" https://raw.githubusercontent.com/ggml-org/whisper.cpp/927cfce34f31707e17f2bff35c349632fb9e2c3a/samples/jfk.wav
+          for model in ggml-tiny ggml-tiny-q5_1; do
+            GGML_VK_VISIBLE_DEVICES=0 HUSHKEY_WHISPER_LOG=1 target/release/hushkey-cli --model "$data/$model.bin" -l en \
+              transcribe "$data/jfk.wav" > "$data/$model.txt" 2> "$data/$model.log" || { cat "$data/$model.log"; exit 1; }
+            echo "$model: $(cat "$data/$model.txt")"
+            grep -qi "ask not what your country can do for you" "$data/$model.txt"
+          done
+          grep -F "using Vulkan0 backend" "$data/ggml-tiny.log"
+          grep -E "use gpu += 0" "$data/ggml-tiny-q5_1.log"
 
       # Built here, where the runner's architecture is the package's.
       - name: Package .deb (Linux)
