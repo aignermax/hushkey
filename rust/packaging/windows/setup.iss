@@ -56,7 +56,32 @@ WizardStyle=modern
 [Files]
 Source: "{#Source}"; DestDir: "{tmp}"; DestName: "hushkey.exe"; Flags: ignoreversion
 
-[Run]
-; --install copies the program into %LOCALAPPDATA%\Programs\hushkey and
-; starts it; the temporary copy is removed with {tmp} afterwards.
-Filename: "{tmp}\hushkey.exe"; Parameters: "--install"; StatusMsg: "Installing hushkey …"; Flags: waituntilterminated
+[Code]
+// --install copies the program into %LOCALAPPDATA%\Programs\hushkey and
+// starts it; the temporary copy goes with {tmp} afterwards. Run from here
+// rather than [Run], whose entries ignore exit codes: a failed install
+// must fail the setup (silent and managed installs only see the code).
+var
+  InstallResult: Integer;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    WizardForm.StatusLabel.Caption := 'Installing hushkey …';
+    if not Exec(ExpandConstant('{tmp}\hushkey.exe'), '--install', '', SW_SHOWNORMAL,
+                ewWaitUntilTerminated, InstallResult) then
+      InstallResult := -1;
+    if InstallResult <> 0 then
+      SuppressibleMsgBox('hushkey could not be installed (code ' + IntToStr(InstallResult)
+        + '). The log is in %LOCALAPPDATA%\hushkey-rs.', mbError, MB_OK, IDOK);
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if InstallResult <> 0 then
+    Result := 1
+  else
+    Result := 0;
+end;

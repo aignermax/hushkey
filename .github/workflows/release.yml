@@ -118,24 +118,38 @@ jobs:
       - name: Compress (Windows, Linux)
         if: runner.os != 'macOS'
         run: |
-          # No BCJ filter: the updater's decoder (lzma-rs) reads LZMA2 only.
-          xz -9e -T0 -k "dist/${{ matrix.asset }}"
+          # No BCJ filter and CRC64: what the updater's decoder (lzma-rs)
+          # reads. 8 MiB blocks: it holds one block in memory at a time.
+          xz -9e -T0 --block-size=8MiB --check=crc64 -k "dist/${{ matrix.asset }}"
           xz -t "dist/${{ matrix.asset }}.xz"
           packed="$(xz -dc "dist/${{ matrix.asset }}.xz" | sha256sum | cut -d' ' -f1)"
           plain="$(sha256sum "dist/${{ matrix.asset }}" | cut -d' ' -f1)"
           test "$packed" = "$plain"
           ls -l dist
 
+      - name: The updater's own decoder reads the archive (Windows, Linux)
+        if: runner.os != 'macOS'
+        working-directory: rust
+        shell: pwsh
+        run: |
+          $env:HUSHKEY_XZ_SAMPLE = (Resolve-Path "../dist/${{ matrix.asset }}").Path
+          cargo test --release -p hushkey-app --features ${{ matrix.features }} a_release_sized -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Setup (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          $ver = (Select-String -Path rust/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          # As the other steps read it: the first `version = "…"` line.
+          $ver = (Select-String -Path rust/Cargo.toml -Pattern '^version = "([^"]+)"' -List).Matches[0].Groups[1].Value
           $numeric = ($ver -split '-')[0] + ".0"
           $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "rust/target" }
-          # The icon build.rs made for the program.
-          $icon = (Get-ChildItem "$target/release/build/hushkey-app-*/out/hushkey.ico" | Select-Object -First 1).FullName
+          # The icon build.rs made for the program (the newest, should the
+          # target folder hold older builds).
+          $icon = (Get-ChildItem "$target/release/build/hushkey-app-*/out/hushkey.ico" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          if (-not $icon) { throw "no hushkey.ico from build.rs under $target" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DVersion=$ver" "/DFileVersion=$numeric" `
             "/DSource=$((Resolve-Path dist/${{ matrix.asset }}).Path)" "/DIcon=$icon" "/O$((Resolve-Path dist).Path)" `
             rust/packaging/windows/setup.iss
@@ -148,6 +162,7 @@ jobs:
         timeout-minutes: 5
         run: |
           $p = Start-Process dist/hushkey-setup-windows-x86_64.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -PassThru
+          $null = $p.Handle  # keeps ExitCode readable after a fast exit
           $p.WaitForExit()
           if ($p.ExitCode -ne 0) { throw "setup exit $($p.ExitCode)" }
           $installed = "$env:LOCALAPPDATA\Programs\hushkey\hushkey.exe"
