@@ -1,0 +1,14 @@
+# Build tool for the release workflow only, not part of the app: it stands
+# in for glslc while whisper.cpp compiles its Vulkan shaders (see main.rs).
+[package]
+name = "glslc-trim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "glslc"
+path = "src/main.rs"
+
+# Its own workspace: rust/Cargo.toml's is the app's.
+[workspace]

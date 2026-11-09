@@ -96,6 +96,26 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
 
+      # whisper.cpp's shaders without the ones for quantized weights:
+      # ~49 MB of the program's SPIR-V that hushkey's f16 models never use
+      # (see rust/packaging/glslc-trim). It takes the real glslc's place, so
+      # whichever way CMake looks for glslc, it finds this one.
+      - name: Shader compiler that leaves out quantized types (Windows, Linux)
+        if: matrix.features == 'vulkan'
+        shell: pwsh
+        run: |
+          $manifest = "rust/packaging/glslc-trim/Cargo.toml"
+          cargo test --release --manifest-path $manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --manifest-path $manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $glslc = (Get-Command glslc).Source
+          $exe = Split-Path $glslc -Leaf
+          $real = Join-Path (Split-Path $glslc) "real-$exe"
+          Move-Item $glslc $real
+          Copy-Item "rust/packaging/glslc-trim/target/release/$exe" $glslc
+          "HUSHKEY_REAL_GLSLC=$real" >> $env:GITHUB_ENV
+
       - name: Build
         working-directory: rust
         # PowerShell: in Git Bash, coreutils' link.exe shadows MSVC's linker.
@@ -114,6 +134,15 @@ jobs:
               (cd dist && ditto -c -k --keepParent hushkey.app "${{ matrix.asset }}" && rm -rf hushkey.app) ;;
           esac
           ls -l dist
+
+      # Should CMake have found the real glslc after all, the program would
+      # carry every shader again (~45-58 MB instead of ~10).
+      - name: The quantized shaders are left out (Windows, Linux)
+        if: matrix.features == 'vulkan'
+        run: |
+          size=$(stat -c %s "dist/${{ matrix.asset }}")
+          echo "$size bytes"
+          test "$size" -lt 25000000 || { echo "every shader is in: glslc-trim was not used"; exit 1; }
 
       - name: Compress (Windows, Linux)
         if: runner.os != 'macOS'
