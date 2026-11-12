@@ -41,6 +41,12 @@ pub struct Strings {
     pub remove_old_failed: &'static str,
     pub update_cancelled: &'static str,
     pub package_busy: &'static str,
+    /// The first steps, until the first dictation. `{key}`: the key's name.
+    pub guide_hold: &'static str,
+    pub guide_listening: &'static str,
+    pub guide_done: &'static str,
+    /// Caps Lock as the first steps name it.
+    caps_lock: &'static str,
 }
 
 impl Strings {
@@ -61,6 +67,18 @@ impl Strings {
             self.paste_keys
         };
         fill(self.copied, &[("paste", keys)])
+    }
+
+    /// The push-to-talk key as the first steps name it.
+    pub fn key_name(&self, key: &str) -> &'static str {
+        let vk = crate::config::virtual_key(key);
+        if vk == crate::config::virtual_key("caps_lock") {
+            return self.caps_lock;
+        }
+        KEY_LABELS
+            .iter()
+            .find(|(name, _)| vk.is_some() && crate::config::virtual_key(name) == vk)
+            .map_or("", |(_, label)| label)
     }
 }
 
@@ -101,6 +119,10 @@ pub static EN: Strings = Strings {
     remove_old_failed: "the old version is not fully removed — see the logs",
     update_cancelled: "update cancelled",
     package_busy: "the package manager is busy — try again in a few minutes",
+    guide_hold: "Welcome! Click into a text field, hold {key} and speak — let go, and the text appears there.",
+    guide_listening: "listening … let go when you are done",
+    guide_done: "Done! The text always goes where your cursor is, in any program.",
+    caps_lock: "Caps Lock",
 };
 
 pub static DE: Strings = Strings {
@@ -140,6 +162,10 @@ pub static DE: Strings = Strings {
     remove_old_failed: "die alte Version ist nicht ganz entfernt — siehe Logs",
     update_cancelled: "Update abgebrochen",
     package_busy: "die Paketverwaltung ist beschäftigt — in ein paar Minuten nochmal versuchen",
+    guide_hold: "Willkommen! Klick in ein Textfeld, halte {key} gedrückt und sprich — beim Loslassen erscheint der Text dort.",
+    guide_listening: "ich höre zu … loslassen, wenn du fertig bist",
+    guide_done: "Geschafft! Der Text landet immer dort, wo der Cursor steht, in jedem Programm.",
+    caps_lock: "die Feststelltaste (Caps Lock)",
 };
 
 pub static IT: Strings = Strings {
@@ -179,6 +205,10 @@ pub static IT: Strings = Strings {
     remove_old_failed: "la vecchia versione non è stata rimossa del tutto — vedi i log",
     update_cancelled: "aggiornamento annullato",
     package_busy: "il gestore dei pacchetti è occupato — riprova tra qualche minuto",
+    guide_hold: "Benvenuto! Fai clic in un campo di testo, tieni premuto {key} e parla — quando lo rilasci, il testo appare lì.",
+    guide_listening: "ti ascolto … rilascia quando hai finito",
+    guide_done: "Fatto! Il testo va sempre dove si trova il cursore, in qualsiasi programma.",
+    caps_lock: "Bloc Maiusc (Caps Lock)",
 };
 
 pub static ES: Strings = Strings {
@@ -218,6 +248,10 @@ pub static ES: Strings = Strings {
     remove_old_failed: "la versión antigua no se ha quitado del todo — consulta los registros",
     update_cancelled: "actualización cancelada",
     package_busy: "el gestor de paquetes está ocupado — inténtalo de nuevo en unos minutos",
+    guide_hold: "¡Bienvenido! Haz clic en un campo de texto, mantén pulsada la tecla {key} y habla — al soltarla, el texto aparece ahí.",
+    guide_listening: "te escucho … suelta cuando termines",
+    guide_done: "¡Listo! El texto siempre va donde está el cursor, en cualquier programa.",
+    caps_lock: "Bloq Mayús (Caps Lock)",
 };
 
 pub static FR: Strings = Strings {
@@ -257,6 +291,10 @@ pub static FR: Strings = Strings {
     remove_old_failed: "l'ancienne version n'est pas entièrement supprimée — voir les journaux",
     update_cancelled: "mise à jour annulée",
     package_busy: "le gestionnaire de paquets est occupé — réessayez dans quelques minutes",
+    guide_hold: "Bienvenue ! Cliquez dans un champ de texte, maintenez {key} enfoncée et parlez — en relâchant, le texte y apparaît.",
+    guide_listening: "je vous écoute … relâchez quand vous avez fini",
+    guide_done: "C'est fait ! Le texte va toujours là où se trouve le curseur, dans n'importe quel programme.",
+    caps_lock: "la touche Verr. Maj (Caps Lock)",
 };
 
 pub static ZH: Strings = Strings {
@@ -296,6 +334,10 @@ pub static ZH: Strings = Strings {
     remove_old_failed: "旧版未完全删除 — 请查看日志",
     update_cancelled: "更新已取消",
     package_busy: "软件包管理器正忙 — 请几分钟后再试",
+    guide_hold: "欢迎！点击一个文本框，按住 {key} 说话——松开后文字就会出现在那里。",
+    guide_listening: "正在听 … 说完后松开",
+    guide_done: "完成！文字总会出现在光标所在的位置，任何程序都可以。",
+    caps_lock: "大写锁定键 (Caps Lock)",
 };
 
 pub static KN: Strings = Strings {
@@ -335,6 +377,10 @@ pub static KN: Strings = Strings {
     remove_old_failed: "ಹಳೆಯ ಆವೃತ್ತಿ ಸಂಪೂರ್ಣವಾಗಿ ತೆಗೆದುಹಾಕಲಾಗಿಲ್ಲ — ಲಾಗ್‌ಗಳನ್ನು ನೋಡಿ",
     update_cancelled: "ಅಪ್‌ಡೇಟ್ ರದ್ದುಗೊಂಡಿದೆ",
     package_busy: "ಪ್ಯಾಕೇಜ್ ನಿರ್ವಾಹಕ ಕಾರ್ಯನಿರತವಾಗಿದೆ — ಕೆಲವು ನಿಮಿಷಗಳ ನಂತರ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ",
+    guide_hold: "ಸ್ವಾಗತ! ಒಂದು ಪಠ್ಯ ಕ್ಷೇತ್ರದಲ್ಲಿ ಕ್ಲಿಕ್ ಮಾಡಿ, {key} ಒತ್ತಿ ಹಿಡಿದು ಮಾತನಾಡಿ — ಬಿಟ್ಟಾಗ ಪಠ್ಯ ಅಲ್ಲಿ ಕಾಣಿಸುತ್ತದೆ.",
+    guide_listening: "ಕೇಳುತ್ತಿದ್ದೇನೆ … ಮುಗಿದ ಮೇಲೆ ಬಿಡಿ",
+    guide_done: "ಮುಗಿಯಿತು! ಪಠ್ಯ ಯಾವಾಗಲೂ ಕರ್ಸರ್ ಇರುವಲ್ಲಿಗೆ ಹೋಗುತ್ತದೆ, ಯಾವುದೇ ಪ್ರೋಗ್ರಾಂನಲ್ಲಿ.",
+    caps_lock: "Caps Lock",
 };
 
 /// The words for a language code (`de`, `de-AT`, `zh_CN.UTF-8`, `kn`),
@@ -533,6 +579,18 @@ mod tests {
     }
 
     #[test]
+    fn the_first_steps_name_the_key() {
+        assert_eq!(DE.key_name("caps_lock"), "die Feststelltaste (Caps Lock)");
+        // As forgivingly spelt as the settings accept it.
+        assert_eq!(EN.key_name("Caps Lock"), "Caps Lock");
+        assert_eq!(DE.key_name("right_ctrl"), "Right Ctrl");
+        assert_eq!(
+            fill(DE.guide_hold, &[("key", DE.key_name("f9"))]),
+            "Willkommen! Klick in ein Textfeld, halte F9 gedrückt und sprich — beim Loslassen erscheint der Text dort."
+        );
+    }
+
+    #[test]
     fn templates_fill_in() {
         assert_eq!(
             fill(DE.model_loading, &[("model", "tiny"), ("size", "~75 MB")]),
@@ -605,6 +663,7 @@ mod tests {
         for s in [&EN, &DE, &IT, &ES, &FR, &ZH, &KN] {
             assert!(s.model_loading.contains("{model}") && s.model_loading.contains("{size}"));
             assert!(s.update_install.contains("{version}"));
+            assert!(s.guide_hold.contains("{key}"));
             assert!(!s.copied().contains('{'));
         }
         if !cfg!(target_os = "macos") {

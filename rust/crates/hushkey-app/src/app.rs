@@ -43,6 +43,8 @@ const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
 const NOTICE: Duration = Duration::from_secs(2);
 /// A failure to act on stays longer.
 const FAILURE_NOTICE: Duration = Duration::from_secs(8);
+/// The first steps' last word ("the text goes where the cursor is").
+const GUIDE_DONE: Duration = Duration::from_secs(8);
 /// Updates are looked for at start and then this often.
 const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -50,6 +52,9 @@ const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 const RED: [u8; 3] = [0xe5, 0x3e, 0x3e];
 const ORANGE: [u8; 3] = [0xdd, 0x6b, 0x20];
 const GREY: [u8; 3] = [0x71, 0x80, 0x96];
+/// The first steps.
+const BLUE: [u8; 3] = [0x31, 0x82, 0xce];
+const GREEN: [u8; 3] = [0x38, 0xa1, 0x69];
 
 enum Msg {
     Key(KeyEvent),
@@ -261,6 +266,7 @@ impl App {
             {
                 self.notice_until = None;
                 self.overlay.hide();
+                self.guide();
             }
             // Sleep until a system event arrives, or poll the channels
             // again soon.
@@ -305,6 +311,11 @@ impl App {
             &[("model", &self.config.model), ("size", size)],
         );
         self.tray.show(Badge::Loading, &text);
+        if self.config.guide {
+            // A new install downloads its model first, which takes a
+            // while: say so where it is seen, not only in the tray.
+            self.overlay.show(GREY, &text);
+        }
         let (config, tx) = (self.config.clone(), self.tx.clone());
         std::thread::spawn(move || {
             let result = (|| {
@@ -364,8 +375,12 @@ impl App {
             }
             Msg::Loaded(_, Err(e)) => {
                 log::line(&format!("model failed: {e}"));
-                self.tray
-                    .show(Badge::Failed, &format!("{}: {e}", self.s.failed));
+                let text = format!("{}: {e}", self.s.failed);
+                self.tray.show(Badge::Failed, &text);
+                if self.config.guide {
+                    // In place of the loading notice.
+                    self.failure_notice(&text);
+                }
             }
             Msg::Key(KeyEvent::Down) => self.key_down(),
             Msg::Key(KeyEvent::Up) => self.key_up(),
@@ -397,9 +412,18 @@ impl App {
                 self.idle();
             }
             Msg::Inserted(result) => {
+                let inserted = result.is_ok();
                 match result {
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
                     Err(e) => log::line(&format!("insert failed: {e}")),
+                }
+                if inserted && self.config.guide {
+                    // The first dictation is in: the first steps are done.
+                    log::line("first steps done");
+                    self.config.guide = false;
+                    self.save(|c| c.guide = false);
+                    self.overlay.show(GREEN, self.s.guide_done);
+                    self.notice_until = Some(Instant::now() + GUIDE_DONE);
                 }
                 if !self.busy && self.recording.is_none() && !self.hearing {
                     self.idle();
@@ -537,6 +561,24 @@ impl App {
             Badge::None
         };
         self.tray.show(badge, &text);
+        self.guide();
+    }
+
+    /// The first steps, for a new install until its first dictation: how
+    /// to dictate, in the overlay whenever hushkey waits for the key.
+    fn guide(&mut self) {
+        let waiting = self.engine.is_some()
+            && self.config.mode == Mode::PushToTalk
+            && self.listening.is_none()
+            && self.recording.is_none()
+            && !self.busy
+            && !self.updating
+            && self.notice_until.is_none();
+        if self.config.guide && waiting {
+            let key = self.s.key_name(&self.config.key);
+            self.overlay
+                .show(BLUE, &strings::fill(self.s.guide_hold, &[("key", key)]));
+        }
     }
 
     fn key_down(&mut self) {
@@ -564,7 +606,12 @@ impl App {
             Ok(session) => {
                 self.recording = Some(session);
                 self.notice_until = None;
-                self.overlay.show(RED, self.s.recording);
+                let text = if self.config.guide {
+                    self.s.guide_listening
+                } else {
+                    self.s.recording
+                };
+                self.overlay.show(RED, text);
                 self.tray.show(Badge::Recording, self.s.recording);
             }
             Err(e) => {
@@ -629,6 +676,8 @@ impl App {
                         self.hotkey = Some(h);
                         self.config.key = name.to_string();
                         self.save(|c| c.key = name.to_string());
+                        // The first steps name the new key.
+                        self.guide();
                     }
                     Err(e) => {
                         log::line(&format!("key not changed: {e}"));

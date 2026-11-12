@@ -73,6 +73,10 @@ pub struct Config {
     pub brain: Option<BrainSettings>,
     pub use_gpu: bool,
     pub updates: Updates,
+    /// Show the first steps (hold the key, speak, let go) until the first
+    /// dictation. Set for a new install only: missing means not wanted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guide: bool,
 }
 
 impl Default for Config {
@@ -89,6 +93,7 @@ impl Default for Config {
             brain: None,
             use_gpu: true,
             updates: Updates::Auto,
+            guide: false,
         }
     }
 }
@@ -145,7 +150,12 @@ impl Config {
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let config = Config::default();
+                // A new install (a handover from the Python app has
+                // written the file by now): show it the first steps.
+                let config = Config {
+                    guide: true,
+                    ..Config::default()
+                };
                 config.save()?;
                 Ok(config)
             }
@@ -208,6 +218,21 @@ mod tests {
         assert_eq!(partial.key, "f9");
         assert_eq!(partial.language.as_deref(), Some("de"));
         assert_eq!(partial.model, "large-v3-turbo");
+    }
+
+    #[test]
+    fn the_first_steps_are_for_new_installs_only() {
+        // Settings written before there were first steps: none shown.
+        assert!(!Config::parse(r#"{"key": "f9"}"#).unwrap().guide);
+        let new = Config {
+            guide: true,
+            ..Config::default()
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        assert!(Config::parse(&text).unwrap().guide);
+        // Once done, the setting leaves the file.
+        let done = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!done.contains("guide"), "{done}");
     }
 
     #[test]
