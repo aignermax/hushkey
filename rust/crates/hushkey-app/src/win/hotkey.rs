@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
@@ -114,6 +116,12 @@ impl Hotkey {
         let thread = std::thread::Builder::new()
             .name("hushkey-hotkey".into())
             .spawn(move || unsafe {
+                // Windows waits for this thread on every key press anyone
+                // makes, and passes the key on without it once it is late:
+                // under load (a transcription on every core) the held key's
+                // repeats went missing, and a dictation ended mid-sentence.
+                // Its work is a few comparisons, so it may always go first.
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
                 let handle =
                     SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(ptr::null()), 0);
                 if handle.is_null() {
