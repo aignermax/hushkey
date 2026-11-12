@@ -118,10 +118,17 @@ impl Hotkey {
             .spawn(move || unsafe {
                 // Windows waits for this thread on every key press anyone
                 // makes, and passes the key on without it once it is late:
-                // under load (a transcription on every core) the held key's
-                // repeats went missing, and a dictation ended mid-sentence.
-                // Its work is a few comparisons, so it may always go first.
-                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+                // on a busy machine the held key's repeats went missing,
+                // and a dictation ended mid-sentence. Its work is a few
+                // comparisons, so it may always go first. (Asking Windows
+                // whether the key is down is no way out: a swallowed key
+                // never reads as down in GetAsyncKeyState.)
+                if SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) == 0 {
+                    crate::log_line(&format!(
+                        "the key watcher keeps normal priority: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
                 let handle =
                     SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), GetModuleHandleW(ptr::null()), 0);
                 if handle.is_null() {
