@@ -311,7 +311,7 @@ impl App {
             &[("model", &self.config.model), ("size", size)],
         );
         self.tray.show(Badge::Loading, &text);
-        if self.config.guide {
+        if self.config.guide && self.recording.is_none() && !self.busy {
             // A new install downloads its model first, which takes a
             // while: say so where it is seen, not only in the tray.
             self.overlay.show(GREY, &text);
@@ -386,6 +386,12 @@ impl App {
             Msg::Key(KeyEvent::Up) => self.key_up(),
             Msg::Preview(text) => {
                 if self.recording.is_some() {
+                    // The first steps keep saying to let go.
+                    let text = if self.config.guide {
+                        format!("{} — {text}", self.s.guide_listening)
+                    } else {
+                        text
+                    };
                     self.overlay.show(RED, &text);
                 }
             }
@@ -412,18 +418,20 @@ impl App {
                 self.idle();
             }
             Msg::Inserted(result) => {
-                let inserted = result.is_ok();
+                let arrived = result.as_ref().is_ok_and(platform::Restore::arrived);
                 match result {
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
                     Err(e) => log::line(&format!("insert failed: {e}")),
                 }
-                if inserted && self.config.guide {
+                if arrived && self.config.guide {
                     // The first dictation is in: the first steps are done.
                     log::line("first steps done");
                     self.config.guide = false;
                     self.save(|c| c.guide = false);
-                    self.overlay.show(GREEN, self.s.guide_done);
-                    self.notice_until = Some(Instant::now() + GUIDE_DONE);
+                    // Not over a dictation that has started since.
+                    if self.waiting() {
+                        self.notice_for(GREEN, self.s.guide_done, GUIDE_DONE);
+                    }
                 }
                 if !self.busy && self.recording.is_none() && !self.hearing {
                     self.idle();
@@ -489,6 +497,7 @@ impl App {
                         // Dismissed; the entry stays for later.
                         self.tray.old_version_busy(false);
                         self.overlay.hide();
+                        self.guide();
                     }
                     Err(e) => {
                         log::line(&format!("removing the old version: {e}"));
@@ -530,15 +539,18 @@ impl App {
     }
 
     fn notice(&mut self, colour: [u8; 3], text: &str) {
-        self.overlay.show(colour, text);
-        self.notice_until = Some(Instant::now() + NOTICE);
+        self.notice_for(colour, text, NOTICE);
     }
 
     /// A notice that something did not work, long enough to be read; the
     /// details are in the log.
     fn failure_notice(&mut self, text: &str) {
-        self.overlay.show(GREY, text);
-        self.notice_until = Some(Instant::now() + FAILURE_NOTICE);
+        self.notice_for(GREY, text, FAILURE_NOTICE);
+    }
+
+    fn notice_for(&mut self, colour: [u8; 3], text: &str, how_long: Duration) {
+        self.overlay.show(colour, text);
+        self.notice_until = Some(Instant::now() + how_long);
     }
 
     fn idle(&mut self) {
@@ -564,20 +576,30 @@ impl App {
         self.guide();
     }
 
-    /// The first steps, for a new install until its first dictation: how
-    /// to dictate, in the overlay whenever hushkey waits for the key.
-    fn guide(&mut self) {
-        let waiting = self.engine.is_some()
+    /// Ready for the key, with nothing else going on.
+    fn waiting(&self) -> bool {
+        self.engine.is_some()
             && self.config.mode == Mode::PushToTalk
             && self.listening.is_none()
             && self.recording.is_none()
             && !self.busy
             && !self.updating
-            && self.notice_until.is_none();
-        if self.config.guide && waiting {
+    }
+
+    /// The first steps, for a new install until its first dictation: how
+    /// to dictate, in the overlay whenever hushkey waits for the key. In
+    /// listening mode there is no key: whatever the first steps (or the
+    /// model's loading) left in the overlay goes.
+    fn guide(&mut self) {
+        if !self.config.guide || self.notice_until.is_some() {
+            return;
+        }
+        if self.waiting() {
             let key = self.s.key_name(&self.config.key);
             self.overlay
                 .show(BLUE, &strings::fill(self.s.guide_hold, &[("key", key)]));
+        } else if self.config.mode == Mode::Listen && !self.hearing {
+            self.overlay.hide();
         }
     }
 

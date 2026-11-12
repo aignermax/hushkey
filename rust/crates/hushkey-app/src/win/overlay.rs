@@ -18,9 +18,10 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW,
-    RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, MSG, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SW_HIDE, WM_APP, WM_PAINT, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage,
+    HWND_TOPMOST, LWA_ALPHA, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WM_APP, WM_PAINT,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 const WM_REFRESH: u32 = WM_APP + 1;
@@ -107,7 +108,9 @@ fn run(ready: mpsc::Sender<Result<usize, String>>) {
             RegisterClassW(&wc);
         });
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            // Layered and transparent: clicks go to the window below, as
+            // on Linux and macOS (the first steps stay up for a while).
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
             class.as_ptr(),
             wide("hushkey").as_ptr(),
             WS_POPUP,
@@ -124,6 +127,8 @@ fn run(ready: mpsc::Sender<Result<usize, String>>) {
             let _ = ready.send(Err("could not create the overlay window".into()));
             return;
         }
+        // Fully opaque; a layered window shows nothing until this is set.
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
         let _ = ready.send(Ok(hwnd as usize));
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {

@@ -41,6 +41,13 @@ pub enum Restore {
     Failed(String),
 }
 
+impl Restore {
+    /// Whether the text reached a window: a paste nobody fetched did not.
+    pub fn arrived(&self) -> bool {
+        *self != Restore::NotFetched
+    }
+}
+
 /// X11 WM_CLASS names of terminals.
 const TERMINALS: &[&str] = &[
     "alacritty",

@@ -45,8 +45,9 @@ pub struct Strings {
     pub guide_hold: &'static str,
     pub guide_listening: &'static str,
     pub guide_done: &'static str,
-    /// Caps Lock as the first steps name it.
-    caps_lock: &'static str,
+    /// Keys as the first steps name them where this language differs from
+    /// [`KEY_LABELS`].
+    key_names: &'static [(&'static str, &'static str)],
 }
 
 impl Strings {
@@ -72,12 +73,11 @@ impl Strings {
     /// The push-to-talk key as the first steps name it.
     pub fn key_name(&self, key: &str) -> &'static str {
         let vk = crate::config::virtual_key(key);
-        if vk == crate::config::virtual_key("caps_lock") {
-            return self.caps_lock;
-        }
-        KEY_LABELS
+        let same = |name: &&str| vk.is_some() && crate::config::virtual_key(name) == vk;
+        self.key_names
             .iter()
-            .find(|(name, _)| vk.is_some() && crate::config::virtual_key(name) == vk)
+            .chain(KEY_LABELS)
+            .find(|(name, _)| same(name))
             .map_or("", |(_, label)| label)
     }
 }
@@ -122,7 +122,7 @@ pub static EN: Strings = Strings {
     guide_hold: "Welcome! Click into a text field, hold {key} and speak — let go, and the text appears there.",
     guide_listening: "listening … let go when you are done",
     guide_done: "Done! The text always goes where your cursor is, in any program.",
-    caps_lock: "Caps Lock",
+    key_names: &[("caps_lock", "Caps Lock")],
 };
 
 pub static DE: Strings = Strings {
@@ -165,7 +165,7 @@ pub static DE: Strings = Strings {
     guide_hold: "Willkommen! Klick in ein Textfeld, halte {key} gedrückt und sprich — beim Loslassen erscheint der Text dort.",
     guide_listening: "ich höre zu … loslassen, wenn du fertig bist",
     guide_done: "Geschafft! Der Text landet immer dort, wo der Cursor steht, in jedem Programm.",
-    caps_lock: "die Feststelltaste (Caps Lock)",
+    key_names: &[("caps_lock", "die Feststelltaste (Caps Lock)"), ("right_ctrl", "Strg rechts"), ("right_alt", "Alt Gr"), ("scroll_lock", "Rollen"), ("insert", "Einfg")],
 };
 
 pub static IT: Strings = Strings {
@@ -208,7 +208,7 @@ pub static IT: Strings = Strings {
     guide_hold: "Benvenuto! Fai clic in un campo di testo, tieni premuto {key} e parla — quando lo rilasci, il testo appare lì.",
     guide_listening: "ti ascolto … rilascia quando hai finito",
     guide_done: "Fatto! Il testo va sempre dove si trova il cursore, in qualsiasi programma.",
-    caps_lock: "Bloc Maiusc (Caps Lock)",
+    key_names: &[("caps_lock", "Bloc Maiusc (Caps Lock)"), ("right_ctrl", "Ctrl destro"), ("right_alt", "Alt Gr"), ("scroll_lock", "Bloc Scorr"), ("insert", "Ins")],
 };
 
 pub static ES: Strings = Strings {
@@ -251,7 +251,7 @@ pub static ES: Strings = Strings {
     guide_hold: "¡Bienvenido! Haz clic en un campo de texto, mantén pulsada la tecla {key} y habla — al soltarla, el texto aparece ahí.",
     guide_listening: "te escucho … suelta cuando termines",
     guide_done: "¡Listo! El texto siempre va donde está el cursor, en cualquier programa.",
-    caps_lock: "Bloq Mayús (Caps Lock)",
+    key_names: &[("caps_lock", "Bloq Mayús (Caps Lock)"), ("right_ctrl", "Ctrl derecha"), ("right_alt", "Alt Gr"), ("scroll_lock", "Bloq Despl"), ("insert", "Insert")],
 };
 
 pub static FR: Strings = Strings {
@@ -294,7 +294,7 @@ pub static FR: Strings = Strings {
     guide_hold: "Bienvenue ! Cliquez dans un champ de texte, maintenez {key} enfoncée et parlez — en relâchant, le texte y apparaît.",
     guide_listening: "je vous écoute … relâchez quand vous avez fini",
     guide_done: "C'est fait ! Le texte va toujours là où se trouve le curseur, dans n'importe quel programme.",
-    caps_lock: "la touche Verr. Maj (Caps Lock)",
+    key_names: &[("caps_lock", "la touche Verr. Maj (Caps Lock)"), ("right_ctrl", "Ctrl droite"), ("right_alt", "Alt Gr"), ("scroll_lock", "Arrêt défil"), ("insert", "Inser")],
 };
 
 pub static ZH: Strings = Strings {
@@ -337,7 +337,11 @@ pub static ZH: Strings = Strings {
     guide_hold: "欢迎！点击一个文本框，按住 {key} 说话——松开后文字就会出现在那里。",
     guide_listening: "正在听 … 说完后松开",
     guide_done: "完成！文字总会出现在光标所在的位置，任何程序都可以。",
-    caps_lock: "大写锁定键 (Caps Lock)",
+    key_names: &[
+        ("caps_lock", "大写锁定键 (Caps Lock)"),
+        ("right_ctrl", "右 Ctrl"),
+        ("right_alt", "右 Alt"),
+    ],
 };
 
 pub static KN: Strings = Strings {
@@ -380,7 +384,7 @@ pub static KN: Strings = Strings {
     guide_hold: "ಸ್ವಾಗತ! ಒಂದು ಪಠ್ಯ ಕ್ಷೇತ್ರದಲ್ಲಿ ಕ್ಲಿಕ್ ಮಾಡಿ, {key} ಒತ್ತಿ ಹಿಡಿದು ಮಾತನಾಡಿ — ಬಿಟ್ಟಾಗ ಪಠ್ಯ ಅಲ್ಲಿ ಕಾಣಿಸುತ್ತದೆ.",
     guide_listening: "ಕೇಳುತ್ತಿದ್ದೇನೆ … ಮುಗಿದ ಮೇಲೆ ಬಿಡಿ",
     guide_done: "ಮುಗಿಯಿತು! ಪಠ್ಯ ಯಾವಾಗಲೂ ಕರ್ಸರ್ ಇರುವಲ್ಲಿಗೆ ಹೋಗುತ್ತದೆ, ಯಾವುದೇ ಪ್ರೋಗ್ರಾಂನಲ್ಲಿ.",
-    caps_lock: "Caps Lock",
+    key_names: &[("caps_lock", "Caps Lock")],
 };
 
 /// The words for a language code (`de`, `de-AT`, `zh_CN.UTF-8`, `kn`),
@@ -583,11 +587,22 @@ mod tests {
         assert_eq!(DE.key_name("caps_lock"), "die Feststelltaste (Caps Lock)");
         // As forgivingly spelt as the settings accept it.
         assert_eq!(EN.key_name("Caps Lock"), "Caps Lock");
-        assert_eq!(DE.key_name("right_ctrl"), "Right Ctrl");
+        assert_eq!(DE.key_name("right_ctrl"), "Strg rechts");
+        assert_eq!(EN.key_name("right_ctrl"), "Right Ctrl");
         assert_eq!(
             fill(DE.guide_hold, &[("key", DE.key_name("f9"))]),
             "Willkommen! Klick in ein Textfeld, halte F9 gedrückt und sprich — beim Loslassen erscheint der Text dort."
         );
+    }
+
+    #[test]
+    fn every_language_names_known_keys_only() {
+        for s in [&EN, &DE, &IT, &ES, &FR, &ZH, &KN] {
+            for (name, _) in s.key_names {
+                assert!(crate::config::virtual_key(name).is_some(), "{name}");
+            }
+            assert!(!s.key_name("caps_lock").is_empty());
+        }
     }
 
     #[test]
