@@ -37,8 +37,9 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 /// While a key is held, the system repeats its key-down every ~30 ms after
 /// the initial delay (at most 1 s). Silence longer than this means the
 /// release happened where hushkey cannot see it (UAC, Ctrl+Alt+Del, a
-/// locked screen).
-const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
+/// locked screen). Generous: on a busy machine repeats can come late, and
+/// a dictation cut off mid-sentence is worse than one that ends late.
+const RELEASE_UNSEEN: Duration = Duration::from_secs(6);
 /// How long a notice ("copied …") stays in the overlay.
 const NOTICE: Duration = Duration::from_secs(2);
 /// A failure to act on stays longer.
@@ -247,10 +248,13 @@ impl App {
             if self.quit_requested {
                 return self.quit();
             }
-            if platform::since_last_seen().is_some_and(|quiet| quiet > RELEASE_UNSEEN) {
+            if let Some(quiet) = platform::since_last_seen().filter(|q| *q > RELEASE_UNSEEN) {
                 platform::forget_press();
                 if self.recording.is_some() {
-                    log::line("the key's release was not seen; ending the dictation");
+                    log::line(&format!(
+                        "the key's release was not seen ({} ms without its repeats); ending the dictation",
+                        quiet.as_millis()
+                    ));
                     self.key_up();
                 }
             }
