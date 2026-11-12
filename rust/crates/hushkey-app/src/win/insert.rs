@@ -169,6 +169,13 @@ pub enum Restore {
     Failed(String),
 }
 
+impl Restore {
+    /// Whether the text reached a window: a paste nobody fetched did not.
+    pub fn arrived(&self) -> bool {
+        *self != Restore::NotFetched
+    }
+}
+
 /// Paste `text` into the focused window. With `restore`, the previous
 /// clipboard text comes back once the target has fetched the dictation.
 /// An error means nothing was pasted (the caller may type instead).

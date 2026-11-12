@@ -43,6 +43,8 @@ const RELEASE_UNSEEN: Duration = Duration::from_millis(2500);
 const NOTICE: Duration = Duration::from_secs(2);
 /// A failure to act on stays longer.
 const FAILURE_NOTICE: Duration = Duration::from_secs(8);
+/// The first steps' last word ("the text goes where the cursor is").
+const GUIDE_DONE: Duration = Duration::from_secs(8);
 /// Updates are looked for at start and then this often.
 const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -50,6 +52,9 @@ const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 const RED: [u8; 3] = [0xe5, 0x3e, 0x3e];
 const ORANGE: [u8; 3] = [0xdd, 0x6b, 0x20];
 const GREY: [u8; 3] = [0x71, 0x80, 0x96];
+/// The first steps.
+const BLUE: [u8; 3] = [0x31, 0x82, 0xce];
+const GREEN: [u8; 3] = [0x38, 0xa1, 0x69];
 
 enum Msg {
     Key(KeyEvent),
@@ -261,6 +266,7 @@ impl App {
             {
                 self.notice_until = None;
                 self.overlay.hide();
+                self.guide();
             }
             // Sleep until a system event arrives, or poll the channels
             // again soon.
@@ -305,6 +311,11 @@ impl App {
             &[("model", &self.config.model), ("size", size)],
         );
         self.tray.show(Badge::Loading, &text);
+        if self.config.guide && self.recording.is_none() && !self.busy {
+            // A new install downloads its model first, which takes a
+            // while: say so where it is seen, not only in the tray.
+            self.overlay.show(GREY, &text);
+        }
         let (config, tx) = (self.config.clone(), self.tx.clone());
         std::thread::spawn(move || {
             let result = (|| {
@@ -364,13 +375,23 @@ impl App {
             }
             Msg::Loaded(_, Err(e)) => {
                 log::line(&format!("model failed: {e}"));
-                self.tray
-                    .show(Badge::Failed, &format!("{}: {e}", self.s.failed));
+                let text = format!("{}: {e}", self.s.failed);
+                self.tray.show(Badge::Failed, &text);
+                if self.config.guide {
+                    // In place of the loading notice.
+                    self.failure_notice(&text);
+                }
             }
             Msg::Key(KeyEvent::Down) => self.key_down(),
             Msg::Key(KeyEvent::Up) => self.key_up(),
             Msg::Preview(text) => {
                 if self.recording.is_some() {
+                    // The first steps keep saying to let go.
+                    let text = if self.config.guide {
+                        format!("{} — {text}", self.s.guide_listening)
+                    } else {
+                        text
+                    };
                     self.overlay.show(RED, &text);
                 }
             }
@@ -397,9 +418,20 @@ impl App {
                 self.idle();
             }
             Msg::Inserted(result) => {
+                let arrived = result.as_ref().is_ok_and(platform::Restore::arrived);
                 match result {
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
                     Err(e) => log::line(&format!("insert failed: {e}")),
+                }
+                if arrived && self.config.guide {
+                    // The first dictation is in: the first steps are done.
+                    log::line("first steps done");
+                    self.config.guide = false;
+                    self.save(|c| c.guide = false);
+                    // Not over a dictation that has started since.
+                    if self.waiting() {
+                        self.notice_for(GREEN, self.s.guide_done, GUIDE_DONE);
+                    }
                 }
                 if !self.busy && self.recording.is_none() && !self.hearing {
                     self.idle();
@@ -465,6 +497,7 @@ impl App {
                         // Dismissed; the entry stays for later.
                         self.tray.old_version_busy(false);
                         self.overlay.hide();
+                        self.guide();
                     }
                     Err(e) => {
                         log::line(&format!("removing the old version: {e}"));
@@ -506,15 +539,18 @@ impl App {
     }
 
     fn notice(&mut self, colour: [u8; 3], text: &str) {
-        self.overlay.show(colour, text);
-        self.notice_until = Some(Instant::now() + NOTICE);
+        self.notice_for(colour, text, NOTICE);
     }
 
     /// A notice that something did not work, long enough to be read; the
     /// details are in the log.
     fn failure_notice(&mut self, text: &str) {
-        self.overlay.show(GREY, text);
-        self.notice_until = Some(Instant::now() + FAILURE_NOTICE);
+        self.notice_for(GREY, text, FAILURE_NOTICE);
+    }
+
+    fn notice_for(&mut self, colour: [u8; 3], text: &str, how_long: Duration) {
+        self.overlay.show(colour, text);
+        self.notice_until = Some(Instant::now() + how_long);
     }
 
     fn idle(&mut self) {
@@ -537,6 +573,34 @@ impl App {
             Badge::None
         };
         self.tray.show(badge, &text);
+        self.guide();
+    }
+
+    /// Ready for the key, with nothing else going on.
+    fn waiting(&self) -> bool {
+        self.engine.is_some()
+            && self.config.mode == Mode::PushToTalk
+            && self.listening.is_none()
+            && self.recording.is_none()
+            && !self.busy
+            && !self.updating
+    }
+
+    /// The first steps, for a new install until its first dictation: how
+    /// to dictate, in the overlay whenever hushkey waits for the key. In
+    /// listening mode there is no key: whatever the first steps (or the
+    /// model's loading) left in the overlay goes.
+    fn guide(&mut self) {
+        if !self.config.guide || self.notice_until.is_some() {
+            return;
+        }
+        if self.waiting() {
+            let key = self.s.key_name(&self.config.key);
+            self.overlay
+                .show(BLUE, &strings::fill(self.s.guide_hold, &[("key", key)]));
+        } else if self.config.mode == Mode::Listen && !self.hearing {
+            self.overlay.hide();
+        }
     }
 
     fn key_down(&mut self) {
@@ -564,7 +628,12 @@ impl App {
             Ok(session) => {
                 self.recording = Some(session);
                 self.notice_until = None;
-                self.overlay.show(RED, self.s.recording);
+                let text = if self.config.guide {
+                    self.s.guide_listening
+                } else {
+                    self.s.recording
+                };
+                self.overlay.show(RED, text);
                 self.tray.show(Badge::Recording, self.s.recording);
             }
             Err(e) => {
@@ -629,6 +698,8 @@ impl App {
                         self.hotkey = Some(h);
                         self.config.key = name.to_string();
                         self.save(|c| c.key = name.to_string());
+                        // The first steps name the new key.
+                        self.guide();
                     }
                     Err(e) => {
                         log::line(&format!("key not changed: {e}"));

@@ -44,6 +44,13 @@ pub enum Restore {
     Failed(String),
 }
 
+impl Restore {
+    /// Whether the text reached a window: macOS cannot tell, so it did.
+    pub fn arrived(&self) -> bool {
+        true
+    }
+}
+
 fn source() -> Result<CFRetained<CGEventSource>, String> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .ok_or_else(|| "could not create an event source".to_string())
