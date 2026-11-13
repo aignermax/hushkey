@@ -184,8 +184,11 @@ jobs:
           $numeric = ($ver -split '-')[0] + ".0"
           $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "rust/target" }
           # The icon build.rs made for the program (the newest, should the
-          # target folder hold older builds).
-          $icon = (Get-ChildItem "$target/release/build/hushkey-app-*/out/hushkey.ico" |
+          # target folder hold older builds). Cargo keeps build script output
+          # in build/hushkey-app-<hash>/out, since Rust 1.100 in
+          # build/hushkey-app/<hash>/out: either will do.
+          $icon = (Get-ChildItem "$target/release/build" -Recurse -Filter hushkey.ico |
+            Where-Object { $_.FullName -match '[\\/]hushkey-app[-\\/]' } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           if (-not $icon) { throw "no hushkey.ico from build.rs under $target" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DVersion=$ver" "/DFileVersion=$numeric" `
