@@ -46,6 +46,9 @@ const NOTICE: Duration = Duration::from_secs(2);
 const FAILURE_NOTICE: Duration = Duration::from_secs(8);
 /// The first steps' last word ("the text goes where the cursor is").
 const GUIDE_DONE: Duration = Duration::from_secs(8);
+/// How long the welcome stays up per start: someone who does not want to
+/// dictate right now is not followed by it; the next start shows it again.
+const GUIDE_UP: Duration = Duration::from_secs(60);
 /// Updates are looked for at start and then this often.
 const UPDATE_CHECK: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -150,6 +153,8 @@ pub fn run(after_update: bool) -> ExitCode {
         load_generation: 0,
         busy: false,
         notice_until: None,
+        guide_since: None,
+        guide_away: false,
         update: None,
         updating: false,
         removing_old: false,
@@ -216,6 +221,11 @@ struct App {
     busy: bool,
     /// A notice is in the overlay until then.
     notice_until: Option<Instant>,
+    /// When the welcome first came up in this run.
+    guide_since: Option<Instant>,
+    /// The welcome has had its time in this run (the hints while recording
+    /// and the last word after the first dictation still come).
+    guide_away: bool,
     /// A newer release, offered in the tray.
     update: Option<Release>,
     /// An update is being downloaded and put in place.
@@ -271,6 +281,17 @@ impl App {
                 self.notice_until = None;
                 self.overlay.hide();
                 self.guide();
+            }
+            if !self.guide_away
+                && self
+                    .guide_since
+                    .is_some_and(|since| since.elapsed() > GUIDE_UP)
+            {
+                self.guide_away = true;
+                if self.config.guide && self.waiting() && self.notice_until.is_none() {
+                    self.overlay.hide();
+                    log::line("first steps put away until the next start");
+                }
             }
             // Sleep until a system event arrives, or poll the channels
             // again soon.
@@ -599,6 +620,10 @@ impl App {
             return;
         }
         if self.waiting() {
+            if self.guide_away {
+                return;
+            }
+            self.guide_since.get_or_insert_with(Instant::now);
             let key = self.s.key_name(&self.config.key);
             self.overlay
                 .show(BLUE, &strings::fill(self.s.guide_hold, &[("key", key)]));
