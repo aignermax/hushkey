@@ -4,6 +4,7 @@
 
 pub mod autostart;
 mod clipboard;
+mod elevation;
 mod hotkey;
 mod insert;
 mod overlay;
@@ -26,6 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::config;
 use crate::log;
+pub use elevation::foreground_out_of_reach;
 pub use hotkey::{forget_press, since_last_seen, KeyEvent};
 pub use insert::Restore;
 pub use overlay::Overlay;
@@ -144,7 +146,8 @@ fn insert_as_is(text: &str, paste: bool, restore: bool) -> Result<Restore, Strin
     }
 }
 
-/// Put `text` on the clipboard (a history entry the user picked).
+/// Put `text` on the clipboard (a history entry the user picked, or a
+/// dictation for a window hushkey cannot type into).
 pub fn copy(text: &str) -> Result<(), String> {
     clipboard::write_text(text, false)
 }
