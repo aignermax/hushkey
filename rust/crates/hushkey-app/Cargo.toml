@@ -61,6 +61,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
+    "Win32_Security",
 ] }
 
 # The versions tray-icon already uses, so there is one objc2 in the build.

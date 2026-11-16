@@ -23,6 +23,8 @@ pub struct Strings {
     copied: &'static str,
     /// Ctrl+V as this language writes it (macOS: always Cmd+V).
     paste_keys: &'static str,
+    /// A window run as administrator got the dictation on the clipboard.
+    out_of_reach: &'static str,
     pub listen: &'static str,
     autostart_windows: &'static str,
     autostart_login: &'static str,
@@ -70,6 +72,14 @@ impl Strings {
         fill(self.copied, &[("paste", keys)])
     }
 
+    /// "RustDesk runs as administrator … paste with Ctrl+V" (Windows only).
+    pub fn out_of_reach(&self, app: &str) -> String {
+        fill(
+            self.out_of_reach,
+            &[("app", app), ("paste", self.paste_keys)],
+        )
+    }
+
     /// The push-to-talk key as the first steps name it.
     pub fn key_name(&self, key: &str) -> &'static str {
         let vk = crate::config::virtual_key(key);
@@ -100,6 +110,7 @@ pub static EN: Strings = Strings {
     history_menu: "Recent dictations",
     history_empty: "(none yet)",
     copied: "copied — paste with {paste}",
+    out_of_reach: "{app} runs as administrator, so hushkey cannot type there — copied, paste with {paste}",
     paste_keys: "Ctrl+V",
     listen: "Continuous listening",
     autostart_windows: "Start with Windows",
@@ -143,6 +154,7 @@ pub static DE: Strings = Strings {
     history_menu: "Letzte Diktate",
     history_empty: "(noch keine)",
     copied: "kopiert — mit {paste} einfügen",
+    out_of_reach: "{app} läuft als Administrator, dort kann hushkey nicht tippen — kopiert, mit {paste} einfügen",
     paste_keys: "Strg+V",
     listen: "Dauerzuhören",
     autostart_windows: "Mit Windows starten",
@@ -186,6 +198,7 @@ pub static IT: Strings = Strings {
     history_menu: "Dettature recenti",
     history_empty: "(ancora nessuna)",
     copied: "copiato — incolla con {paste}",
+    out_of_reach: "{app} è in esecuzione come amministratore, lì hushkey non può scrivere — copiato, incolla con {paste}",
     paste_keys: "Ctrl+V",
     listen: "Ascolto continuo",
     autostart_windows: "Avvia con Windows",
@@ -229,6 +242,7 @@ pub static ES: Strings = Strings {
     history_menu: "Dictados recientes",
     history_empty: "(ninguno todavía)",
     copied: "copiado — pega con {paste}",
+    out_of_reach: "{app} se ejecuta como administrador, ahí hushkey no puede escribir — copiado, pega con {paste}",
     paste_keys: "Ctrl+V",
     listen: "Escucha continua",
     autostart_windows: "Iniciar con Windows",
@@ -272,6 +286,7 @@ pub static FR: Strings = Strings {
     history_menu: "Dictées récentes",
     history_empty: "(aucune pour l'instant)",
     copied: "copié — collez avec {paste}",
+    out_of_reach: "{app} s'exécute en tant qu'administrateur, hushkey ne peut pas y écrire — copié, collez avec {paste}",
     paste_keys: "Ctrl+V",
     listen: "Écoute continue",
     autostart_windows: "Démarrer avec Windows",
@@ -315,6 +330,7 @@ pub static ZH: Strings = Strings {
     history_menu: "最近的听写",
     history_empty: "（暂无）",
     copied: "已复制 — 用 {paste} 粘贴",
+    out_of_reach: "{app} 以管理员身份运行，hushkey 无法在其中输入 — 已复制，用 {paste} 粘贴",
     paste_keys: "Ctrl+V",
     listen: "持续聆听",
     autostart_windows: "随 Windows 启动",
@@ -362,6 +378,8 @@ pub static KN: Strings = Strings {
     history_menu: "ಇತ್ತೀಚಿನ ಡಿಕ್ಟೇಶನ್‌ಗಳು",
     history_empty: "(ಇನ್ನೂ ಇಲ್ಲ)",
     copied: "ನಕಲಿಸಲಾಗಿದೆ — {paste} ಮೂಲಕ ಅಂಟಿಸಿ",
+    out_of_reach:
+        "{app} ನಿರ್ವಾಹಕರಾಗಿ ಚಾಲನೆಯಲ್ಲಿದೆ, ಅಲ್ಲಿ hushkey ಟೈಪ್ ಮಾಡಲಾಗುವುದಿಲ್ಲ — ನಕಲಿಸಲಾಗಿದೆ, {paste} ಮೂಲಕ ಅಂಟಿಸಿ",
     paste_keys: "Ctrl+V",
     listen: "ನಿರಂತರ ಆಲಿಸುವಿಕೆ",
     autostart_windows: "Windows ಜೊತೆ ಪ್ರಾರಂಭಿಸಿ",

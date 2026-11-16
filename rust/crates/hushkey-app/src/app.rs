@@ -42,6 +42,10 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 /// mid-sentence is far worse than one that ends late. A release that was
 /// missed ends the dictation at the next press and release anyway.
 const RELEASE_UNSEEN: Duration = Duration::from_secs(120);
+/// No repeats for this long while a window run as administrator has the
+/// focus: the key is out of sight there (see `win::elevation`), its release
+/// too, so the dictation ends rather than run on unseen.
+const OUT_OF_SIGHT: Duration = Duration::from_millis(1200);
 /// A pause in the held key's repeats worth a line in the log.
 const NOTABLE_PAUSE: Duration = Duration::from_millis(1500);
 /// How long a notice ("copied …") stays in the overlay.
@@ -272,6 +276,15 @@ impl App {
             if self.recording.is_some() {
                 self.longest_pause = self.longest_pause.max(quiet.unwrap_or_default());
             }
+            if self.recording.is_some() && quiet.is_some_and(|q| q > OUT_OF_SIGHT) {
+                if let Some(app) = platform::foreground_out_of_reach() {
+                    log::line(&format!(
+                        "the key is out of sight in {app}, which runs as administrator; ending the dictation"
+                    ));
+                    platform::forget_press();
+                    self.key_up();
+                }
+            }
             if let Some(quiet) = quiet.filter(|q| *q > RELEASE_UNSEEN) {
                 platform::forget_press();
                 if self.recording.is_some() {
@@ -331,7 +344,20 @@ impl App {
         ExitCode::SUCCESS
     }
 
-    fn insert(&self, text: String) {
+    fn insert(&mut self, text: String) {
+        if let Some(app) = platform::foreground_out_of_reach() {
+            // Nothing can be typed into it; the clipboard reaches it (and,
+            // for a remote desktop, the machine at the other end).
+            log::line(&format!("{app} runs as administrator: copied, not pasted"));
+            match platform::copy(text.trim_end()) {
+                Ok(()) => self.notice_for(GREY, &self.s.out_of_reach(&app), FAILURE_NOTICE),
+                Err(e) => log::line(&format!("copy failed: {e}")),
+            }
+            if !self.busy && self.recording.is_none() && !self.hearing {
+                self.idle();
+            }
+            return;
+        }
         if let Some(inserter) = &self.inserter {
             let _ = inserter.send(text);
         }
