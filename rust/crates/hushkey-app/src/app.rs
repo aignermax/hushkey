@@ -37,9 +37,13 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 /// While a key is held, the system repeats its key-down every ~30 ms after
 /// the initial delay (at most 1 s). Silence longer than this means the
 /// release happened where hushkey cannot see it (UAC, Ctrl+Alt+Del, a
-/// locked screen). Generous: on a busy machine repeats can come late, and
-/// a dictation cut off mid-sentence is worse than one that ends late.
-const RELEASE_UNSEEN: Duration = Duration::from_secs(6);
+/// locked screen). Very generous: repeats have been seen to pause for six
+/// seconds and more while the key stayed down, and a dictation cut off
+/// mid-sentence is far worse than one that ends late. A release that was
+/// missed ends the dictation at the next press and release anyway.
+const RELEASE_UNSEEN: Duration = Duration::from_secs(120);
+/// A pause in the held key's repeats worth a line in the log.
+const NOTABLE_PAUSE: Duration = Duration::from_millis(1500);
 /// How long a notice ("copied …") stays in the overlay.
 const NOTICE: Duration = Duration::from_secs(2);
 /// A failure to act on stays longer.
@@ -145,6 +149,8 @@ pub fn run(after_update: bool) -> ExitCode {
         engine: None,
         recording: None,
         pressed_at: None,
+        longest_pause: Duration::ZERO,
+        previewed: false,
         listening: None,
         listen_generation: 0,
         draining: None,
@@ -202,6 +208,10 @@ struct App {
     engine: Option<Arc<Engine>>,
     recording: Option<RecordSession>,
     pressed_at: Option<Instant>,
+    /// The longest pause in the held key's repeats during this dictation.
+    longest_pause: Duration,
+    /// This dictation showed some text while recording.
+    previewed: bool,
     listening: Option<ListenSession>,
     /// Numbers listening sessions, so events of one already stopped are
     /// told apart from those of the current one.
@@ -258,7 +268,11 @@ impl App {
             if self.quit_requested {
                 return self.quit();
             }
-            if let Some(quiet) = platform::since_last_seen().filter(|q| *q > RELEASE_UNSEEN) {
+            let quiet = platform::since_last_seen();
+            if self.recording.is_some() {
+                self.longest_pause = self.longest_pause.max(quiet.unwrap_or_default());
+            }
+            if let Some(quiet) = quiet.filter(|q| *q > RELEASE_UNSEEN) {
                 platform::forget_press();
                 if self.recording.is_some() {
                     log::line(&format!(
@@ -411,6 +425,7 @@ impl App {
             Msg::Key(KeyEvent::Up) => self.key_up(),
             Msg::Preview(text) => {
                 if self.recording.is_some() {
+                    self.previewed = true;
                     // The first steps keep saying to let go.
                     let text = if self.config.guide {
                         format!("{} — {text}", self.s.guide_listening)
@@ -424,7 +439,15 @@ impl App {
                 self.busy = false;
                 let text = text.trim().to_string();
                 if text.is_empty() {
-                    log::line("nothing heard");
+                    // Silence from the microphone shows as no preview.
+                    log::line(&format!(
+                        "nothing heard ({} while recording)",
+                        if self.previewed {
+                            "text shown"
+                        } else {
+                            "no text shown"
+                        }
+                    ));
                     self.notice(GREY, self.s.nothing_heard);
                     self.idle();
                 } else {
@@ -637,6 +660,8 @@ impl App {
         if self.listening.is_some() || self.recording.is_some() || self.busy {
             return;
         }
+        self.longest_pause = Duration::ZERO;
+        self.previewed = false;
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -674,10 +699,8 @@ impl App {
     }
 
     fn key_up(&mut self) {
-        let tap = self
-            .pressed_at
-            .take()
-            .is_some_and(|t| t.elapsed() < MIN_HOLD);
+        let held = self.pressed_at.take().map(|t| t.elapsed());
+        let tap = held.is_some_and(|held| held < MIN_HOLD);
         if tap {
             // Where the key was swallowed, a tap still does its own job
             // (Caps Lock toggles).
@@ -694,6 +717,15 @@ impl App {
             self.overlay.hide();
             self.idle();
             return;
+        }
+        if self.longest_pause > NOTABLE_PAUSE {
+            // Not a reason to end the dictation (see RELEASE_UNSEEN), but
+            // worth knowing how long and how often.
+            log::line(&format!(
+                "the key's repeats paused for {} ms during a press of {} ms",
+                self.longest_pause.as_millis(),
+                held.unwrap_or_default().as_millis()
+            ));
         }
         self.busy = true;
         self.overlay.show(ORANGE, self.s.transcribing);
