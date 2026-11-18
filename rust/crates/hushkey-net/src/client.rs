@@ -36,6 +36,17 @@ impl Client {
         if audio.is_empty() || audio.len() > wire::SAMPLES || audio.iter().any(|x| !x.is_finite()) {
             return Err("audio must contain 1..=9600000 finite 16 kHz mono samples".into());
         }
+        let epoch = self.identity.epoch()?;
+        // Revocation on the requesting computer is just as binding as host
+        // revocation: stop uploads and discard replies throughout this request.
+        let cancelled = || {
+            abort.is_some_and(|f| f())
+                || !self
+                    .identity
+                    .authorized(Role::PinnedServer, &self.peer.id, epoch)
+                    .unwrap_or(false)
+        };
+        let abort: Option<&dyn Fn() -> bool> = Some(&cancelled);
         let options_final = options.beam_size > 1;
         let options = Options::from_core(options)?;
         let mut ch = open(&self.identity, &self.peer, None, abort)?;

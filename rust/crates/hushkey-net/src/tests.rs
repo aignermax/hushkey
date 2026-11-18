@@ -118,6 +118,43 @@ fn encrypted_roundtrip_and_persisted_pairing() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn local_revoke_aborts_an_outbound_inference_wait() {
+    let (_hd, hi) = identity();
+    let (_cd, ci) = identity();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let server = host(
+        hi.clone(),
+        yes(),
+        Arc::new(move |_, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            Ok(Transcript {
+                text: "must be discarded".into(),
+                ..Default::default()
+            })
+        }),
+    );
+    let client = Client::connect(ci.clone(), &peer(&hi, &server), yes()).unwrap();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let task = std::thread::spawn(move || {
+        result_tx
+            .send(client.transcribe(&[0.1], &TranscribeOptions::accurate(), None))
+            .unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    ci.clear_trust().unwrap();
+    let result = result_rx.recv_timeout(Duration::from_secs(1));
+    release_tx.send(()).unwrap();
+    task.join().unwrap();
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "local revocation must abort without waiting for the host"
+    );
+}
+
 // Either denied endpoint must leave no trust and must never invoke compute.
 #[test]
 fn either_denial_does_not_compute_or_persist_trust() {

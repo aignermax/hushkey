@@ -82,7 +82,7 @@ enum Msg {
     Preview(u64, String),
     RecordingError(u64, String),
     /// A push-to-talk dictation finished: its text (or why not).
-    Dictated(Result<String, String>),
+    Dictated(Option<u64>, Result<String, String>),
     /// Listening session number `.0` reported something.
     Listen(u64, Event),
     /// The inserter finished one text.
@@ -765,7 +765,21 @@ impl App {
                     );
                 }
             }
-            Msg::Dictated(Ok(text)) => {
+            Msg::Dictated(epoch, _) if !network::current_result(epoch, self.connect_generation) => {
+                self.busy = false;
+                if let Some(backend) = &self.backend {
+                    backend.reject_result();
+                }
+                self.tray.recovery_available(self.has_failed());
+                self.idle();
+                self.failure_notice(network::words(self.s,
+                    "Remote-Ergebnis nach Widerruf verworfen. Zum Wiederholen mit demselben Gerät neu verbinden.",
+                    "Remote result discarded after revocation. Reconnect to the same device to retry."));
+            }
+            Msg::Dictated(_, Ok(text)) => {
+                if let Some(backend) = &self.backend {
+                    backend.acknowledge();
+                }
                 self.busy = false;
                 self.tray.recovery_available(false);
                 let text = text.trim().to_string();
@@ -790,7 +804,7 @@ impl App {
                     self.insert(text + " ");
                 }
             }
-            Msg::Dictated(Err(e)) => {
+            Msg::Dictated(_, Err(e)) => {
                 self.busy = false;
                 log::line(&format!("dictation failed: {e}"));
                 self.tray.recovery_available(self.has_failed());
@@ -1113,12 +1127,13 @@ impl App {
         self.overlay.show(ORANGE, &text);
         self.tray.show(Badge::Transcribing, &text);
         let tx = self.tx.clone();
+        let remote_epoch = self.config.remote.as_ref().map(|_| self.connect_generation);
         std::thread::spawn(move || {
             let result = session
                 .stop()
                 .map(|t| t.map(|t| t.text).unwrap_or_default())
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Dictated(result));
+            let _ = tx.send(Msg::Dictated(remote_epoch, result));
         });
     }
 
@@ -1206,9 +1221,11 @@ impl App {
                             network::overlay_text(self.config.remote.as_ref(), self.s.transcribing);
                         self.overlay.show(ORANGE, &text);
                         let tx = self.tx.clone();
+                        let remote_epoch =
+                            self.config.remote.as_ref().map(|_| self.connect_generation);
                         std::thread::spawn(move || {
                             let result = backend.retry().map(|t| t.text).map_err(|e| e.to_string());
-                            let _ = tx.send(Msg::Dictated(result));
+                            let _ = tx.send(Msg::Dictated(remote_epoch, result));
                         });
                     }
                 }
@@ -1370,6 +1387,8 @@ impl App {
         if on
             && (self.config.check_listen_available().is_err()
                 || self.connecting
+                || self.recording.is_some()
+                || self.busy
                 || self.has_failed())
         {
             self.failure_notice(network::words(self.s,

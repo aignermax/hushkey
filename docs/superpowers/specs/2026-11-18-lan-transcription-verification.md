@@ -40,6 +40,18 @@ The full-branch reviewer inspected the change against base 590d357 and found:
    a persisted revocation epoch and atomic, role-specific conditional commits.
 5. Failed audio blocked needed reconnection. Fixed by preserving the retained
    request while replacing only the connection to the same device identity.
+6. Follow-up review found that laptop-side revocation also needed to cancel
+   established outbound requests and invalidate queued results. Captured pin
+   epochs now guard every upload/acceptance/reply wait, and permission-generation
+   stamps reject queued dictation results before history or insertion. A real
+   blocked-inference test failed before the fix and passed afterward; another
+   test covers revocation while the final request waits for acceptance.
+7. The app review identified continuous listening being enabled during a local
+   dictation/final computation. The mode switch now refuses both active states.
+8. A successful backend result queued before revocation must remain retryable
+   when the GUI rejects it. Final audio is now released only after GUI acceptance;
+   rejected queued completions become retryable requests. The regression covers
+   success, revocation/rejection, same-device reconnection, retry and acceptance.
 
 The review did not constitute a cryptographic audit. Platform CI and native
 smoke checks supplement source inspection. No findings are accepted as waived
@@ -66,6 +78,13 @@ feature verification; they were not counted as product test failures.
   returned recognizable public JFK speech. Two independent client identities
   were exercised. The test host was stopped and the pre-existing Hush-Key
   process was left running.
+- Two isolated desktop profiles showed identical pairing codes concurrently;
+  UI Automation exposed the full hosting privacy text. A remote-only client
+  configured with an intentionally nonexistent model did not load/download it.
+- The real recording-session integration stops while encrypted preview
+  inference is still running and successfully obtains exactly one final event.
+- The native Windows dialog expiry check returned immediately and closed its
+  own dialog automatically (passed in approximately 0.18 seconds).
 
 ## Release gate
 

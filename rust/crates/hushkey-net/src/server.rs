@@ -431,6 +431,63 @@ impl Drop for WaitingFinal<'_> {
 #[cfg(test)]
 mod scheduling_tests {
     use super::*;
+
+    #[test]
+    fn local_revoke_aborts_a_final_waiting_for_acceptance() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let client_dir = tempfile::tempdir().unwrap();
+        let hi = Identity::load_or_create(host_dir.path()).unwrap();
+        let ci = Identity::load_or_create(client_dir.path()).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let server = Server::start(
+            hi.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(|_| true),
+            Arc::new(move |_, _| {
+                entered_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                Ok(Transcript::default())
+            }),
+        )
+        .unwrap();
+        let peer = Peer {
+            name: hi.name(),
+            id: hi.id(),
+            address: server.local_addr(),
+        };
+        let client = Client::connect(ci.clone(), &peer, Arc::new(|_| true)).unwrap();
+        let preview = client.clone();
+        let preview_task =
+            thread::spawn(move || preview.transcribe(&[0.1], &TranscribeOptions::fast(), None));
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let final_task = thread::spawn(move || {
+            result_tx
+                .send(client.transcribe(&[0.1], &TranscribeOptions::accurate(), None))
+                .unwrap();
+        });
+        let until = Instant::now() + Duration::from_secs(3);
+        while server.state.waiting_finals.load(Ordering::Acquire) == 0 && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let waiting = server.state.waiting_finals.load(Ordering::Acquire) > 0;
+        ci.clear_trust().unwrap();
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        release_tx.send(()).unwrap();
+        let _ = preview_task.join();
+        final_task.join().unwrap();
+        assert!(
+            waiting,
+            "test must revoke while the final awaits acceptance"
+        );
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "local revoke must interrupt acceptance wait"
+        );
+    }
+
     #[test]
     fn waiting_final_reserves_priority_over_new_network_previews() {
         let host_dir = tempfile::tempdir().unwrap();

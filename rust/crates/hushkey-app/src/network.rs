@@ -160,28 +160,57 @@ impl Transcriber for Remote {
     }
 }
 
-/// Retain only a failed final request, in memory, until explicit retry/discard.
+/// Keep the final request until GUI acceptance, then retain failures only.
 pub struct Recoverable {
     backend: Mutex<Arc<dyn Transcriber>>,
-    failed: Mutex<Option<(Vec<f32>, TranscribeOptions)>>,
+    retained: Mutex<Option<FinalRequest>>,
+}
+
+#[derive(Clone)]
+struct FinalRequest {
+    audio: Vec<f32>,
+    options: TranscribeOptions,
+    failed: bool,
 }
 impl Recoverable {
     pub fn new(backend: Arc<dyn Transcriber>) -> Self {
         Self {
             backend: Mutex::new(backend),
-            failed: Mutex::new(None),
+            retained: Mutex::new(None),
         }
     }
 
     pub fn has_failed(&self) -> bool {
-        self.failed
+        self.retained
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .is_some()
+            .as_ref()
+            .is_some_and(|request| request.failed)
     }
 
     pub fn discard(&self) {
-        self.failed.lock().unwrap_or_else(|p| p.into_inner()).take();
+        self.retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+    }
+
+    pub fn acknowledge(&self) {
+        self.retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+    }
+
+    pub fn reject_result(&self) {
+        if let Some(request) = self
+            .retained
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            request.failed = true;
+        }
     }
 
     /// Re-pair the same pinned destination without losing retained audio.
@@ -195,13 +224,14 @@ impl Recoverable {
     }
 
     pub fn retry(&self) -> hushkey_core::Result<Transcript> {
-        let (audio, options) = self
-            .failed
+        let request = self
+            .retained
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+            .filter(|request| request.failed)
             .ok_or_else(|| Error::Transcribe("no failed recording to retry".into()))?;
-        self.transcribe(&audio, &options)
+        self.transcribe(&request.audio, &request.options)
     }
 }
 impl Transcriber for Recoverable {
@@ -218,12 +248,11 @@ impl Transcriber for Recoverable {
             .clone();
         let result = backend.transcribe_cancellable(audio, options, abort);
         if options.beam_size > 1 {
-            let mut failed = self.failed.lock().unwrap_or_else(|p| p.into_inner());
-            *failed = if result.is_err() {
-                Some((audio.to_vec(), options.clone()))
-            } else {
-                None
-            };
+            *self.retained.lock().unwrap_or_else(|p| p.into_inner()) = Some(FinalRequest {
+                audio: audio.to_vec(),
+                options: options.clone(),
+                failed: result.is_err(),
+            });
         }
         result
     }
@@ -242,6 +271,11 @@ pub fn overlay_text(peer: Option<&Peer>, text: &str) -> String {
         .skip(text.chars().count().saturating_sub(limit))
         .collect();
     prefix + &tail
+}
+
+/// A queued remote result cannot outlive the permission generation it used.
+pub fn current_result(remote_epoch: Option<u64>, current: u64) -> bool {
+    remote_epoch.is_none_or(|epoch| epoch == current)
 }
 
 pub fn german(s: &strings::Strings) -> bool {
@@ -573,6 +607,33 @@ mod tests {
         };
         assert!(backend.transcribe(&[0.25, -0.5], &options).is_err());
         assert!(!backend.has_failed());
+    }
+
+    #[test]
+    fn queued_remote_results_are_discarded_after_permission_generation_changes() {
+        assert!(!current_result(Some(4), 5));
+        assert!(current_result(Some(5), 5));
+        assert!(current_result(None, 5)); // local dictation has no peer permission
+    }
+
+    #[test]
+    fn successful_queued_final_remains_recoverable_until_the_app_accepts_it() {
+        let backend = Recoverable::new(Arc::new(Flaky(AtomicUsize::new(1))));
+        let options = TranscribeOptions {
+            language: Some("de".into()),
+            ..TranscribeOptions::accurate()
+        };
+        assert!(backend.transcribe(&[0.25, -0.5], &options).is_ok());
+        assert!(!backend.has_failed());
+        // Permission changes after backend success but before GUI delivery.
+        backend.reject_result();
+        assert!(backend.has_failed());
+        let reconnected = Recoverable::new(Arc::new(Flaky(AtomicUsize::new(1))));
+        backend.reconnect(&reconnected);
+        assert_eq!(backend.retry().unwrap().text, "Recovered");
+        backend.acknowledge();
+        assert!(!backend.has_failed());
+        assert!(backend.retry().is_err());
     }
 
     #[test]
