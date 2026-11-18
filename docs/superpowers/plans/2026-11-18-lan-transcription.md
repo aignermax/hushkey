@@ -61,8 +61,13 @@
 
 **Files:** README.md; rust/README.md; CI workflows; rust/Cargo.toml version; docs with verification evidence.
 
-- [ ] Document setup, privacy, firewall, limits and remote-only restrictions.
-- [ ] Run full workspace tests with real-model fixtures and an encrypted real-model roundtrip.
-- [ ] Fresh read-only review of full branch; reproduce and fix findings with regression tests.
-- [ ] Open PR to dev (create from master because origin/dev is absent), wait for checks and fix failures.
-- [ ] Merge after clean review/checks; tag new version and verify release artifacts complete.
+- [x] Document setup, privacy, firewall, limits and remote-only restrictions.
+- [x] Run full workspace tests with real-model fixtures and an encrypted real-model roundtrip.
+- [x] Fresh read-only review of full branch; reproduce and fix findings with regression tests.
+- [x] Open PR to dev (create from master because origin/dev is absent), wait for checks and fix failures.
+- [x] Merge after clean review/checks; tag new version and verify release artifacts complete.
+
+Published v0.12.0 with all 12 assets; all 11 payload checksums were verified
+after download. The final PR Apple Silicon artifact was reused because GitHub
+could not assign a tag-build ARM runner; the complete Git tree matches exactly.
+See the verification record for build provenance and remaining physical setup.

@@ -103,3 +103,43 @@ workspace suite, explicit real-model LAN inference and native dialog expiry
 checks after review fixes. PR targets dev, created from master because dev did
 not exist. Merge only after checks and review findings are resolved. Publish
 v0.12.0 through the existing multi-platform release workflow and verify assets.
+
+## Accepted implementation
+
+- Final local workspace run: 154 tests passed with real Whisper, speech and
+  VAD fixtures. Formatting and workspace/all-target clippy with warnings denied
+  passed. The separate encrypted real-model roundtrip, stop-during-preview
+  recording integration and native Windows approval expiry checks also passed.
+- Independent review findings were fixed and regression-tested; the final
+  review had no remaining findings. PR #66 passed all three native test jobs
+  and all five packaging jobs before merging into dev as
+  fa84efea09a7a44864a70f81d7dfa1bc06fbb38a.
+- The installed Windows copy was updated from 0.11.8 to 0.12.0, preserving the
+  user's large-v3-turbo model and push-to-talk settings. The model loaded,
+  TCP 47957 listened on all interfaces, and discovery found AMD9900MAX with
+  its persistent identity. A separate release-candidate smoke exercised the
+  RX 7600 XT through Vulkan.
+- The Windows account running verification could not grant the administrator
+  firewall prompt unattended. No Hush-Key LAN firewall rule was installed.
+  Use Network > Allow network access (private network) and approve Windows
+  UAC once. The actual laptop was unavailable: its installation and a physical
+  two-computer LAN acceptance test remain user setup steps, not verified facts.
+
+## Published release evidence
+
+- PR: https://github.com/aignermax/hushkey/pull/66
+- Release: https://github.com/aignermax/hushkey/releases/tag/v0.12.0
+- Final PR test run 44336295068 and packaging run 44336295021 passed. The
+  post-merge native test run 44340118526 also passed on all three systems.
+- Tag packaging run 44340129787 passed Windows, both Linux targets and Intel
+  macOS. Its Apple Silicon job expired without acquiring a runner; a targeted
+  retry also remained unassigned and was cancelled before manual publication.
+- Apple Silicon uses the successful final PR build, head
+  b988362e99541851ef464e702d0d1eb264d0c112. Both this commit and the release tag
+  have tree baefbef358fe8aefc34f88ad498b7d324f52e237. Thus the reused package
+  was built and checked from the complete, unchanged release source tree.
+  Release notes disclose this provenance; no source checks were skipped.
+- Published stable v0.12.0 with 12 assets: 11 positive-length payloads and
+  SHA256SUMS. Downloaded every asset and verified all 11 hashes. The installed
+  Windows file matches the published payload, SHA256
+  fcbcb04f17a071eab7bf5ba73c279f4656a7ae0f5e29795257fecd776d5e07b2.
