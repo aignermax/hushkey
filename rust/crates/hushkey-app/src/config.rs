@@ -72,6 +72,10 @@ pub struct Config {
     /// utterances not inserted.
     pub brain: Option<BrainSettings>,
     pub use_gpu: bool,
+    /// A pinned LAN destination; None runs inference locally.
+    pub remote: Option<hushkey_net::Peer>,
+    /// Advertise and accept pairing requests, never audio without consent.
+    pub server_enabled: bool,
     pub updates: Updates,
     /// Show the first steps (hold the key, speak, let go) until the first
     /// dictation. Set for a new install only: missing means not wanted.
@@ -92,6 +96,8 @@ impl Default for Config {
             commands: None,
             brain: None,
             use_gpu: true,
+            remote: None,
+            server_enabled: true,
             updates: Updates::Auto,
             guide: false,
         }
@@ -120,12 +126,25 @@ pub fn virtual_key(name: &str) -> Option<u32> {
 
 /// The folder for config and log.
 pub fn state_dir() -> PathBuf {
+    // Separate profiles are useful for portable installs and for verifying
+    // a new LAN release without touching an existing installation's state.
+    if let Some(dir) = std::env::var_os("HUSHKEY_DATA_DIR").filter(|p| !p.is_empty()) {
+        return PathBuf::from(dir);
+    }
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("hushkey-rs")
 }
 
 impl Config {
+    pub fn check_listen_available(&self) -> Result<(), String> {
+        if self.remote.is_some() {
+            Err("Remote computation supports push-to-talk only; select local computation for continuous listening.".into())
+        } else {
+            Ok(())
+        }
+    }
+
     /// The saved settings, or defaults written to disk on first start.
     pub fn load() -> Result<Config, String> {
         let path = state_dir().join("config.json");
@@ -178,6 +197,23 @@ impl Config {
                 return Err(format!("brain kind {:?}: use \"openai\"", brain.kind));
             }
         }
+        if let Some(peer) = &config.remote {
+            if peer.id.len() != 64
+                || !peer
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || peer.name.trim().is_empty()
+                || peer.name.len() > 256
+                || peer.name.chars().count() > 64
+                || peer.name.chars().any(char::is_control)
+                || peer.address.port() == 0
+                || peer.address.ip().is_unspecified()
+                || peer.address.ip().is_multicast()
+            {
+                return Err("invalid remote device identity or address".into());
+            }
+        }
         Ok(config)
     }
 
@@ -209,6 +245,25 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_settings_keep_local_computation_and_offer_a_consent_gated_server() {
+        let config = Config::parse(r#"{"key":"f9"}"#).unwrap();
+        assert!(config.remote.is_none());
+        assert!(config.server_enabled);
+    }
+
+    #[test]
+    fn remote_destination_survives_restart_and_continuous_mode_is_rejected() {
+        let text = r#"{"remote":{"name":"GPU PC","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","address":"192.168.1.3:47957"},"server_enabled":false}"#;
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.remote.as_ref().unwrap().name, "GPU PC");
+        assert!(!config.server_enabled);
+        let saved = serde_json::to_string(&config).unwrap();
+        assert_eq!(Config::parse(&saved).unwrap(), config);
+        assert!(config.check_listen_available().is_err());
+        assert!(Config::default().check_listen_available().is_ok());
+    }
 
     #[test]
     fn defaults_round_trip_and_partial_files_fill_in_defaults() {

@@ -2,7 +2,7 @@ name: rust
 
 on:
   push:
-    branches: [master]
+    branches: [master, dev]
     paths: ["rust/**", ".github/workflows/rust.yml"]
   pull_request:
     paths: ["rust/**", ".github/workflows/rust.yml"]
@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Keep native macOS tests on available Intel hosts: hosted ARM test
+        # jobs can expire unassigned. Release builds still cover both Mac CPUs.
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     env:
       HUSHKEY_TEST_MODEL: ${{ github.workspace }}/testdata/ggml-tiny.bin
@@ -35,11 +37,17 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Native CMake caches contain absolute MSVC paths. Select the installed
+      # toolchain before restoring, and hash its location/version into the key.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
           # whisper-rs-sys does not rebuild when GGML_* changes
           key: ggml-portable
+          env-vars: "VCToolsVersion VCToolsInstallDir VSINSTALLDIR"
 
       # The app's AppIndicator library is loaded at run time, not linked.
       - name: ALSA (cpal), OpenSSL (native TLS for brains) and GTK 3 (tray, overlay) headers
@@ -70,6 +78,12 @@ jobs:
       - name: Tests (real tiny-model inference)
         run: cargo test --workspace
 
+      - name: Encrypted LAN inference (real model and speech)
+        run: cargo test -p hushkey-net real_model_encrypted_roundtrip -- --ignored
+
+      - name: Remote push-to-talk release during preview (real model)
+        run: cargo test -p hushkey-app remote_record_session_finalizes -- --ignored
+
       - name: hushkey.app bundle (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -87,9 +101,6 @@ jobs:
             -Ltarget/release -lhushkey -o target/smoke
           export LD_LIBRARY_PATH=target/release DYLD_LIBRARY_PATH=target/release
           target/smoke "$HUSHKEY_TEST_MODEL" "$HUSHKEY_TEST_SPEECH" "$HUSHKEY_TEST_VAD"
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
 
       - name: C host against include/hushkey.h (MSVC)
         if: runner.os == 'Windows'

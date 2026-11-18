@@ -261,6 +261,9 @@ fn config_from_python(
 /// installation exists that this copy is not part of (someone is trying a
 /// second one on purpose).
 pub fn should_install_itself() -> bool {
+    if std::env::var_os("HUSHKEY_DATA_DIR").is_some() {
+        return false;
+    }
     if setup::packaged() {
         return false;
     }
@@ -276,6 +279,9 @@ pub fn should_install_itself() -> bool {
 /// login. Its settings come over (if this program has none yet) and it is
 /// switched off, so the two do not fight over the key.
 pub fn complete_python_handover() {
+    if std::env::var_os("HUSHKEY_DATA_DIR").is_some() {
+        return;
+    }
     if !setup::python_still_autostarts() {
         return;
     }

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/hushkey-core", "crates/hushkey-brain", "crates/hushkey-ffi", "crates/hushkey-cli", "crates/hushkey-app"]
+members = ["crates/hushkey-core", "crates/hushkey-brain", "crates/hushkey-ffi", "crates/hushkey-cli", "crates/hushkey-app", "crates/hushkey-net"]
 
 [workspace.package]
-version = "0.11.8"
+version = "0.12.0"
 edition = "2021"
 rust-version = "1.85"
 publish = false
@@ -12,6 +12,7 @@ repository = "https://github.com/aignermax/hushkey"
 [workspace.dependencies]
 hushkey-core = { path = "crates/hushkey-core" }
 hushkey-brain = { path = "crates/hushkey-brain" }
+hushkey-net = { path = "crates/hushkey-net" }
 whisper-rs = "0.16"
 cpal = "0.18"
 hound = "3.5"

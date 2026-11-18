@@ -7,7 +7,7 @@ use std::thread::{JoinHandle, ThreadId};
 use std::time::Duration;
 
 use crate::audio::{AudioInput, AudioSink, SAMPLE_RATE};
-use crate::engine::{Engine, TranscribeOptions, Transcript};
+use crate::engine::{TranscribeOptions, Transcriber, Transcript};
 use crate::error::{Error, Result};
 use crate::event::{Event, EventSink};
 
@@ -22,6 +22,9 @@ pub struct RecordConfig {
     pub preview_window: Duration,
     /// Settings for the final transcription.
     pub options: TranscribeOptions,
+    /// Bound capture memory (and notify the host when reached). None is
+    /// unlimited; remote hosts commonly accept at most ten minutes.
+    pub max_duration: Option<Duration>,
 }
 
 impl Default for RecordConfig {
@@ -31,6 +34,7 @@ impl Default for RecordConfig {
             preview_interval: Duration::from_secs(2),
             preview_window: Duration::from_secs(30),
             options: TranscribeOptions::accurate(),
+            max_duration: None,
         }
     }
 }
@@ -48,6 +52,7 @@ struct Shared {
     /// Set by stop(); also aborts a preview transcription in flight, so the
     /// final one is not delayed by it.
     stopping: AtomicBool,
+    cancelled: AtomicBool,
 }
 
 impl Shared {
@@ -60,13 +65,13 @@ impl Shared {
 /// stops it too.
 pub struct RecordSession {
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<Option<Transcript>>>,
+    worker: Option<JoinHandle<Result<Option<Transcript>>>>,
     worker_id: ThreadId,
 }
 
 impl RecordSession {
     pub fn start(
-        engine: Arc<Engine>,
+        engine: Arc<dyn Transcriber>,
         mut input: Box<dyn AudioInput>,
         config: RecordConfig,
         sink: EventSink,
@@ -75,11 +80,23 @@ impl RecordSession {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
             stopping: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
         });
         let (for_samples, for_errors) = (shared.clone(), shared.clone());
+        let max_samples = config
+            .max_duration
+            .map(|d| (d.as_secs_f64() * SAMPLE_RATE as f64) as usize);
         input.start(AudioSink {
             on_samples: Box::new(move |samples| {
-                for_samples.lock().audio.extend_from_slice(samples)
+                let mut state = for_samples.lock();
+                if state.stop { return; }
+                let count = max_samples.map_or(samples.len(), |max| max.saturating_sub(state.audio.len()).min(samples.len()));
+                state.audio.extend_from_slice(&samples[..count]);
+                if max_samples.is_some_and(|max| state.audio.len() >= max) {
+                    state.stop = true;
+                    state.input_errors.push("Recording limit reached; capture stopped. Release the key to finish this dictation.".into());
+                    for_samples.wake.notify_all();
+                }
             }),
             on_error: Box::new(move |message| {
                 for_errors.lock().input_errors.push(message);
@@ -105,7 +122,7 @@ impl RecordSession {
                         message: "internal error: the recording thread panicked".into(),
                     });
                     on_panic(Event::Stopped);
-                    None
+                    Err(Error::Transcribe("the recording thread panicked".into()))
                 })
             })
             .map_err(Error::Io)?;
@@ -132,8 +149,15 @@ impl RecordSession {
             None => Err(Error::Stopped),
             Some(worker) => worker
                 .join()
-                .map_err(|_| Error::Transcribe("the recording thread panicked".into())),
+                .map_err(|_| Error::Transcribe("the recording thread panicked".into()))?,
         }
+    }
+
+    /// Stop capture and abandon this dictation without a final inference.
+    /// Used for a tap of the hotkey or when the user discards a recording.
+    pub fn cancel(&mut self) -> Result<Option<Transcript>> {
+        self.shared.cancelled.store(true, Ordering::Relaxed);
+        self.stop()
     }
 }
 
@@ -146,12 +170,12 @@ impl Drop for RecordSession {
 }
 
 fn run(
-    engine: Arc<Engine>,
+    engine: Arc<dyn Transcriber>,
     mut input: Box<dyn AudioInput>,
     config: RecordConfig,
     sink: EventSink,
     shared: Arc<Shared>,
-) -> Option<Transcript> {
+) -> Result<Option<Transcript>> {
     let window = (config.preview_window.as_secs_f64() * SAMPLE_RATE as f64) as usize;
     let min_preview = SAMPLE_RATE as usize / 2;
     let mut previewed_len = 0;
@@ -204,18 +228,22 @@ fn run(
     }
     input.stop();
     let audio = std::mem::take(&mut shared.lock().audio);
+    if shared.cancelled.load(Ordering::Relaxed) {
+        sink(Event::Stopped);
+        return Ok(None);
+    }
     let transcript = match engine.transcribe(&audio, &config.options) {
         Ok(t) => {
             sink(Event::Final {
                 transcript: t.clone(),
             });
-            Some(t)
+            Ok(Some(t))
         }
         Err(e) => {
             sink(Event::Error {
                 message: e.to_string(),
             });
-            None
+            Err(e)
         }
     };
     sink(Event::Stopped);

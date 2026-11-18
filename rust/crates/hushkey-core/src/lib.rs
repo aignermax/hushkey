@@ -27,7 +27,8 @@ pub use brain::{Brain, Reply};
 pub use commands::{CommandMatch, CommandSet};
 pub use endpoint::{EndpointConfig, Endpointer};
 pub use engine::{
-    init_process, Engine, EngineConfig, Segment, TranscribeOptions, Transcript, VAD_FRAME,
+    init_process, Engine, EngineConfig, Segment, TranscribeOptions, Transcriber, Transcript,
+    VAD_FRAME,
 };
 pub use error::{Error, Result};
 pub use event::{Event, EventSink};

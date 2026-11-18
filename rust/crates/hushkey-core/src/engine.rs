@@ -102,6 +102,32 @@ pub struct Transcript {
     pub no_speech: f32,
 }
 
+/// The computation used by a push-to-talk session. Capture and text insertion
+/// stay on the host; implementations may run inference locally or remotely.
+pub trait Transcriber: Send + Sync {
+    fn transcribe_cancellable(
+        &self,
+        audio: &[f32],
+        options: &TranscribeOptions,
+        abort: Option<&dyn Fn() -> bool>,
+    ) -> Result<Transcript>;
+
+    fn transcribe(&self, audio: &[f32], options: &TranscribeOptions) -> Result<Transcript> {
+        self.transcribe_cancellable(audio, options, None)
+    }
+}
+
+impl Transcriber for Engine {
+    fn transcribe_cancellable(
+        &self,
+        audio: &[f32],
+        options: &TranscribeOptions,
+        abort: Option<&dyn Fn() -> bool>,
+    ) -> Result<Transcript> {
+        Engine::transcribe_cancellable(self, audio, options, abort)
+    }
+}
+
 /// A loaded model. Thread-safe: calls from several threads are serialized.
 pub struct Engine {
     ctx: WhisperContext,

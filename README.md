@@ -10,7 +10,8 @@ lands in whatever window has focus. Terminal, editor, browser, chat: any app.
 One small native program (Rust, [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 inside): GPU-accelerated through **Vulkan** on Windows and Linux (AMD, NVIDIA,
 Intel) and **Metal** on macOS, CPU where there is no GPU. No Python, no setup.
-Nothing leaves your machine after the one-time model download.
+Speech stays on your machine by default. Optionally, let a trusted computer
+on your LAN run recognition over an encrypted connection.
 
 ## Install
 
@@ -96,6 +97,66 @@ is the default and a good balance), **key** (Caps Lock, Right Ctrl, F8, F9,
 Scroll Lock), **language** (or auto-detect), **insert method** (paste via the
 clipboard, which is restored afterwards, or typed keystrokes), **start at
 login**, **logs**, and **updates**.
+
+## Use another computer's GPU
+
+Install this version of Hush-Key on both computers. On the powerful computer,
+keep **Network → Offer LAN computation (approval required)** enabled and wait
+for its local model to load. On the laptop:
+
+1. Choose **Network → Find network computers**. The search uses local IPv4
+   broadcasts; no account, cloud directory or internet relay is involved.
+2. Open the Network menu again and select the computer by name and device ID.
+3. Both computers show the same eight-digit comparison code and a privacy
+   notice. Compare the codes and click **OK on both computers**. Cancel if
+   they differ. Device names and discovery responses alone are not trusted.
+4. Dictate as usual. **Remote · computer name** appears in the preview and
+   computation status. Text is inserted on the laptop, including into a
+   focused remote-desktop window where that software forwards input.
+
+Permissions and the selected computer survive restarts. Selecting a computer
+as a server does not grant it access to your own computation; the reverse
+direction requires its own host approval. A remote-only client
+does not load or download a Whisper model on startup. The server's loaded
+model determines recognition quality; use its Model menu to change it.
+**Continuous listening is supported only with local computation.** Choose
+**Network → Compute locally** before enabling it.
+
+The direct connection uses Noise XX (X25519, ChaCha20-Poly1305, SHA-256).
+Audio and recognition results are encrypted in transit. **The approved server
+necessarily decrypts and processes speech in memory.** Hush-Key writes no
+server recordings or transcripts. The requesting laptop keeps its normal
+dictation history. Only approve computers and administrators you trust.
+**Revoke device approvals** removes stored trust and closes active sessions;
+both devices must approve a new pairing. Disabling the server immediately
+stops discovery replies and disconnects its clients.
+
+If a final request fails, the current recording stays temporarily in memory.
+Use **Retry failed dictation** or **Discard failed dictation** in the Network
+menu; a new dictation cannot overwrite it. There is no automatic destination
+switch or automatic replay. If its address changes or permission needs renewal,
+rediscover and reconnect to the same device ID; the retained audio survives.
+A server processes one network request at a time. Final requests wait a bounded
+time for previews to finish; excess preview requests report busy. Remote requests are
+limited to ten minutes of audio. A running computation can finish after a
+disconnect, but its late result is discarded.
+
+Both computers must allow **TCP and UDP port 47957** on their trusted local
+network. On Windows, **Network → Allow network access (private network)**
+asks for administrator permission and creates executable-scoped inbound rules
+for the Private profile and local subnet only. If Windows already allowed
+the app through its firewall prompt, this extra action is unnecessary. On
+Linux/macOS, allow those ports in your firewall. On macOS, also allow Local
+Network access when asked (System Settings → Privacy & Security → Local
+Network). Guest Wi-Fi client isolation, VPNs and separate broadcast domains
+may prevent discovery. No port forwarding
+is needed. Discovery reveals the computer name and stable device ID to the
+local network; switch off offering computation to stop advertising.
+
+For an isolated portable profile, set `HUSHKEY_DATA_DIR` to a separate folder
+before launch. On Windows it also creates a separate single-instance lock;
+use a different hotkey if running two profiles. Profiles share the model
+cache, but keep settings, history and network keys separately.
 
 ## Updates
 
