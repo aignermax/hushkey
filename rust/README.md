@@ -13,10 +13,23 @@ repository root is unaffected; see
 | --- | --- |
 | `hushkey-core` | The library: `Engine`, `RecordSession`, `ListenSession`, `CommandSet`, the `Brain` trait, audio inputs, model lookup |
 | `hushkey-brain` | `OpenAiChat`, for any `/v1/chat/completions` server |
+| `hushkey-net` | UDP LAN discovery, stable device identities, mutually approved Noise-encrypted inference transport |
 | `hushkey-ffi` | The C ABI (`hushkey.dll` / `libhushkey.so` / `.dylib`, static lib) and [`include/hushkey.h`](include/hushkey.h) |
 | `hushkey-cli` | `hushkey-cli transcribe file.wav`, `record`, `listen`, `devices` |
 
 ## Use it from C
+
+Rust push-to-talk sessions accept `Arc<dyn Transcriber>`. `Engine` implements
+the interface; the desktop app wraps `hushkey_net::Client` for remote inference.
+Existing `Arc<Engine>` callers continue to coerce. A final inference failure
+now propagates from `RecordSession::stop()` instead of appearing to be an empty
+successful dictation. `RecordSession::cancel()` stops capture without final
+inference. Continuous listening continues to use the local engine.
+
+The desktop app includes both LAN client and server roles; see the root
+[LAN setup guide](../README.md#use-another-computers-gpu) and the transport
+[resource/security contract](crates/hushkey-net/README.md). Transport tests use
+real loopback sockets and encryption, with explicit bounds and cancellation.
 
 ```c
 #include "hushkey.h"

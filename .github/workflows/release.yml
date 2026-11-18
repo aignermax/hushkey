@@ -22,7 +22,7 @@ on:
   # A trial build (nothing published) when the build itself changes.
   pull_request:
     paths: [".github/workflows/release.yml", "rust/packaging/**", "rust/Cargo.toml", "rust/crates/hushkey-app/**",
-            "rust/crates/hushkey-core/**", "rust/crates/hushkey-cli/**"]
+            "rust/crates/hushkey-core/**", "rust/crates/hushkey-net/**", "rust/crates/hushkey-cli/**"]
   workflow_dispatch:
 
 jobs:

@@ -62,7 +62,16 @@ pub fn fatal(message: &str) -> ExitCode {
 /// again (an update waits for its predecessor) leaves no handle behind
 /// that would keep the mutex alive.
 pub fn already_running() -> bool {
-    let name: Vec<u16> = "Local\\hushkey-rs".encode_utf16().chain(Some(0)).collect();
+    let mutex = if std::env::var_os("HUSHKEY_DATA_DIR").is_some() {
+        use sha2::{Digest, Sha256};
+        format!(
+            "Local\\hushkey-rs-{:x}",
+            Sha256::digest(config::state_dir().to_string_lossy().as_bytes())
+        )
+    } else {
+        "Local\\hushkey-rs".to_string()
+    };
+    let name: Vec<u16> = mutex.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let handle = CreateMutexW(ptr::null(), 0, name.as_ptr());
         let exists = !handle.is_null() && GetLastError() == ERROR_ALREADY_EXISTS;

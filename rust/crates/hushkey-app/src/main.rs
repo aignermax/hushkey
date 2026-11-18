@@ -33,6 +33,8 @@ mod linux;
 mod log;
 #[cfg(target_os = "macos")]
 mod macos;
+mod network;
+mod network_dialog;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod setup;
 #[cfg_attr(

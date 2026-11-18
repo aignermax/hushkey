@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use hushkey_brain::{OpenAiChat, OpenAiConfig};
 use hushkey_core::{
     model, Brain, CommandSet, Engine, EngineConfig, Event, EventSink, ListenConfig, ListenSession,
-    Microphone, RecordConfig, RecordSession, TranscribeOptions,
+    Microphone, RecordConfig, RecordSession, TranscribeOptions, Transcriber,
 };
 use tray_icon::menu::MenuEvent;
 
@@ -26,6 +26,8 @@ use crate::config::{self, Config, Insert, Mode, Updates};
 use crate::history::History;
 use crate::icon::Badge;
 use crate::log;
+use crate::network::{self, Network, Recoverable};
+use crate::network_dialog;
 use crate::platform::{self, autostart, Hotkey, KeyEvent, Overlay, Restore};
 use crate::strings::{self, Strings, MODELS};
 use crate::tray::{Action, Tray};
@@ -69,11 +71,16 @@ const BLUE: [u8; 3] = [0x31, 0x82, 0xce];
 const GREEN: [u8; 3] = [0x38, 0xa1, 0x69];
 
 enum Msg {
+    Network(network::Event),
+    #[cfg(windows)]
+    Firewall(Result<(), String>),
+    RevokeConfirmed(bool),
     Key(KeyEvent),
     /// Engine load number `.0` finished (or failed).
     Loaded(u64, Result<Arc<Engine>, String>),
     /// What the recording has heard so far.
-    Preview(String),
+    Preview(u64, String),
+    RecordingError(u64, String),
     /// A push-to-talk dictation finished: its text (or why not).
     Dictated(Result<String, String>),
     /// Listening session number `.0` reported something.
@@ -117,6 +124,19 @@ pub fn run(after_update: bool) -> ExitCode {
         Err(e) => return platform::fatal(&e),
     };
     let (tx, rx) = mpsc::channel::<Msg>();
+    let network_tx = tx.clone();
+    let (network, network_error) = match Network::start(
+        config.server_enabled,
+        Arc::new(move |event| {
+            let _ = network_tx.send(Msg::Network(event));
+        }),
+    ) {
+        Ok(network) => {
+            let error = network.server_error.clone();
+            (Some(network), error)
+        }
+        Err(e) => (None, Some(e)),
+    };
     let hotkey = match install_hotkey(&config.key, tx.clone()) {
         Ok(h) => h,
         Err(e) => return platform::fatal(&e),
@@ -151,10 +171,20 @@ pub fn run(after_update: bool) -> ExitCode {
         inserter: Some(inserter),
         inserter_thread: Some(inserter_thread),
         engine: None,
+        network,
+        backend: None,
+        connecting: false,
+        discovering: false,
+        connect_generation: 0,
+        dialogs: Vec::new(),
+        deferred_approval: None,
+        pending_inserts: 0,
+        revoking: false,
         recording: None,
         pressed_at: None,
         longest_pause: Duration::ZERO,
         previewed: false,
+        record_generation: 0,
         listening: None,
         listen_generation: 0,
         draining: None,
@@ -171,7 +201,27 @@ pub fn run(after_update: bool) -> ExitCode {
         quit_requested: false,
         next_update_check: Instant::now() + Duration::from_secs(30),
     };
-    app.load_engine();
+    if let Some(network) = &app.network {
+        app.tray
+            .network_identity(&network.identity.name(), &network.identity.id());
+    }
+    if let Some(peer) = app.config.remote.clone() {
+        // Remote-only clients never need to download or load a local model.
+        if app.config.mode == Mode::Listen {
+            app.config.mode = Mode::PushToTalk;
+            app.save(|c| c.mode = Mode::PushToTalk);
+        }
+        app.connect_remote(peer);
+    } else {
+        app.load_engine();
+    }
+    if let Some(e) = network_error {
+        // Keep client functionality, but don't show a failed listener as on.
+        app.config.server_enabled = false;
+        app.tray.sync(&app.config, autostart::enabled());
+        app.failure_notice(&format!("Network: {e}"));
+        log::line(&format!("network unavailable: {e}"));
+    }
     app.run(rx)
 }
 
@@ -210,12 +260,22 @@ struct App {
     inserter: Option<Sender<String>>,
     inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
+    network: Option<Network>,
+    backend: Option<Arc<Recoverable>>,
+    connecting: bool,
+    discovering: bool,
+    connect_generation: u64,
+    dialogs: Vec<(bool, network_dialog::Pending)>,
+    deferred_approval: Option<(hushkey_net::Approval, mpsc::SyncSender<bool>, Instant)>,
+    pending_inserts: usize,
+    revoking: bool,
     recording: Option<RecordSession>,
     pressed_at: Option<Instant>,
     /// The longest pause in the held key's repeats during this dictation.
     longest_pause: Duration,
     /// This dictation showed some text while recording.
     previewed: bool,
+    record_generation: u64,
     listening: Option<ListenSession>,
     /// Numbers listening sessions, so events of one already stopped are
     /// told apart from those of the current one.
@@ -252,6 +312,178 @@ struct App {
 }
 
 impl App {
+    fn has_failed(&self) -> bool {
+        self.backend
+            .as_ref()
+            .is_some_and(|backend| backend.has_failed())
+    }
+
+    fn can_switch(&mut self) -> bool {
+        if self.recording.is_some() || self.busy || self.connecting || self.has_failed() {
+            self.failure_notice(network::words(self.s,
+                "Bitte das laufende Diktat oder die Verbindung beenden; fehlgeschlagenes Diktat erneut versuchen oder verwerfen.",
+                "Finish the dictation or connection first; retry or discard any failed dictation."));
+            false
+        } else {
+            true
+        }
+    }
+
+    fn connect_remote(&mut self, peer: hushkey_net::Peer) {
+        let same_identity = self.config.remote.as_ref().is_some_and(|p| p.id == peer.id);
+        if self.recording.is_some()
+            || self.busy
+            || self.connecting
+            || (self.has_failed() && !same_identity)
+        {
+            self.failure_notice(network::words(self.s,
+                "Bitte zuerst das Diktat beenden. Eine gespeicherte Aufnahme kann nur mit demselben freigegebenen Rechner erneut verbunden werden; für einen anderen Rechner bitte ausdrücklich verwerfen.",
+                "Finish the dictation first. Retained audio can reconnect only to the same approved device; discard explicitly before selecting another device."));
+            return;
+        }
+        if self.network.is_none() {
+            self.failure_notice(network::words(
+                self.s,
+                "Netzwerk nicht verfügbar. Bitte Hush-Key neu starten und Log prüfen.",
+                "Network unavailable. Restart Hush-Key and check the log.",
+            ));
+            return;
+        }
+        self.stop_listening(false);
+        self.config.mode = Mode::PushToTalk;
+        self.save(|c| c.mode = Mode::PushToTalk);
+        self.connecting = true;
+        self.connect_generation += 1;
+        let text = network::words(
+            self.s,
+            "Remote-Verbindung wird aufgebaut …",
+            "Connecting to remote computation …",
+        );
+        self.tray.show(Badge::Loading, text);
+        self.notice(GREY, text);
+        self.network
+            .as_ref()
+            .unwrap()
+            .connect(peer, self.connect_generation);
+    }
+
+    fn show_approval(
+        &mut self,
+        request: hushkey_net::Approval,
+        hosting: bool,
+        reply: mpsc::SyncSender<bool>,
+        expires: Instant,
+    ) {
+        if expires <= Instant::now() || (hosting && !self.config.server_enabled) {
+            let _ = reply.send(false);
+            return;
+        }
+        let title = format!("Hush-Key · LAN · {}", request.code);
+        let dialog = network_dialog::request(
+            &title,
+            &network::consent(self.s, &request, hosting),
+            expires.saturating_duration_since(Instant::now()),
+            move |allowed| {
+                let _ = reply.send(allowed);
+            },
+        );
+        self.dialogs.push((hosting, dialog));
+    }
+
+    fn network_event(&mut self, event: network::Event) {
+        match event {
+            network::Event::Approval {
+                request,
+                hosting,
+                reply,
+                expires,
+            } => {
+                if hosting
+                    && (self.recording.is_some()
+                        || self.listening.is_some()
+                        || self.busy
+                        || self.pending_inserts > 0)
+                {
+                    // Do not let an unsolicited request steal a dictation's focus.
+                    self.deferred_approval = Some((request, reply, expires));
+                } else {
+                    self.show_approval(request, hosting, reply, expires);
+                }
+            }
+            network::Event::Discovered(result) => {
+                self.discovering = false;
+                self.tray.network_searching(false);
+                match result {
+                    Ok(peers) => {
+                        self.tray.set_network_peers(&peers);
+                        if peers.is_empty() {
+                            self.failure_notice(network::words(self.s,
+                                "Keine Rechner gefunden. Auf dem anderen PC Hush-Key starten und LAN-Berechnung anbieten. Firewall: TCP/UDP 47957 im privaten Netz erlauben. Gast-WLAN kann die Suche blockieren.",
+                                "No computers found. Run Hush-Key and offer LAN computation on the other PC. Allow TCP/UDP 47957 on private networks. Guest Wi-Fi may block discovery."));
+                        } else {
+                            self.notice(
+                                GREEN,
+                                network::words(
+                                    self.s,
+                                    "Rechner gefunden — im Netzwerkmenü auswählen",
+                                    "Computers found — select one in the network menu",
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => self.failure_notice(&format!("Network: {e}")),
+                }
+            }
+            network::Event::Connected { generation, result } => {
+                if generation != self.connect_generation {
+                    return;
+                }
+                self.connecting = false;
+                match result {
+                    Ok((peer, backend)) => {
+                        let retained = self.has_failed()
+                            && self.config.remote.as_ref().is_some_and(|p| p.id == peer.id);
+                        self.load_generation += 1; // ignore a superseded local model load
+                        self.config.remote = Some(peer.clone());
+                        self.config.mode = Mode::PushToTalk;
+                        self.save(|c| {
+                            c.remote = Some(peer);
+                            c.mode = Mode::PushToTalk;
+                        });
+                        if retained {
+                            self.backend.as_ref().unwrap().reconnect(&backend);
+                        } else {
+                            self.backend = Some(backend);
+                        }
+                        self.tray.recovery_available(self.has_failed());
+                        self.notice_until = None;
+                        self.overlay.hide();
+                        self.idle();
+                        self.notice(
+                            GREEN,
+                            &network::overlay_text(
+                                self.config.remote.as_ref(),
+                                network::words(
+                                    self.s,
+                                    "verbunden · verschlüsselt",
+                                    "connected · encrypted",
+                                ),
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        self.idle();
+                        self.failure_notice(&format!("Remote: {e}"));
+                        if self.backend.is_none() {
+                            self.tray.show(Badge::Failed, &format!("Remote: {e}"));
+                        }
+                    }
+                }
+                self.tray.sync(&self.config, autostart::enabled());
+            }
+        }
+    }
+
     fn run(mut self, rx: Receiver<Msg>) -> ExitCode {
         loop {
             // The system's events first: the tray and its menu live on them.
@@ -268,6 +500,16 @@ impl App {
             }
             while let Ok(msg) = rx.try_recv() {
                 self.handle(msg);
+            }
+            self.dialogs.retain(|(_, dialog)| !dialog.done());
+            if self.recording.is_none()
+                && self.listening.is_none()
+                && !self.busy
+                && self.pending_inserts == 0
+            {
+                if let Some((request, reply, expires)) = self.deferred_approval.take() {
+                    self.show_approval(request, true, reply, expires);
+                }
             }
             if self.quit_requested {
                 return self.quit();
@@ -327,9 +569,15 @@ impl App {
     }
 
     fn quit(mut self) -> ExitCode {
+        for (_, dialog) in &self.dialogs {
+            dialog.cancel();
+        }
+        if let Some((_, reply, _)) = self.deferred_approval.take() {
+            let _ = reply.send(false);
+        }
         self.overlay.hide();
         if let Some(mut session) = self.recording.take() {
-            let _ = session.stop();
+            let _ = session.cancel();
         }
         if let Some(mut session) = self.listening.take() {
             let _ = session.stop();
@@ -359,12 +607,18 @@ impl App {
             return;
         }
         if let Some(inserter) = &self.inserter {
-            let _ = inserter.send(text);
+            if inserter.send(text).is_ok() {
+                self.pending_inserts += 1;
+            }
         }
     }
 
     fn load_engine(&mut self) {
         self.engine = None;
+        self.backend = None;
+        if let Some(network) = &self.network {
+            *network.engine.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
         self.load_generation += 1;
         let generation = self.load_generation;
         let size = MODELS
@@ -425,12 +679,51 @@ impl App {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
+            Msg::Network(event) => self.network_event(event),
+            Msg::RevokeConfirmed(allowed) => {
+                self.revoking = false;
+                if allowed {
+                    self.connect_generation += 1;
+                    self.connecting = false;
+                    for (_, dialog) in &self.dialogs {
+                        dialog.cancel();
+                    }
+                    if let Some((_, reply, _)) = self.deferred_approval.take() {
+                        let _ = reply.send(false);
+                    }
+                    if let Some(network) = &self.network {
+                        if let Err(e) = network.revoke_all() {
+                            self.failure_notice(&format!("Revoke: {e}"));
+                            return;
+                        }
+                    }
+                    self.notice(GREY, network::words(self.s, "Gerätefreigaben widerrufen. Zum Remote-Rechner bei Bedarf neu verbinden.", "Device permissions revoked. Reconnect to the remote computer when needed."));
+                    self.idle();
+                }
+            }
+            #[cfg(windows)]
+            Msg::Firewall(result) => match result {
+                Ok(()) => self.notice(
+                    GREEN,
+                    network::words(
+                        self.s,
+                        "Netzwerkzugriff im privaten LAN erlaubt",
+                        "Private LAN access allowed",
+                    ),
+                ),
+                Err(e) => self.failure_notice(&e),
+            },
             Msg::Loaded(generation, result) if generation != self.load_generation => {
                 // Superseded by a later switch while it loaded.
                 drop(result);
             }
             Msg::Loaded(_, Ok(engine)) => {
                 log::line("model loaded");
+                if let Some(network) = &self.network {
+                    *network.engine.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(engine.clone());
+                }
+                self.backend = Some(Arc::new(Recoverable::new(engine.clone())));
                 self.engine = Some(engine);
                 if self.config.mode == Mode::Listen {
                     self.set_listening(true);
@@ -449,8 +742,16 @@ impl App {
             }
             Msg::Key(KeyEvent::Down) => self.key_down(),
             Msg::Key(KeyEvent::Up) => self.key_up(),
-            Msg::Preview(text) => {
-                if self.recording.is_some() {
+            Msg::RecordingError(generation, message) => {
+                if self.recording.is_some() && generation == self.record_generation {
+                    self.overlay.show(
+                        ORANGE,
+                        &network::overlay_text(self.config.remote.as_ref(), &message),
+                    );
+                }
+            }
+            Msg::Preview(generation, text) => {
+                if self.recording.is_some() && generation == self.record_generation {
                     self.previewed = true;
                     // The first steps keep saying to let go.
                     let text = if self.config.guide {
@@ -458,11 +759,15 @@ impl App {
                     } else {
                         text
                     };
-                    self.overlay.show(RED, &text);
+                    self.overlay.show(
+                        RED,
+                        &network::overlay_text(self.config.remote.as_ref(), &text),
+                    );
                 }
             }
             Msg::Dictated(Ok(text)) => {
                 self.busy = false;
+                self.tray.recovery_available(false);
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     // Silence from the microphone shows as no preview.
@@ -487,11 +792,21 @@ impl App {
             }
             Msg::Dictated(Err(e)) => {
                 self.busy = false;
-                self.overlay.hide();
                 log::line(&format!("dictation failed: {e}"));
+                self.tray.recovery_available(self.has_failed());
                 self.idle();
+                let hint = network::words(
+                    self.s,
+                    "Diktat fehlgeschlagen. Im Netzwerkmenü erneut versuchen oder verwerfen.",
+                    "Dictation failed. Retry or discard it in the network menu.",
+                );
+                self.failure_notice(&network::overlay_text(
+                    self.config.remote.as_ref(),
+                    &format!("{hint} {e}"),
+                ));
             }
             Msg::Inserted(result) => {
+                self.pending_inserts = self.pending_inserts.saturating_sub(1);
                 let arrived = result.as_ref().is_ok_and(platform::Restore::arrived);
                 match result {
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
@@ -628,7 +943,7 @@ impl App {
     }
 
     fn idle(&mut self) {
-        if self.engine.is_none() {
+        if self.backend.is_none() {
             return; // still loading: the tray says so
         }
         let state = if self.listening.is_some() {
@@ -636,23 +951,30 @@ impl App {
         } else {
             self.s.idle
         };
-        let text = format!(
-            "hushkey {} · {} — {state}",
-            env!("CARGO_PKG_VERSION"),
-            self.config.model
-        );
+        let text = if self.config.remote.is_some() {
+            format!("hushkey {} — {state}", env!("CARGO_PKG_VERSION"))
+        } else {
+            format!(
+                "hushkey {} · {} — {state}",
+                env!("CARGO_PKG_VERSION"),
+                self.config.model
+            )
+        };
         let badge = if self.listening.is_some() {
             Badge::Listening
         } else {
             Badge::None
         };
-        self.tray.show(badge, &text);
+        self.tray.show(
+            badge,
+            &network::overlay_text(self.config.remote.as_ref(), &text),
+        );
         self.guide();
     }
 
     /// Ready for the key, with nothing else going on.
     fn waiting(&self) -> bool {
-        self.engine.is_some()
+        self.backend.is_some()
             && self.config.mode == Mode::PushToTalk
             && self.listening.is_none()
             && self.recording.is_none()
@@ -682,29 +1004,61 @@ impl App {
     }
 
     fn key_down(&mut self) {
+        // An incoming consent prompt must never hold up capture/key release.
+        for (hosting, dialog) in &self.dialogs {
+            if *hosting {
+                dialog.cancel();
+            }
+        }
         self.pressed_at = Some(Instant::now());
-        if self.listening.is_some() || self.recording.is_some() || self.busy {
+        if self.listening.is_some()
+            || self.recording.is_some()
+            || self.busy
+            || self.draining.is_some()
+        {
+            return;
+        }
+        if self.connecting || self.has_failed() {
+            self.failure_notice(network::words(self.s,
+                "Verbindung läuft oder ein Diktat wartet auf Wiederholung. Bitte im Netzwerkmenü prüfen.",
+                "Connecting or a failed dictation needs attention. Check the network menu."));
             return;
         }
         self.longest_pause = Duration::ZERO;
         self.previewed = false;
-        let Some(engine) = self.engine.clone() else {
+        self.record_generation += 1;
+        let Some(backend) = self.backend.clone() else {
+            self.failure_notice(network::words(
+                self.s,
+                "Berechnung noch nicht bereit. Netzwerkverbindung oder Modell prüfen.",
+                "Computation is not ready. Check the network connection or model.",
+            ));
             return;
         };
         let config = RecordConfig {
             preview_interval: Duration::from_millis(1500),
+            max_duration: self
+                .config
+                .remote
+                .as_ref()
+                .map(|_| Duration::from_secs(600)),
             options: self.options(),
             ..RecordConfig::default()
         };
         let tx = self.tx.clone();
+        let generation = self.record_generation;
         let sink: EventSink = Arc::new(move |event| match event {
             Event::Preview { text } => {
-                let _ = tx.send(Msg::Preview(text));
+                let _ = tx.send(Msg::Preview(generation, text));
             }
-            Event::Error { message } => log::line(&format!("recording: {message}")),
+            Event::Error { message } => {
+                log::line(&format!("recording: {message}"));
+                let _ = tx.send(Msg::RecordingError(generation, message));
+            }
             _ => {}
         });
-        match RecordSession::start(engine, Box::new(Microphone::new(None)), config, sink) {
+        let backend: Arc<dyn Transcriber> = backend;
+        match RecordSession::start(backend, Box::new(Microphone::new(None)), config, sink) {
             Ok(session) => {
                 self.recording = Some(session);
                 self.notice_until = None;
@@ -713,8 +1067,9 @@ impl App {
                 } else {
                     self.s.recording
                 };
-                self.overlay.show(RED, text);
-                self.tray.show(Badge::Recording, self.s.recording);
+                let text = network::overlay_text(self.config.remote.as_ref(), text);
+                self.overlay.show(RED, &text);
+                self.tray.show(Badge::Recording, &text);
             }
             Err(e) => {
                 log::line(&format!("could not record: {e}"));
@@ -738,7 +1093,7 @@ impl App {
         if tap {
             // Too short to be a dictation: end the recording, insert nothing.
             std::thread::spawn(move || {
-                let _ = session.stop();
+                let _ = session.cancel();
             });
             self.overlay.hide();
             self.idle();
@@ -754,8 +1109,9 @@ impl App {
             ));
         }
         self.busy = true;
-        self.overlay.show(ORANGE, self.s.transcribing);
-        self.tray.show(Badge::Transcribing, self.s.transcribing);
+        let text = network::overlay_text(self.config.remote.as_ref(), self.s.transcribing);
+        self.overlay.show(ORANGE, &text);
+        self.tray.show(Badge::Transcribing, &text);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result = session
@@ -768,8 +1124,114 @@ impl App {
 
     fn menu(&mut self, action: Action) {
         match action {
+            Action::NetworkDiscover => {
+                if !self.discovering {
+                    if let Some(network) = &self.network {
+                        self.discovering = true;
+                        self.tray.network_searching(true);
+                        network.discover();
+                        self.notice(
+                            GREY,
+                            network::words(
+                                self.s,
+                                "Suche Hush-Key-Rechner im LAN …",
+                                "Discovering Hush-Key computers on the LAN …",
+                            ),
+                        );
+                    } else {
+                        self.failure_notice(network::words(
+                            self.s,
+                            "Netzwerk nicht verfügbar. Bitte Log prüfen und Hush-Key neu starten.",
+                            "Network unavailable. Check the log and restart Hush-Key.",
+                        ));
+                    }
+                }
+            }
+            Action::NetworkConnect(peer) => self.connect_remote(peer),
+            Action::NetworkLocal => {
+                if self.can_switch() {
+                    self.stop_listening(false);
+                    self.config.remote = None;
+                    self.backend = None;
+                    self.save(|c| c.remote = None);
+                    self.load_engine();
+                }
+            }
+            Action::NetworkServer => {
+                let enabled = !self.config.server_enabled;
+                if let Some(network) = &mut self.network {
+                    if let Err(e) = network.set_enabled(enabled) {
+                        self.failure_notice(&format!("Server: {e}"));
+                        self.tray.sync(&self.config, autostart::enabled());
+                        return;
+                    }
+                } else {
+                    self.failure_notice(network::words(
+                        self.s,
+                        "Netzwerk nicht verfügbar. Bitte Hush-Key neu starten.",
+                        "Network unavailable. Restart Hush-Key.",
+                    ));
+                    return;
+                }
+                if !enabled {
+                    for (hosting, dialog) in &self.dialogs {
+                        if *hosting {
+                            dialog.cancel();
+                        }
+                    }
+                    if let Some((_, reply, _)) = self.deferred_approval.take() {
+                        let _ = reply.send(false);
+                    }
+                }
+                self.config.server_enabled = enabled;
+                self.save(|c| c.server_enabled = enabled);
+            }
+            Action::NetworkRevoke => {
+                if !self.revoking {
+                    self.revoking = true;
+                    let tx = self.tx.clone();
+                    let dialog = network_dialog::request("Hush-Key", network::words(self.s,
+                        "Alle Gerätefreigaben widerrufen? Geräte müssen danach erneut genehmigt werden.",
+                        "Revoke all device permissions? Devices will need approval again."), Duration::from_secs(85),
+                        move |allowed| { let _ = tx.send(Msg::RevokeConfirmed(allowed)); });
+                    self.dialogs.push((false, dialog));
+                }
+            }
+            Action::NetworkRetry => {
+                if !self.busy && self.recording.is_none() && self.has_failed() {
+                    if let Some(backend) = self.backend.clone() {
+                        self.busy = true;
+                        self.tray.recovery_available(false);
+                        let text =
+                            network::overlay_text(self.config.remote.as_ref(), self.s.transcribing);
+                        self.overlay.show(ORANGE, &text);
+                        let tx = self.tx.clone();
+                        std::thread::spawn(move || {
+                            let result = backend.retry().map(|t| t.text).map_err(|e| e.to_string());
+                            let _ = tx.send(Msg::Dictated(result));
+                        });
+                    }
+                }
+            }
+            Action::NetworkDiscard => {
+                if !self.busy {
+                    if let Some(backend) = &self.backend {
+                        backend.discard();
+                    }
+                    self.tray.recovery_available(false);
+                    self.overlay.hide();
+                    self.idle();
+                }
+            }
+            #[cfg(windows)]
+            Action::NetworkFirewall => {
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Firewall(network::allow_firewall()));
+                });
+            }
             Action::Model(name) => {
-                if self.config.model != name {
+                if self.config.model != name && self.config.remote.is_none() && self.can_switch() {
                     // Listening, if on, resumes once the new model loaded.
                     self.stop_listening(true);
                     self.config.model = name.to_string();
@@ -905,6 +1367,17 @@ impl App {
     }
 
     fn set_listening(&mut self, on: bool) {
+        if on
+            && (self.config.check_listen_available().is_err()
+                || self.connecting
+                || self.has_failed())
+        {
+            self.failure_notice(network::words(self.s,
+                "Dauerhören ist im Remote-Modus nicht verfügbar. Wähle zuerst lokale Berechnung und schließe offene Diktate ab.",
+                "Continuous listening is unavailable in remote mode. Select local computation and resolve pending dictations first."));
+            self.tray.sync(&self.config, autostart::enabled());
+            return;
+        }
         if !on {
             self.resume_after_drain = false;
             self.stop_listening(false);

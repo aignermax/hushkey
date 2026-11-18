@@ -2,7 +2,7 @@ name: rust
 
 on:
   push:
-    branches: [master]
+    branches: [master, dev]
     paths: ["rust/**", ".github/workflows/rust.yml"]
   pull_request:
     paths: ["rust/**", ".github/workflows/rust.yml"]
@@ -69,6 +69,12 @@ jobs:
 
       - name: Tests (real tiny-model inference)
         run: cargo test --workspace
+
+      - name: Encrypted LAN inference (real model and speech)
+        run: cargo test -p hushkey-net real_model_encrypted_roundtrip -- --ignored
+
+      - name: Remote push-to-talk release during preview (real model)
+        run: cargo test -p hushkey-app remote_record_session_finalizes -- --ignored
 
       - name: hushkey.app bundle (macOS)
         if: runner.os == 'macOS'

@@ -29,6 +29,15 @@ pub enum Action {
     Update,
     /// Remove what the Python hushkey left behind.
     RemoveOld,
+    NetworkDiscover,
+    NetworkConnect(hushkey_net::Peer),
+    NetworkLocal,
+    NetworkServer,
+    NetworkRevoke,
+    NetworkRetry,
+    NetworkDiscard,
+    #[cfg(windows)]
+    NetworkFirewall,
     Quit,
 }
 
@@ -48,6 +57,14 @@ pub struct Tray {
     inserts: Vec<(CheckMenuItem, Insert)>,
     history: Submenu,
     history_items: Vec<MenuItem>,
+    network: Submenu,
+    network_items: Vec<MenuItem>,
+    network_identity: MenuItem,
+    network_search: MenuItem,
+    local: CheckMenuItem,
+    server: CheckMenuItem,
+    retry: MenuItem,
+    discard: MenuItem,
     actions: HashMap<MenuId, Action>,
     badge: Option<Badge>,
 }
@@ -59,6 +76,14 @@ fn image(badge: Badge) -> Icon {
 /// Menu text shows `&` only when doubled; a single one marks a shortcut.
 fn menu_text(text: &str) -> String {
     text.replace('&', "&&")
+}
+
+fn network_label(s: &Strings, en: &'static str, de: &'static str) -> &'static str {
+    if std::ptr::eq(s, &strings::DE) {
+        de
+    } else {
+        en
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -111,6 +136,89 @@ impl Tray {
         ];
         let listen = check(s.listen, Action::Listen);
         let autostart_item = check(s.autostart(), Action::Autostart);
+        // All uses of `check` finish before borrowing `actions` directly.
+        let label = |en, de| network_label(s, en, de);
+        let network = Submenu::new(label("Network", "Netzwerk"), true);
+        let network_identity =
+            MenuItem::new(label("This computer: …", "Dieser Rechner: …"), false, None);
+        let network_search = MenuItem::new(
+            label("Find network computers", "Netzwerkrechner suchen"),
+            true,
+            None,
+        );
+        let local = CheckMenuItem::new(
+            label("Compute locally", "Lokal berechnen"),
+            true,
+            config.remote.is_none(),
+            None,
+        );
+        let server = CheckMenuItem::new(
+            label(
+                "Offer LAN computation (approval required)",
+                "Berechnung im LAN anbieten (Genehmigung erforderlich)",
+            ),
+            true,
+            config.server_enabled,
+            None,
+        );
+        let revoke = MenuItem::new(
+            label("Revoke device approvals", "Gerätefreigaben widerrufen"),
+            true,
+            None,
+        );
+        let retry = MenuItem::new(
+            label(
+                "Retry failed dictation",
+                "Fehlgeschlagenes Diktat erneut versuchen",
+            ),
+            false,
+            None,
+        );
+        let discard = MenuItem::new(
+            label(
+                "Discard failed dictation",
+                "Fehlgeschlagenes Diktat verwerfen",
+            ),
+            false,
+            None,
+        );
+        for (id, action) in [
+            (network_search.id(), Action::NetworkDiscover),
+            (local.id(), Action::NetworkLocal),
+            (server.id(), Action::NetworkServer),
+            (revoke.id(), Action::NetworkRevoke),
+            (retry.id(), Action::NetworkRetry),
+            (discard.id(), Action::NetworkDiscard),
+        ] {
+            actions.insert(id.clone(), action);
+        }
+        network
+            .append_items(&[
+                &network_identity,
+                &network_search,
+                &local,
+                &server,
+                &revoke,
+                &retry,
+                &discard,
+            ])
+            .map_err(err)?;
+        #[cfg(windows)]
+        {
+            let firewall = MenuItem::new(
+                label(
+                    "Allow network access (private network)",
+                    "Netzwerkzugriff erlauben (privates Netz)",
+                ),
+                true,
+                None,
+            );
+            network.append(&firewall).map_err(err)?;
+            actions.insert(firewall.id().clone(), Action::NetworkFirewall);
+        }
+        network
+            .append(&PredefinedMenuItem::separator())
+            .map_err(err)?;
         let open_logs = MenuItem::new(s.open_logs, true, None);
         let update = MenuItem::new(s.update_check, true, None);
         actions.insert(update.id().clone(), Action::Update);
@@ -141,6 +249,7 @@ impl Tray {
             &status,
             &PredefinedMenuItem::separator(),
             &model_menu,
+            &network,
             &key_menu,
             &lang_menu,
             &insert_menu,
@@ -178,15 +287,85 @@ impl Tray {
             inserts,
             history,
             history_items: Vec::new(),
+            network,
+            network_items: Vec::new(),
+            network_identity,
+            network_search,
+            local,
+            server,
+            retry,
+            discard,
             actions,
             badge: Some(Badge::Loading),
         };
         tray.sync(config, autostart);
+        tray.set_network_peers(&[]);
         Ok(tray)
     }
 
     pub fn action(&self, id: &MenuId) -> Option<Action> {
         self.actions.get(id).cloned()
+    }
+
+    /// Replace discovery results, retaining each complete peer in its action.
+    pub fn set_network_peers(&mut self, peers: &[hushkey_net::Peer]) {
+        for item in self.network_items.drain(..) {
+            item.set_enabled(false);
+            self.actions.remove(item.id());
+            if let Err(e) = self.network.remove(&item) {
+                crate::log::line(&format!("network menu entry not removed: {e}"));
+            }
+        }
+        if peers.is_empty() {
+            let item = MenuItem::new(
+                network_label(self.s, "No computers found", "Keine Rechner gefunden"),
+                false,
+                None,
+            );
+            if let Err(e) = self.network.append(&item) {
+                crate::log::line(&format!("network menu entry not added: {e}"));
+            } else {
+                self.network_items.push(item);
+            }
+            return;
+        }
+        for peer in peers {
+            let short_id: String = peer.id.chars().take(12).collect();
+            let text = menu_text(&format!("{} [{short_id}] — {}", peer.name, peer.address));
+            let item = MenuItem::new(text, true, None);
+            if let Err(e) = self.network.append(&item) {
+                crate::log::line(&format!("network menu entry not added: {e}"));
+                continue;
+            }
+            self.actions
+                .insert(item.id().clone(), Action::NetworkConnect(peer.clone()));
+            self.network_items.push(item);
+        }
+    }
+
+    pub fn network_searching(&mut self, searching: bool) {
+        self.network_search.set_enabled(!searching);
+        self.network_search.set_text(if searching {
+            network_label(
+                self.s,
+                "Searching for network computers…",
+                "Netzwerkrechner werden gesucht…",
+            )
+        } else {
+            network_label(self.s, "Find network computers", "Netzwerkrechner suchen")
+        });
+    }
+
+    pub fn network_identity(&mut self, name: &str, id: &str) {
+        let label = network_label(self.s, "This computer", "Dieser Rechner");
+        let short_id: String = id.chars().take(12).collect();
+        self.network_identity
+            .set_text(menu_text(&format!("{label}: {name} [{short_id}]")));
+    }
+
+    pub fn recovery_available(&mut self, available: bool) {
+        self.retry.set_enabled(available);
+        self.discard.set_enabled(available);
     }
 
     /// The Python hushkey's leftovers are gone: so is their entry.
@@ -228,6 +407,7 @@ impl Tray {
     pub fn sync(&mut self, config: &Config, autostart: bool) {
         for (item, name) in &self.models {
             item.set_checked(*name == config.model);
+            item.set_enabled(config.remote.is_none());
         }
         // By key code: the file may spell it "F9" or "Caps Lock".
         let key = config::virtual_key(&config.key);
@@ -242,6 +422,8 @@ impl Tray {
         }
         self.listen.set_checked(config.mode == Mode::Listen);
         self.autostart.set_checked(autostart);
+        self.server.set_checked(config.server_enabled);
+        self.local.set_checked(config.remote.is_none());
     }
 
     /// The badge and the status line (also the tooltip).
