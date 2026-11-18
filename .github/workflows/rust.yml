@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Keep native macOS tests on available Intel hosts: hosted ARM test
+        # jobs can expire unassigned. Release builds still cover both Mac CPUs.
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     env:
       HUSHKEY_TEST_MODEL: ${{ github.workspace }}/testdata/ggml-tiny.bin

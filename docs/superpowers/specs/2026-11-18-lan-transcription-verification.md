@@ -88,6 +88,9 @@ feature verification; they were not counted as product test failures.
 - CI exposed a restored CMake cache pointing to an MSVC version absent on the
   new Windows runner. The workflow now selects MSVC before restoring and hashes
   its version/location into the native cache identity.
+- GitHub expired the macos-latest job without assigning a hosted ARM runner.
+  The identical native macOS test suite now uses macos-15-intel, preserving
+  all tests; separate release builds still compile both Mac architectures.
 
 ## Release gate
 
