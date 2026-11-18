@@ -28,6 +28,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>hushkey listens while you hold its key and turns your speech into text, on this Mac.</string>
+    <string>hushkey captures your voice for dictation. Recognition runs on this Mac or on a LAN computer you explicitly approve.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>hushkey finds nearby Hush-Key computers and exchanges encrypted speech and transcripts with devices you approve.</string>
 </dict>
 </plist>

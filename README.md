@@ -146,8 +146,10 @@ network. On Windows, **Network → Allow network access (private network)**
 asks for administrator permission and creates executable-scoped inbound rules
 for the Private profile and local subnet only. If Windows already allowed
 the app through its firewall prompt, this extra action is unnecessary. On
-Linux/macOS, allow those ports in your firewall. Guest Wi-Fi client isolation,
-VPNs and separate broadcast domains may prevent discovery. No port forwarding
+Linux/macOS, allow those ports in your firewall. On macOS, also allow Local
+Network access when asked (System Settings → Privacy & Security → Local
+Network). Guest Wi-Fi client isolation, VPNs and separate broadcast domains
+may prevent discovery. No port forwarding
 is needed. Discovery reveals the computer name and stable device ID to the
 local network; switch off offering computation to stop advertising.
 

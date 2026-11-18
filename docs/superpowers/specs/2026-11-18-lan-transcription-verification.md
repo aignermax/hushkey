@@ -91,6 +91,10 @@ feature verification; they were not counted as product test failures.
 - GitHub expired the macos-latest job without assigning a hosted ARM runner.
   The identical native macOS test suite now uses macos-15-intel, preserving
   all tests; separate release builds still compile both Mac architectures.
+- Packaging review corrected the macOS microphone privacy description for
+  approved remote recognition and added NSLocalNetworkUsageDescription, as
+  required by Apple's local-network privacy guidance. The plist is parsed
+  locally and the actual signed bundles are linted in macOS CI.
 
 ## Release gate
 
