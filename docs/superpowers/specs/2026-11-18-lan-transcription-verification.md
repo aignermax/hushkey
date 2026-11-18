@@ -85,6 +85,9 @@ feature verification; they were not counted as product test failures.
   inference is still running and successfully obtains exactly one final event.
 - The native Windows dialog expiry check returned immediately and closed its
   own dialog automatically (passed in approximately 0.18 seconds).
+- CI exposed a restored CMake cache pointing to an MSVC version absent on the
+  new Windows runner. The workflow now selects MSVC before restoring and hashes
+  its version/location into the native cache identity.
 
 ## Release gate
 
