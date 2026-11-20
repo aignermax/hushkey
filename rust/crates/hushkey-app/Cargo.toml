@@ -44,6 +44,7 @@ tray-icon = "0.26"
 eframe = { version = "0.31.1", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
 # tray-icon's menu needs GTK on the main thread; the overlay is a GTK window
 # too. Same version as tray-icon's.
 gtk = "0.18"

@@ -4,7 +4,13 @@ use hushkey_net::{ApprovalActive, Peer, Server};
 const HEARTBEAT: Duration = Duration::from_secs(4);
 const REDISCOVER: Duration = Duration::from_secs(20);
 
+pub(super) struct Outgoing {
+    pub pairing: Pairing,
+    pub window_session: u64,
+}
+
 pub(super) struct Incoming {
+    pub window_session: u64,
     pub pairing: Pairing,
     pub active: ApprovalActive,
     pub reply: mpsc::SyncSender<bool>,
@@ -96,7 +102,14 @@ impl Connections {
 }
 
 impl App {
-    pub(super) fn receive_pairing(&mut self, mut incoming: Incoming) {
+    pub(super) fn receive_pairing(
+        &mut self,
+        id: u64,
+        request: hushkey_net::Approval,
+        active: ApprovalActive,
+        reply: mpsc::SyncSender<bool>,
+        expires: Instant,
+    ) {
         // The worker may have ended or a different host session may have started
         // while the event was waiting in the tray thread's queue.
         if self
@@ -109,17 +122,31 @@ impl App {
         }
         if !self.config.server_enabled
             || self.revoke_dialog.is_some()
-            || !incoming.live()
+            || !active.is_active()
+            || Instant::now() >= expires
             || self.connections.incoming.is_some()
         {
-            let _ = incoming.reply.send(false);
+            let _ = reply.send(false);
             return;
         }
-        if !self.pairing_can_focus() {
-            incoming.focus = PairingFocus::Finished;
-        }
-        self.connections.incoming = Some(incoming);
-        self.settings.show_incoming();
+        let focus = if self.pairing_can_focus() {
+            PairingFocus::AwaitingWindow
+        } else {
+            PairingFocus::Finished
+        };
+        let window_session = self.settings.show_incoming();
+        self.connections.incoming = Some(Incoming {
+            pairing: Pairing {
+                id,
+                peer: request.peer,
+                code: request.code,
+            },
+            window_session,
+            active,
+            reply,
+            expires,
+            focus,
+        });
     }
 
     pub(super) fn decide_pairing(&mut self, id: u64, allow: bool) {
@@ -143,7 +170,7 @@ impl App {
         if self
             .connecting
             .as_ref()
-            .is_none_or(|target| target.id != id)
+            .is_none_or(|target| target.pairing.id != id)
         {
             return;
         }
@@ -157,10 +184,28 @@ impl App {
         self.idle();
     }
 
+    pub(super) fn close_session_pairings(&mut self, session: u64) {
+        if self
+            .connections
+            .incoming
+            .as_ref()
+            .is_some_and(|p| p.window_session == session)
+        {
+            self.deny_incoming();
+        }
+        if let Some(target) = self
+            .connecting
+            .as_ref()
+            .filter(|p| p.window_session == session)
+        {
+            self.cancel_pairing(target.pairing.id);
+        }
+    }
+
     pub(super) fn dismiss_pairings(&mut self) {
         self.deny_incoming();
         if let Some(target) = &self.connecting {
-            self.cancel_pairing(target.id);
+            self.cancel_pairing(target.pairing.id);
         }
     }
 
@@ -182,9 +227,9 @@ impl App {
         let idle = self.pairing_can_focus();
         if let Some(pending) = &mut self.connections.incoming {
             if pending.live() {
-                pending
-                    .focus
-                    .poll(idle, || self.settings.window.focus_incoming_now());
+                pending.focus.poll(idle, || {
+                    self.settings.window.focus_incoming_now(pending.pairing.id)
+                });
             } else {
                 self.deny_incoming();
             }
@@ -403,6 +448,7 @@ mod tests {
                 let (reply, answer) = mpsc::sync_channel(1);
                 events
                     .send(Incoming {
+                        window_session: 1,
                         pairing: Pairing {
                             id: 7,
                             peer: request.peer,

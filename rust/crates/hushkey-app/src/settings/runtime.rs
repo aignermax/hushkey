@@ -15,14 +15,19 @@ use std::{
 #[derive(Serialize, Deserialize)]
 enum Request {
     State(Box<Snapshot>),
-    Show { id: u64, activate: bool },
+    Show {
+        id: u64,
+        activate: bool,
+    },
+    #[cfg(target_os = "macos")]
+    RestoreActive(u64),
 }
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
+    Closing,
     Action(Intent),
     Focused(u64),
-    #[cfg(windows)]
     Ready(isize),
     Failed(String),
 }
@@ -50,6 +55,8 @@ fn read_frames<T: DeserializeOwned>(
 struct Pending {
     state: Option<Box<Snapshot>>,
     show: Option<(u64, bool)>,
+    #[cfg(target_os = "macos")]
+    restore_active: Option<u64>,
 }
 
 struct Session {
@@ -60,8 +67,9 @@ struct Session {
     focus_requested: u64,
     focus_confirmed: u64,
     reopen_active: bool,
-    #[cfg(windows)]
-    hwnd: isize,
+    native: Option<isize>,
+    #[cfg(target_os = "linux")]
+    x11: Option<Arc<OnceLock<Option<super::x11::Activation>>>>,
     last: Option<Snapshot>,
 }
 
@@ -93,6 +101,12 @@ impl Session {
                         break;
                     }
                 }
+                #[cfg(target_os = "macos")]
+                if let Some(id) = pending.restore_active {
+                    if write_frame(&mut writer, &Request::RestoreActive(id)).is_err() {
+                        break;
+                    }
+                }
             }
         });
         thread::spawn(move || {
@@ -110,8 +124,9 @@ impl Session {
             focus_requested: 0,
             focus_confirmed: 0,
             reopen_active: false,
-            #[cfg(windows)]
-            hwnd: 0,
+            native: None,
+            #[cfg(target_os = "linux")]
+            x11: None,
             last: None,
         })
     }
@@ -149,7 +164,8 @@ impl Session {
 
 pub(crate) struct SettingsWindow {
     session: Option<Session>,
-    actions: Vec<Intent>,
+    session_id: u64,
+    actions: Vec<(u64, Intent)>,
     error: Option<String>,
     closed: bool,
 }
@@ -158,6 +174,7 @@ impl SettingsWindow {
     pub(crate) fn new() -> Self {
         Self {
             session: None,
+            session_id: 0,
             actions: Vec::new(),
             error: None,
             closed: false,
@@ -165,6 +182,8 @@ impl SettingsWindow {
     }
 
     fn start(&mut self, activate: bool) {
+        self.session_id += 1;
+        self.closed = false;
         match Session::start() {
             Ok(mut session) => {
                 session.show(activate, false);
@@ -172,17 +191,15 @@ impl SettingsWindow {
             }
             Err(error) => {
                 self.error = Some(error.to_string());
-                self.closed = true;
+                self.record_close();
             }
         }
     }
 
     fn record_close(&mut self) {
-        self.closed = true;
-        // A new window can open before the tray drains its actions. In that
-        // case, dismiss only requests that belonged to the closing session.
-        if let Some(state) = self.session.as_ref().and_then(|s| s.last.as_ref()) {
-            self.actions.extend(close_pairings(state));
+        if !self.closed {
+            self.closed = true;
+            self.actions.push((self.session_id, Intent::WindowClosed));
         }
     }
 
@@ -192,10 +209,21 @@ impl SettingsWindow {
         };
         loop {
             match session.replies.try_recv() {
-                Ok(Reply::Action(action)) => self.actions.push(action),
+                Ok(Reply::Action(action)) => self.actions.push((self.session_id, action)),
+                Ok(Reply::Closing) => {
+                    // The same pipe orders this after the last click. Do not wait
+                    // for the window process or a new snapshot to observe closure.
+                    self.record_close();
+                    return;
+                }
                 Ok(Reply::Focused(id)) => session.focus_confirmed = id,
-                #[cfg(windows)]
-                Ok(Reply::Ready(hwnd)) => session.hwnd = hwnd,
+                Ok(Reply::Ready(native)) => {
+                    session.native = Some(native);
+                    #[cfg(target_os = "linux")]
+                    if native != 0 {
+                        session.x11 = Some(super::x11::Activation::prepare(native as u32));
+                    }
+                }
                 Ok(Reply::Failed(error)) => {
                     self.error = Some(error);
                     self.record_close();
@@ -210,12 +238,11 @@ impl SettingsWindow {
         // Only reopen if that process never handled the click.
         let reopen = session.focus_requested != session.focus_confirmed;
         let activate = session.reopen_active;
-        match session.child.try_wait() {
+        let status = session.child.try_wait();
+        self.record_close();
+        match status {
             Ok(None) => return, // stdout closed just before process exit
             Ok(Some(status)) => {
-                if !status.success() || !reopen {
-                    self.record_close();
-                }
                 self.session = None;
                 if !status.success() {
                     self.error = Some(format!("window process exited with {status}"));
@@ -223,7 +250,6 @@ impl SettingsWindow {
                 }
             }
             Err(error) => {
-                self.record_close();
                 self.stop();
                 self.error = Some(error.to_string());
                 return;
@@ -246,37 +272,47 @@ impl SettingsWindow {
         }
     }
 
-    pub(crate) fn show(&mut self) {
-        self.present(true);
+    pub(crate) fn show(&mut self) -> u64 {
+        self.present(true)
     }
 
-    pub(crate) fn show_incoming(&mut self) {
-        self.present(false);
+    pub(crate) fn show_incoming(&mut self) -> u64 {
+        self.present(false)
     }
 
-    fn present(&mut self, activate: bool) {
+    fn present(&mut self, activate: bool) -> u64 {
         self.poll();
+        if self.closed && self.session.is_some() {
+            self.stop();
+        }
         if let Some(session) = &mut self.session {
             session.show(activate, true);
         } else {
             self.start(activate);
         }
+        self.session_id
     }
 
     /// Called by the tray while dictation is idle. Never queue a later
     /// activation in the renderer, which could steal a new insertion target.
-    pub(crate) fn focus_incoming_now(&mut self) -> bool {
+    pub(crate) fn focus_incoming_now(&mut self, _request: u64) -> bool {
+        self.poll();
+        if self.closed {
+            return true;
+        }
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let Some(_native) = session.native else {
+            return false;
+        };
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
                 ShowWindow, SW_SHOWNOACTIVATE,
             };
-            self.poll();
-            let Some(session) = &self.session else {
-                return false;
-            };
-            let hwnd = session.hwnd as windows_sys::Win32::Foundation::HWND;
+            let hwnd = _native as windows_sys::Win32::Foundation::HWND;
             let mut pid = 0;
             unsafe {
                 if hwnd.is_null()
@@ -292,7 +328,37 @@ impl SettingsWindow {
                 SetForegroundWindow(hwnd);
             }
         }
-        // If activation is restricted, the card already requests attention.
+        #[cfg(target_os = "linux")]
+        if let Some(prepared) = &session.x11 {
+            let Some(target) = prepared.get() else {
+                return false;
+            };
+            if let Some(target) = target {
+                target.request();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(
+                session.child.id() as _,
+            ) else {
+                return false;
+            };
+            if !app.isFinishedLaunching() {
+                return false;
+            }
+            if app.isHidden() {
+                app.unhide();
+            }
+            if app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows) {
+                session.pending.lock().unwrap().restore_active = Some(_request);
+                let _ = session.wake.try_send(());
+            }
+        }
+        // This marks the attempt as consumed. Window managers (and Wayland
+        // compositors via the card's xdg-activation attention request) decide
+        // whether the settings window actually receives foreground focus.
         true
     }
 
@@ -307,12 +373,8 @@ impl SettingsWindow {
         }
     }
 
-    pub(crate) fn actions(&mut self) -> Vec<Intent> {
+    pub(crate) fn actions(&mut self) -> Vec<(u64, Intent)> {
         self.poll();
-        if std::mem::take(&mut self.closed) && self.session.is_none() {
-            // This also covers closing the window before its first snapshot.
-            self.actions.push(Intent::WindowClosed);
-        }
         std::mem::take(&mut self.actions)
     }
 
@@ -332,40 +394,23 @@ struct Window {
     state: Option<Box<Snapshot>>,
     requests: mpsc::Receiver<Request>,
     replies: mpsc::Sender<Reply>,
-}
-
-fn close_pairings(state: &Snapshot) -> impl Iterator<Item = Intent> {
-    let host = state
-        .host
-        .pending
-        .as_ref()
-        .map(|pair| Intent::DecidePairing {
-            id: pair.id,
-            allow: false,
-        });
-    let client = state
-        .client
-        .pairing
-        .as_ref()
-        .map(|pair| Intent::CancelPairing(pair.id));
-    host.into_iter().chain(client)
+    #[cfg(target_os = "macos")]
+    restore_active: Option<(u64, std::time::Instant)>,
 }
 
 impl eframe::App for Window {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if ctx.input(|input| input.viewport().close_requested()) {
-            // Dismiss the requests actually presented here before graphics
-            // teardown. A new Show racing this frame belongs to a new window.
-            if let Some(state) = &self.state {
-                for action in close_pairings(state) {
-                    let _ = self.replies.send(Reply::Action(action));
-                }
-            }
+            let _ = self.replies.send(Reply::Closing);
             return;
         }
         for request in self.requests.try_iter() {
             match request {
                 Request::State(snapshot) => self.state = Some(snapshot),
+                #[cfg(target_os = "macos")]
+                Request::RestoreActive(id) => {
+                    self.restore_active = Some((id, std::time::Instant::now()))
+                }
                 Request::Show { id, activate } => {
                     if activate {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -378,6 +423,28 @@ impl eframe::App for Window {
         if let Some(state) = self.state.as_deref() {
             for action in self.view.render(ctx, state) {
                 let _ = self.replies.send(Reply::Action(action));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some((id, started)) = self.restore_active {
+            // AppKit may deliver the activation after its reply to the tray.
+            // Restore only our window while we actually own foreground focus.
+            // This command never activates the app or another process.
+            let pending = self.state.as_ref().and_then(|s| s.host.pending.as_ref());
+            let active = objc2_app_kit::NSRunningApplication::currentApplication().isActive();
+            if active && pending.is_some_and(|p| p.id == id) {
+                let mtm = objc2::MainThreadMarker::new().expect("AppKit main thread");
+                let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                for window in app.windows().iter() {
+                    if window.isMiniaturized() && window.title().to_string() == "hushkey" {
+                        window.deminiaturize(None);
+                    }
+                }
+                self.restore_active = None;
+            } else if started.elapsed() < std::time::Duration::from_secs(1) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            } else {
+                self.restore_active = None;
             }
         }
     }
@@ -510,11 +577,27 @@ pub(crate) fn run_window() -> Result<(), String> {
                     }
                 }
             }
+            #[cfg(target_os = "linux")]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = cc.window_handle() {
+                    let xid = match handle.as_raw() {
+                        RawWindowHandle::Xlib(native) => native.window as isize,
+                        RawWindowHandle::Xcb(native) => native.window.get() as isize,
+                        _ => 0, // Wayland delegates activation to the compositor.
+                    };
+                    let _ = to_tray.send(Reply::Ready(xid));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let _ = to_tray.send(Reply::Ready(0));
             Ok(Box::new(Window {
                 view: View::default(),
                 state: None,
                 requests,
                 replies: to_tray,
+                #[cfg(target_os = "macos")]
+                restore_active: None,
             }))
         }),
     );
@@ -534,49 +617,86 @@ mod tests {
     use super::*;
     use crate::settings::tests::{pairing, snapshot};
 
-    #[test]
-    fn closing_frame_dismisses_only_its_presented_requests_before_teardown() {
-        use eframe::App as _;
-        let (send, requests) = mpsc::channel();
-        let (replies, actions) = mpsc::channel();
-        let mut state = snapshot();
-        state.host.pending = Some(pairing(21));
-        state.client.pairing = Some(pairing(22));
-        let mut window = Window {
-            view: View::default(),
-            state: Some(Box::new(state.clone())),
-            requests,
+    fn test_session(replies: mpsc::Receiver<Reply>) -> Session {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--invalid-test-harness-option")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(!child.wait().unwrap().success());
+        Session {
+            child,
+            wake: mpsc::sync_channel(1).0,
+            pending: Arc::default(),
             replies,
-        };
-        state.host.pending = Some(pairing(23));
-        send.send(Request::State(Box::new(state))).unwrap();
-        send.send(Request::Show {
-            id: 2,
-            activate: true,
-        })
-        .unwrap();
-        let mut input = egui::RawInput::default();
-        input
-            .viewports
-            .get_mut(&egui::ViewportId::ROOT)
-            .unwrap()
-            .events
-            .push(egui::ViewportEvent::Close);
-        let _ = egui::Context::default().run(input, |ctx| {
-            window.update(ctx, &mut eframe::Frame::_new_kittest())
-        });
-        assert!(matches!(
-            actions.try_recv(),
-            Ok(Reply::Action(Intent::DecidePairing {
-                id: 21,
-                allow: false
-            }))
-        ));
-        assert!(matches!(
-            actions.try_recv(),
-            Ok(Reply::Action(Intent::CancelPairing(22)))
-        ));
-        assert!(actions.try_recv().is_err());
+            focus_requested: 1,
+            focus_confirmed: 0,
+            reopen_active: true,
+            native: None,
+            #[cfg(target_os = "linux")]
+            x11: None,
+            last: None,
+        }
+    }
+
+    #[test]
+    fn close_after_connect_dismisses_its_session_before_any_pairing_snapshot_or_pipe_eof() {
+        use eframe::App as _;
+        for state in [Some(Box::new(snapshot())), None] {
+            let (send, requests) = mpsc::channel();
+            let (replies, actions) = mpsc::channel();
+            let peer = pairing(21).peer;
+
+            // On an open settings window the preceding frame submitted Connect.
+            // A tray Connect can start the child before it receives any snapshot.
+            let from_settings = state.is_some();
+            if from_settings {
+                replies
+                    .send(Reply::Action(Intent::Connect(peer.clone())))
+                    .unwrap();
+            }
+            let mut window = Window {
+                view: View::default(),
+                state,
+                requests,
+                replies,
+                #[cfg(target_os = "macos")]
+                restore_active: None,
+            };
+            let mut updated = snapshot();
+            updated.client.pairing = Some(pairing(22));
+            send.send(Request::State(Box::new(updated))).unwrap();
+            send.send(Request::Show {
+                id: 2,
+                activate: true,
+            })
+            .unwrap();
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .events
+                .push(egui::ViewportEvent::Close);
+            let _ = egui::Context::default().run(input, |ctx| {
+                window.update(ctx, &mut eframe::Frame::_new_kittest())
+            });
+
+            let mut tray = SettingsWindow::new();
+            tray.session_id = 7;
+            tray.session = Some(test_session(actions));
+            // The graphics process still owns its reply pipe; waiting for EOF
+            // would let a fast host confirmation commit the abandoned pin.
+            let received = tray.actions();
+            let mut expected = Vec::new();
+            if from_settings {
+                expected.push((7, Intent::Connect(peer)));
+            }
+            expected.push((7, Intent::WindowClosed));
+            assert_eq!(received, expected);
+            assert!(tray.actions().is_empty());
+        }
     }
 
     #[test]
@@ -589,6 +709,8 @@ mod tests {
             state: None,
             requests,
             replies,
+            #[cfg(target_os = "macos")]
+            restore_active: None,
         };
         let ctx = egui::Context::default();
         for activate in [false, true] {
@@ -607,26 +729,8 @@ mod tests {
 
     #[test]
     fn failed_window_with_a_pending_focus_is_reported_without_relaunch() {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .arg("--invalid-test-harness-option")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        assert!(!child.wait().unwrap().success());
         let mut window = SettingsWindow::new();
-        window.session = Some(Session {
-            child,
-            wake: mpsc::sync_channel(1).0,
-            pending: Arc::default(),
-            replies: mpsc::channel().1,
-            focus_requested: 1,
-            focus_confirmed: 0,
-            reopen_active: true,
-            #[cfg(windows)]
-            hwnd: 0,
-            last: None,
-        });
+        window.session = Some(test_session(mpsc::channel().1));
         assert!(!window.visible());
         assert!(window.take_error().unwrap().contains("process exited"));
     }

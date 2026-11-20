@@ -12,9 +12,9 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    pub fn show_incoming(&mut self) {
-        self.window.show_incoming();
+    pub fn show_incoming(&mut self) -> u64 {
         self.next_refresh = Instant::now();
+        self.window.show_incoming()
     }
 
     pub fn new() -> Self {
@@ -61,11 +61,7 @@ impl App {
             crate::log::line(&format!("{label}: {error}"));
             self.failure_notice(&format!("{label}: {error}"));
         }
-        for intent in self.settings.window.actions() {
-            self.settings.feedback = None;
-            self.apply_setting(intent);
-            self.settings.next_refresh = Instant::now();
-        }
+        self.drain_settings_actions();
         let now = Instant::now();
         if now >= self.settings.next_refresh && self.settings.window.visible() {
             self.settings.next_refresh = now + Duration::from_millis(300);
@@ -74,14 +70,22 @@ impl App {
         }
     }
 
-    fn apply_setting(&mut self, intent: Intent) {
+    pub(super) fn drain_settings_actions(&mut self) {
+        for (session, intent) in self.settings.window.actions() {
+            self.settings.feedback = None;
+            self.apply_setting(session, intent);
+            self.settings.next_refresh = Instant::now();
+        }
+    }
+
+    fn apply_setting(&mut self, session: u64, intent: Intent) {
         let action = match intent {
             Intent::Discover => return self.find_servers(true),
             Intent::Probe => return self.begin_check(),
             Intent::DecidePairing { id, allow } => return self.decide_pairing(id, allow),
             Intent::CancelPairing(id) => return self.cancel_pairing(id),
-            Intent::WindowClosed => return self.dismiss_pairings(),
-            Intent::Connect(peer) => return self.connect_remote(peer),
+            Intent::WindowClosed => return self.close_session_pairings(session),
+            Intent::Connect(peer) => return self.connect_remote(peer, session),
             Intent::Local => Action::NetworkLocal,
             Intent::Server(on) if on != self.config.server_enabled => Action::NetworkServer,
             Intent::Revoke => Action::NetworkRevoke,
@@ -202,7 +206,10 @@ impl App {
                 error: self.connections.host_error.clone(),
             },
             client: Client {
-                pairing: self.connecting.clone(),
+                pairing: self
+                    .connecting
+                    .as_ref()
+                    .map(|pending| pending.pairing.clone()),
                 pairing_error: self
                     .connections
                     .pairing_error

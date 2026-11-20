@@ -2,6 +2,8 @@
 //! network workers. Its window sees only displayable state and requests changes.
 mod runtime;
 mod view;
+#[cfg(target_os = "linux")]
+mod x11;
 pub(crate) use runtime::run_window;
 pub(crate) use runtime::SettingsWindow;
 

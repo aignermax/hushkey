@@ -40,7 +40,7 @@ mod model_selection;
 mod settings;
 mod updates;
 use crate::network::Link;
-use connections::Connections;
+use connections::{Connections, Outgoing};
 use settings::Settings;
 
 /// A press shorter than this is a tap: no dictation, and Caps Lock keeps
@@ -289,7 +289,7 @@ struct App {
     connections: Connections,
     settings: Settings,
     backend: Option<Arc<Recoverable>>,
-    connecting: Option<Pairing>,
+    connecting: Option<Outgoing>,
     discovering: bool,
     connect_generation: u64,
     revoke_dialog: Option<network_dialog::Pending>,
@@ -353,7 +353,7 @@ impl App {
         }
     }
 
-    fn connect_remote(&mut self, peer: hushkey_net::Peer) {
+    fn connect_remote(&mut self, peer: hushkey_net::Peer, window_session: u64) {
         if !self
             .connections
             .can_select(&peer, self.config.remote.as_ref())
@@ -389,10 +389,13 @@ impl App {
         self.config.mode = Mode::PushToTalk;
         self.save(|c| c.mode = Mode::PushToTalk);
         self.connect_generation += 1;
-        self.connecting = Some(Pairing {
-            id: self.connect_generation,
-            peer: peer.clone(),
-            code: String::new(),
+        self.connecting = Some(Outgoing {
+            window_session,
+            pairing: Pairing {
+                id: self.connect_generation,
+                peer: peer.clone(),
+                code: String::new(),
+            },
         });
         self.connections.checking = false;
         self.connections.pairing_error = None;
@@ -430,28 +433,23 @@ impl App {
                 expires,
                 ..
             } => {
-                self.receive_pairing(connections::Incoming {
-                    pairing: Pairing {
-                        id,
-                        peer: request.peer,
-                        code: request.code,
-                    },
-                    active,
-                    reply,
-                    expires,
-                    focus: connections::PairingFocus::AwaitingWindow,
-                });
+                self.receive_pairing(id, request, active, reply, expires);
             }
             network::Event::ApprovalEnded { id } => self.decide_pairing(id, false),
             network::Event::PairingCode {
                 generation,
                 request,
             } => {
-                if let Some(target) = self.connecting.as_mut().filter(|target| {
-                    target.id == generation
-                        && target.peer.id == request.peer.id
-                        && target.peer.address == request.peer.address
-                }) {
+                if let Some(target) = self
+                    .connecting
+                    .as_mut()
+                    .map(|pending| &mut pending.pairing)
+                    .filter(|target| {
+                        target.id == generation
+                            && target.peer.id == request.peer.id
+                            && target.peer.address == request.peer.address
+                    })
+                {
                     target.code = request.code;
                 }
             }
@@ -494,9 +492,14 @@ impl App {
                 }
             }
             network::Event::Connected { generation, result } => {
-                let Some(target) = self.connecting.take_if(|target| target.id == generation) else {
+                self.drain_settings_actions();
+                let Some(outgoing) = self
+                    .connecting
+                    .take_if(|pending| pending.pairing.id == generation)
+                else {
                     return;
                 };
+                let target = outgoing.pairing;
                 let result = result.and_then(|(peer, pending)| {
                     if peer != target.peer {
                         return Err("Connection target changed".into());
@@ -1184,8 +1187,8 @@ impl App {
             Action::NetworkWindow => self.open_settings(),
             Action::NetworkDiscover => self.find_servers(false),
             Action::NetworkConnect(peer) => {
-                self.settings.window.show();
-                self.connect_remote(peer);
+                let session = self.settings.window.show();
+                self.connect_remote(peer, session);
             }
             Action::NetworkLocal => {
                 if self.can_switch() {

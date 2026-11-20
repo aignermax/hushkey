@@ -1942,6 +1942,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "png 0.18.1",
  "pollster",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "sha2",
