@@ -276,6 +276,7 @@ impl SettingsWindow {
         self.present(true)
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn show_incoming(&mut self) -> u64 {
         self.present(false)
     }
@@ -356,10 +357,15 @@ impl SettingsWindow {
                 let _ = session.wake.try_send(());
             }
         }
-        // This marks the attempt as consumed. Window managers (and Wayland
-        // compositors via the card's xdg-activation attention request) decide
-        // whether the settings window actually receives foreground focus.
+        // Wayland has no focus-safe automatic activation. The tray already
+        // sent a passive notification, and the user can open settings.
         true
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_session(&mut self) -> Option<u64> {
+        self.poll();
+        (self.session.is_some() && !self.closed).then_some(self.session_id)
     }
 
     pub(crate) fn visible(&mut self) -> bool {
@@ -415,6 +421,12 @@ impl eframe::App for Window {
                     if activate {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        // On Wayland, winit submits xdg-activation through
+                        // this command. Only an explicit tray gesture gets it.
+                        #[cfg(target_os = "linux")]
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
                     }
                     let _ = self.replies.send(Reply::Focused(id));
                 }
@@ -721,10 +733,30 @@ mod tests {
             let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
             assert_eq!(commands.contains(&egui::ViewportCommand::Focus), activate);
             assert_eq!(
+                commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::RequestUserAttention(_))),
+                activate && cfg!(target_os = "linux")
+            );
+            assert_eq!(
                 commands.contains(&egui::ViewportCommand::Minimized(false)),
                 activate
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passive_session_lookup_does_not_create_or_reopen_a_linux_window() {
+        let mut tray = SettingsWindow::new();
+        assert_eq!(tray.open_session(), None);
+        let (send, replies) = mpsc::channel();
+        tray.session = Some(test_session(replies));
+        tray.session_id = 9;
+        assert_eq!(tray.open_session(), Some(9));
+        send.send(Reply::Closing).unwrap();
+        assert_eq!(tray.open_session(), None);
+        assert_eq!(tray.session_id, 9);
     }
 
     #[test]

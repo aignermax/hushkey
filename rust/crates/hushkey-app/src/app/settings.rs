@@ -12,9 +12,18 @@ pub(super) struct Settings {
 }
 
 impl Settings {
-    pub fn show_incoming(&mut self) -> u64 {
+    pub fn incoming_session(&mut self) -> Option<u64> {
         self.next_refresh = Instant::now();
-        self.window.show_incoming()
+        #[cfg(target_os = "linux")]
+        {
+            // Mapping a new X11 or Wayland window can activate it even when
+            // started inactive. Only a user gesture opens a cold host window.
+            self.window.open_session()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(self.window.show_incoming())
+        }
     }
 
     pub fn new() -> Self {
@@ -48,11 +57,19 @@ fn running_build() -> String {
 impl App {
     pub(super) fn open_settings(&mut self) {
         let already_open = self.settings.window.visible();
-        self.settings.window.show();
-        self.settings.next_refresh = Instant::now();
+        self.show_settings_window();
         if !already_open {
             self.find_servers(true);
         }
+    }
+
+    pub(super) fn show_settings_window(&mut self) -> u64 {
+        let session = self.settings.window.show();
+        if let Some(incoming) = &mut self.connections.incoming {
+            incoming.attach_to(session);
+        }
+        self.settings.next_refresh = Instant::now();
+        session
     }
 
     pub(super) fn poll_settings(&mut self) {
@@ -82,7 +99,17 @@ impl App {
         let action = match intent {
             Intent::Discover => return self.find_servers(true),
             Intent::Probe => return self.begin_check(),
-            Intent::DecidePairing { id, allow } => return self.decide_pairing(id, allow),
+            Intent::DecidePairing { id, allow } => {
+                if self
+                    .connections
+                    .incoming
+                    .as_ref()
+                    .is_some_and(|p| p.window_session == Some(session))
+                {
+                    self.decide_pairing(id, allow);
+                }
+                return;
+            }
             Intent::CancelPairing(id) => return self.cancel_pairing(id),
             Intent::WindowClosed => return self.close_session_pairings(session),
             Intent::Connect(peer) => return self.connect_remote(peer, session),
@@ -201,7 +228,7 @@ impl App {
                     .connections
                     .incoming
                     .as_ref()
-                    .filter(|pending| pending.live())
+                    .filter(|pending| pending.window_session.is_some() && pending.live())
                     .map(|pending| pending.pairing.clone()),
                 error: self.connections.host_error.clone(),
             },
@@ -296,5 +323,17 @@ impl App {
         } else {
             w("Bereit zum Diktieren", "Ready to dictate")
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn an_incoming_request_never_maps_a_cold_linux_window() {
+        let mut settings = Settings::new();
+        assert_eq!(settings.incoming_session(), None);
+        assert!(!settings.window.visible());
     }
 }

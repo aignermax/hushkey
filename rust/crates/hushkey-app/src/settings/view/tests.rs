@@ -104,7 +104,9 @@ fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_reque
     window.click(&state, "General");
     state.host.pending = Some(pairing(11));
     assert!(window.frame(&state, vec![]).is_empty());
-    assert!(window.attention);
+    // On Wayland even an "informational" attention request may activate the
+    // window. Rendering a snapshot must never ask Linux to do so.
+    assert_eq!(window.attention, !cfg!(target_os = "linux"));
     window.label("Studio wants to connect");
     window.label("0012 3456");
     window.frame(&state, vec![]);

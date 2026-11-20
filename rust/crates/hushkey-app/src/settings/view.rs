@@ -119,6 +119,7 @@ impl View {
         if reveal_pairing {
             self.page = Page::Connections;
             self.host_tab = incoming;
+            #[cfg(not(target_os = "linux"))]
             if incoming {
                 // Windows may keep another application in the foreground.
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(

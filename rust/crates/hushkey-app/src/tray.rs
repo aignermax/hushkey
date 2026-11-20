@@ -50,6 +50,8 @@ pub struct Tray {
     menu: Menu,
     s: &'static Strings,
     status: MenuItem,
+    #[cfg(target_os = "linux")]
+    settings: MenuItem,
     update: MenuItem,
     /// There while the Python hushkey's leftovers are.
     remove_old: Option<MenuItem>,
@@ -281,6 +283,8 @@ impl Tray {
             menu,
             s,
             status,
+            #[cfg(target_os = "linux")]
+            settings,
             update,
             remove_old,
             listen,
@@ -356,6 +360,20 @@ impl Tray {
                 .insert(item.id().clone(), Action::NetworkConnect(peer.clone()));
             self.network_items.push(item);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn pairing_pending(&mut self, peer: Option<&str>) {
+        let settings = network_label(self.s, "Settings…", "Einstellungen…");
+        let title = match peer {
+            Some(peer) => format!(
+                "{} · {} {peer}",
+                settings,
+                network_label(self.s, "Pairing request from", "Kopplungsanfrage von")
+            ),
+            None => settings.to_owned(),
+        };
+        self.settings.set_text(menu_text(&title));
     }
 
     pub fn network_searching(&mut self, searching: bool) {

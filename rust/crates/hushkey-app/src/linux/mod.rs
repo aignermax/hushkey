@@ -147,6 +147,52 @@ pub fn open_folder(path: &Path) {
     }
 }
 
+/// A notification has no window or action that can take the dictation target.
+/// The tray also exposes the request if the desktop suppresses notifications.
+fn pairing_notification(peer_name: &str, german: bool) -> glib::Variant {
+    let peer = glib::markup_escape_text(peer_name);
+    let (title, body) = if german {
+        ("Freigabeanfrage", format!("{peer} möchte sich verbinden. Öffne die hushkey-Einstellungen über das Tray-Symbol und vergleiche den Code."))
+    } else {
+        ("Pairing request", format!("{peer} wants to connect. Open hushkey settings from the tray icon to compare the code."))
+    };
+    (
+        "hushkey",
+        0u32,
+        "",
+        title,
+        body,
+        Vec::<String>::new(),
+        std::collections::HashMap::<String, glib::Variant>::new(),
+        -1i32,
+    )
+        .to_variant()
+}
+
+pub fn notify_pairing(peer_name: &str, german: bool) {
+    use gtk::gio::{self, BusType, DBusCallFlags};
+    let args = pairing_notification(peer_name, german);
+    let notify = async move {
+        let bus = gio::bus_get_future(BusType::Session).await?;
+        bus.call_future(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            Some(&args),
+            None,
+            DBusCallFlags::NONE,
+            2000,
+        )
+        .await
+    };
+    glib::MainContext::default().spawn_local(async move {
+        if let Err(error) = notify.await {
+            log::line(&format!("pairing notification: {error}"));
+        }
+    });
+}
+
 /// Whether the session is Wayland (GTK itself runs on XWayland there).
 fn wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -170,4 +216,20 @@ fn on_path(program: &str) -> bool {
 pub fn already_running() -> bool {
     let dir = dirs::runtime_dir().unwrap_or_else(config::state_dir);
     crate::unix::already_running(&dir.join("hushkey-rs.lock"))
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn pairing_notification_is_localized_and_contains_no_activation_action() {
+        for (german, title) in [(false, "Pairing request"), (true, "Freigabeanfrage")] {
+            let args = pairing_notification("<Studio>", german);
+            assert_eq!(args.type_().as_str(), "(susssasa{sv}i)");
+            assert_eq!(args.child_get::<String>(3), title);
+            assert!(args.child_get::<String>(4).contains("&lt;Studio&gt;"));
+            assert!(args.child_get::<Vec<String>>(5).is_empty());
+        }
+    }
 }

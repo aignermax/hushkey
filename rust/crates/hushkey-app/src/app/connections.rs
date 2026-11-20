@@ -10,7 +10,7 @@ pub(super) struct Outgoing {
 }
 
 pub(super) struct Incoming {
-    pub window_session: u64,
+    pub window_session: Option<u64>,
     pub pairing: Pairing,
     pub active: ApprovalActive,
     pub reply: mpsc::SyncSender<bool>,
@@ -32,6 +32,14 @@ impl PairingFocus {
 }
 
 impl Incoming {
+    pub fn attach_to(&mut self, session: u64) {
+        if self.window_session.is_none() && self.live() {
+            self.window_session = Some(session);
+            // The user is already bringing this window forward.
+            self.focus = PairingFocus::Finished;
+        }
+    }
+
     pub fn live(&self) -> bool {
         self.active.is_active() && Instant::now() < self.expires
     }
@@ -134,7 +142,12 @@ impl App {
         } else {
             PairingFocus::Finished
         };
-        let window_session = self.settings.show_incoming();
+        let window_session = self.settings.incoming_session();
+        #[cfg(target_os = "linux")]
+        {
+            self.tray.pairing_pending(Some(&request.peer.name));
+            platform::notify_pairing(&request.peer.name, network::german(self.s));
+        }
         self.connections.incoming = Some(Incoming {
             pairing: Pairing {
                 id,
@@ -158,10 +171,16 @@ impl App {
                 .and_then(|n| n.server.as_ref())
                 .is_some_and(Server::alive);
         self.connections.answer_pairing(id, allow && hosting);
+        #[cfg(target_os = "linux")]
+        if self.connections.incoming.is_none() {
+            self.tray.pairing_pending(None);
+        }
     }
 
     pub(super) fn deny_incoming(&mut self) {
         if let Some(incoming) = self.connections.incoming.take() {
+            #[cfg(target_os = "linux")]
+            self.tray.pairing_pending(None);
             let _ = incoming.reply.send(false);
         }
     }
@@ -189,7 +208,7 @@ impl App {
             .connections
             .incoming
             .as_ref()
-            .is_some_and(|p| p.window_session == session)
+            .is_some_and(|p| p.window_session == Some(session))
         {
             self.deny_incoming();
         }
@@ -226,12 +245,12 @@ impl App {
         }
         let idle = self.pairing_can_focus();
         if let Some(pending) = &mut self.connections.incoming {
-            if pending.live() {
+            if !pending.live() {
+                self.deny_incoming();
+            } else if pending.window_session.is_some() {
                 pending.focus.poll(idle, || {
                     self.settings.window.focus_incoming_now(pending.pairing.id)
                 });
-            } else {
-                self.deny_incoming();
             }
         }
     }
@@ -448,7 +467,7 @@ mod tests {
                 let (reply, answer) = mpsc::sync_channel(1);
                 events
                     .send(Incoming {
-                        window_session: 1,
+                        window_session: None,
                         pairing: Pairing {
                             id: 7,
                             peer: request.peer,
@@ -481,6 +500,13 @@ mod tests {
             .as_mut()
             .expect("stale click consumed the active request");
         assert!(current.live());
+        current.attach_to(1);
+        current.attach_to(2);
+        assert_eq!(
+            current.window_session,
+            Some(1),
+            "reopening must not transfer ownership"
+        );
         current.expires = Instant::now();
         connections.answer_pairing(7, true);
         assert!(connections.incoming.is_none());

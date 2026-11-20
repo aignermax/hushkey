@@ -1187,7 +1187,7 @@ impl App {
             Action::NetworkWindow => self.open_settings(),
             Action::NetworkDiscover => self.find_servers(false),
             Action::NetworkConnect(peer) => {
-                let session = self.settings.window.show();
+                let session = self.show_settings_window();
                 self.connect_remote(peer, session);
             }
             Action::NetworkLocal => {
@@ -1228,7 +1228,7 @@ impl App {
                 self.config.server_enabled = enabled;
                 self.save(|c| c.server_enabled = enabled);
                 if enabled {
-                    self.settings.window.show();
+                    self.show_settings_window();
                 }
             }
             Action::NetworkRevoke => {

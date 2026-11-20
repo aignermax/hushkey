@@ -123,7 +123,10 @@ for its local model to load. On the laptop:
    intend to use. Clicking **Connect** authorizes that device to process your
    dictation. The client shows the pairing code while it waits. You can cancel
    the request there.
-3. On the host, HushKey opens **Connections → As host**. Compare the eight
+3. On Windows and macOS, HushKey opens **Connections → As host** on the
+   host. On Linux, a desktop notification names the client. If settings is
+   closed, choose **Settings…** in the tray menu to open the request. The menu also
+   shows the client's name while its request is pending. Compare the eight
    digits with the code on the client, then allow the requesting computer to
    dictate. Decline the request if the codes differ or you did not expect it.
 4. After pairing, HushKey tests the connection and displays the reply time.
