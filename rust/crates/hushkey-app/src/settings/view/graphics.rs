@@ -177,9 +177,7 @@ pub(super) fn diagram(ui: &mut Ui, p: Palette, lang: Locale, state: &super::Snap
         ),
         Link::Offline => ("···".into(), lang.t("Wiederverbinden", "Reconnecting")),
         Link::Local => ("—".into(), lang.t("Lokales Diktat", "Local dictation")),
-        Link::Waiting | Link::Connecting if client.checking || client.link == Link::Connecting => {
-            ("···".into(), lang.t("Prüfung läuft", "Checking"))
-        }
+        Link::Waiting if client.checking => ("···".into(), lang.t("Prüfung läuft", "Checking")),
         _ => ("—".into(), lang.t("Antwortzeit", "Round trip")),
     };
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 136.), Sense::hover());

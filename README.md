@@ -119,11 +119,18 @@ for its local model to load. On the laptop:
 
 1. Open **Settings → Connections** and switch to the client view. Refresh the
    list of computers on your LAN.
-2. Select the computer by name and device ID and click **Connect**.
-3. Both computers show the same eight-digit comparison code and a privacy
-   notice. Compare the codes and click **OK on both computers**. Cancel if
-   they differ. Device names and discovery responses alone are not trusted.
-4. **Test connection** sends an encrypted message and displays the reply time.
+2. Check the device ID against **Connections → As host** on the computer you
+   intend to use. Clicking **Connect** authorizes that device to process your
+   dictation. The client shows the pairing code while it waits. You can cancel
+   the request there.
+3. On Windows and macOS, HushKey opens **Connections → As host** on the
+   host. On Linux, a desktop notification names the client. If settings is
+   closed, choose **Settings…** in the tray menu to open the request. The menu also
+   shows the client's name while its request is pending. Compare the eight
+   digits with the code on the client, then allow the requesting computer to
+   dictate. Decline the request if the codes differ or you did not expect it.
+4. After pairing, HushKey tests the connection and displays the reply time.
+   Use **Test connection** to repeat the encrypted round trip.
    The host window lists active clients. Its model status shows when it is
    ready to transcribe. These checks continue after you close the window.
 5. Dictate as usual. **Remote · computer name** appears in the preview.
@@ -143,8 +150,9 @@ Audio and recognition results are encrypted in transit. **The approved server
 necessarily decrypts and processes speech in memory.** Hush-Key writes no
 server recordings or transcripts. The requesting laptop keeps its normal
 dictation history. Only approve computers and administrators you trust.
-**Revoke device approvals** removes stored trust and closes active sessions;
-both devices must approve a new pairing. Disabling the server immediately
+**Revoke device approvals** removes stored trust and closes active sessions.
+Pair again with **Connect** on the client and a new approval on the host.
+Disabling the server immediately
 stops discovery replies and disconnects its clients.
 
 If a final request fails, the current recording stays temporarily in memory.

@@ -17,13 +17,52 @@ pub struct Client {
     identity: Identity,
     peer: Peer,
 }
+
+/// Both peers approved the authenticated session. The caller still owns the
+/// decision to persist the pin, e.g. after dispatching a result to a UI thread.
+pub struct PendingClient {
+    client: Client,
+    trust_epoch: u64,
+    pairing: bool,
+}
+
+impl PendingClient {
+    pub fn finish(self) -> Result<Client, String> {
+        self.client.identity.confirm(
+            Role::PinnedServer,
+            &self.client.peer.id,
+            self.trust_epoch,
+            self.pairing,
+        )?;
+        Ok(self.client)
+    }
+}
+
 impl Client {
     pub fn connect(identity: Identity, peer: &Peer, confirm: Approve) -> Result<Self, String> {
-        validate_peer(peer)?;
-        let _channel = open(&identity, peer, Some(confirm), None)?;
-        Ok(Self {
+        Self::prepare_connect(identity, peer, confirm, &|| false)?.finish()
+    }
+
+    /// Perform the encrypted exchange for an explicit selection. Cancellation
+    /// interrupts the handshake and consent wait. Dropping the returned value
+    /// before calling `finish` leaves the local trust store unchanged.
+    pub fn prepare_connect(
+        identity: Identity,
+        peer: &Peer,
+        confirm: Approve,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PendingClient, String> {
+        let client = Self {
             identity,
             peer: peer.clone(),
+        };
+        validate_peer(peer)?;
+        let (_, trust_epoch, pairing) =
+            open(&client.identity, peer, Some(confirm), Some(cancelled))?;
+        Ok(PendingClient {
+            client,
+            trust_epoch,
+            pairing,
         })
     }
     /// Restore a previously pinned identity at a saved or rediscovered address.
@@ -85,7 +124,8 @@ impl Client {
         let abort: Option<&dyn Fn() -> bool> = Some(&cancelled);
         let options_final = options.beam_size > 1;
         let options = Options::from_core(options)?;
-        let mut ch = open(&self.identity, &self.peer, None, abort)?;
+        let (mut ch, _, _) = open(&self.identity, &self.peer, None, abort)?;
+        require_pin(&self.identity, &self.peer, epoch)?;
         ch.send_msg(
             &Msg::Request {
                 samples: audio.len(),
@@ -173,7 +213,7 @@ fn open(
     p: &Peer,
     confirm: Option<Approve>,
     abort: Option<&dyn Fn() -> bool>,
-) -> Result<Channel, String> {
+) -> Result<(Channel, u64, bool), String> {
     let trust_epoch = id.epoch()?;
     let server_pinned = id.authorized(Role::PinnedServer, &p.id, trust_epoch)?;
     let mut ch = authenticated_channel(id, p, abort, None)?;
@@ -225,7 +265,6 @@ fn open(
     if !matches!(ch.recv_msg(abort)?, Msg::Ready) {
         return Err("pairing confirmation missing".into());
     }
-    id.confirm(Role::PinnedServer, &p.id, trust_epoch, pairing)?;
     ch.io.idle = wire::IDLE;
-    Ok(ch)
+    Ok((ch, trust_epoch, pairing))
 }

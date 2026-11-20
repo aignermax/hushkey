@@ -1,7 +1,7 @@
-//! Native dialogs, including nonblocking, cancellable pairing approval.
+//! Native confirmation for revoking device permissions.
 //!
 //! Call on the main UI thread, after platform initialization (including GTK
-//! on Linux). The caller supplies the notice and client confirmation code.
+//! on Linux). Pairing requests are handled by the settings window.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -71,6 +71,7 @@ impl Pending {
     }
 
     /// Whether the result has been committed for delivery to the callback.
+    #[cfg(test)]
     pub fn done(&self) -> bool {
         self.state
             .completion

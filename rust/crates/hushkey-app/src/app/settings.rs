@@ -1,8 +1,6 @@
 use super::{autostart, network, Action, App, Duration, Instant, Mode};
 use crate::config::AUTO_MODEL;
-use crate::settings::{
-    selected_peer, Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot,
-};
+use crate::settings::{Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot};
 use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
 use hushkey_net::Server;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -14,6 +12,20 @@ pub(super) struct Settings {
 }
 
 impl Settings {
+    pub fn incoming_session(&mut self) -> Option<u64> {
+        self.next_refresh = Instant::now();
+        #[cfg(target_os = "linux")]
+        {
+            // Mapping a new X11 or Wayland window can activate it even when
+            // started inactive. Only a user gesture opens a cold host window.
+            self.window.open_session()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some(self.window.show_incoming())
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             window: SettingsWindow::new(),
@@ -45,11 +57,19 @@ fn running_build() -> String {
 impl App {
     pub(super) fn open_settings(&mut self) {
         let already_open = self.settings.window.visible();
-        self.settings.window.show();
-        self.settings.next_refresh = Instant::now();
+        self.show_settings_window();
         if !already_open {
             self.find_servers(true);
         }
+    }
+
+    pub(super) fn show_settings_window(&mut self) -> u64 {
+        let session = self.settings.window.show();
+        if let Some(incoming) = &mut self.connections.incoming {
+            incoming.attach_to(session);
+        }
+        self.settings.next_refresh = Instant::now();
+        session
     }
 
     pub(super) fn poll_settings(&mut self) {
@@ -58,11 +78,7 @@ impl App {
             crate::log::line(&format!("{label}: {error}"));
             self.failure_notice(&format!("{label}: {error}"));
         }
-        for intent in self.settings.window.actions() {
-            self.settings.feedback = None;
-            self.apply_setting(intent);
-            self.settings.next_refresh = Instant::now();
-        }
+        self.drain_settings_actions();
         let now = Instant::now();
         if now >= self.settings.next_refresh && self.settings.window.visible() {
             self.settings.next_refresh = now + Duration::from_millis(300);
@@ -71,25 +87,32 @@ impl App {
         }
     }
 
-    fn apply_setting(&mut self, intent: Intent) {
+    pub(super) fn drain_settings_actions(&mut self) {
+        for (session, intent) in self.settings.window.actions() {
+            self.settings.feedback = None;
+            self.apply_setting(session, intent);
+            self.settings.next_refresh = Instant::now();
+        }
+    }
+
+    fn apply_setting(&mut self, session: u64, intent: Intent) {
         let action = match intent {
             Intent::Discover => return self.find_servers(true),
             Intent::Probe => return self.begin_check(),
-            Intent::Connect(id) => {
-                if let Some(peer) =
-                    selected_peer(&id, &self.connections.peers, self.config.remote.as_ref())
-                        .cloned()
+            Intent::DecidePairing { id, allow } => {
+                if self
+                    .connections
+                    .incoming
+                    .as_ref()
+                    .is_some_and(|p| p.window_session == Some(session))
                 {
-                    self.connect_remote(peer);
-                } else {
-                    self.failure_notice(network::words(
-                        self.s,
-                        "Dieses Gerät ist nicht mehr in der Liste. Bitte erneut suchen.",
-                        "This device is no longer listed. Search again.",
-                    ));
+                    self.decide_pairing(id, allow);
                 }
                 return;
             }
+            Intent::CancelPairing(id) => return self.cancel_pairing(id),
+            Intent::WindowClosed => return self.close_session_pairings(session),
+            Intent::Connect(peer) => return self.connect_remote(peer, session),
             Intent::Local => Action::NetworkLocal,
             Intent::Server(on) if on != self.config.server_enabled => Action::NetworkServer,
             Intent::Revoke => Action::NetworkRevoke,
@@ -160,17 +183,6 @@ impl App {
     fn settings_snapshot(&self) -> Snapshot {
         let net = self.network.as_ref();
         let server = net.and_then(|n| n.server.as_ref()).filter(|s| s.alive());
-        let request = self
-            .deferred_approval
-            .as_ref()
-            .filter(|(_, _, expiry)| *expiry > Instant::now())
-            .map(|(req, _, _)| &req.peer)
-            .or_else(|| {
-                self.connections
-                    .request
-                    .as_ref()
-                    .filter(|_| self.dialogs.iter().any(|(host, d)| *host && !d.done()))
-            });
         let mut peers = self.connections.peers.clone();
         if let Some(saved) = &self.config.remote {
             if !peers.iter().any(|p| p.id == saved.id) {
@@ -204,6 +216,7 @@ impl App {
                 theme: self.config.theme,
             },
             host: Host {
+                device_id: net.map(|n| n.identity.id()),
                 name: net.map(|n| n.identity.name()).unwrap_or_else(|| {
                     network::words(self.s, "Dieser Rechner", "This computer").into()
                 }),
@@ -211,10 +224,30 @@ impl App {
                 listening: server.is_some(),
                 model_ready: self.engine.is_some(),
                 clients: server.map(Server::clients).unwrap_or_default(),
-                pending: request.cloned(),
+                pending: self
+                    .connections
+                    .incoming
+                    .as_ref()
+                    .filter(|pending| pending.window_session.is_some() && pending.live())
+                    .map(|pending| pending.pairing.clone()),
                 error: self.connections.host_error.clone(),
             },
             client: Client {
+                pairing: self
+                    .connecting
+                    .as_ref()
+                    .map(|pending| pending.pairing.clone()),
+                pairing_error: self
+                    .connections
+                    .pairing_error
+                    .as_ref()
+                    .map(|(peer, reason)| crate::settings::PairingFailure {
+                        peer: peer.clone(),
+                        reason: reason.clone(),
+                        can_retry: self
+                            .connections
+                            .can_select(peer, self.config.remote.as_ref()),
+                    }),
                 selected: self.config.remote.clone(),
                 peers,
                 link: self.connections.link,
@@ -222,7 +255,10 @@ impl App {
                 searching: self.discovering,
                 search_status: self.connections.search_status.clone(),
                 detail: self.connections.client_status.clone(),
-                can_retry: self.has_failed() && !self.busy && !self.connecting && !self.revoking,
+                can_retry: self.has_failed()
+                    && !self.busy
+                    && self.connecting.is_none()
+                    && self.revoke_dialog.is_none(),
             },
             feedback: self
                 .settings
@@ -269,8 +305,10 @@ impl App {
             self.s.transcribing
         } else if self.has_failed() {
             w("Diktat wartet", "Dictation needs attention")
-        } else if self.connecting {
+        } else if self.connecting.is_some() {
             w("Verbindet …", "Connecting …")
+        } else if self.config.remote.is_some() && self.connections.link == Link::Waiting {
+            w("Datentest steht aus", "Awaiting data test")
         } else if self.config.remote.is_some()
             && matches!(self.connections.link, Link::Offline | Link::Revoked)
         {
@@ -285,5 +323,17 @@ impl App {
         } else {
             w("Bereit zum Diktieren", "Ready to dictate")
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn an_incoming_request_never_maps_a_cold_linux_window() {
+        let mut settings = Settings::new();
+        assert_eq!(settings.incoming_session(), None);
+        assert!(!settings.window.visible());
     }
 }

@@ -30,6 +30,7 @@ use crate::log;
 use crate::network::{self, Network, Recoverable};
 use crate::network_dialog;
 use crate::platform::{self, autostart, Hotkey, InsertTarget, KeyEvent, Overlay, Restore};
+use crate::settings::Pairing;
 use crate::strings::{self, Strings, MODELS};
 use crate::tray::{Action, Tray};
 use crate::update::{self, Release};
@@ -39,7 +40,7 @@ mod model_selection;
 mod settings;
 mod updates;
 use crate::network::Link;
-use connections::Connections;
+use connections::{Connections, Outgoing};
 use settings::Settings;
 
 /// A press shorter than this is a tap: no dictation, and Caps Lock keeps
@@ -188,13 +189,11 @@ pub fn run(after_update: bool) -> ExitCode {
         connections: Connections::new(),
         settings: Settings::new(),
         backend: None,
-        connecting: false,
+        connecting: None,
         discovering: false,
         connect_generation: 0,
-        dialogs: Vec::new(),
-        deferred_approval: None,
+        revoke_dialog: None,
         pending_inserts: 0,
-        revoking: false,
         recording: None,
         pressed_at: None,
         longest_pause: Duration::ZERO,
@@ -290,13 +289,11 @@ struct App {
     connections: Connections,
     settings: Settings,
     backend: Option<Arc<Recoverable>>,
-    connecting: bool,
+    connecting: Option<Outgoing>,
     discovering: bool,
     connect_generation: u64,
-    dialogs: Vec<(bool, network_dialog::Pending)>,
-    deferred_approval: Option<(hushkey_net::Approval, mpsc::SyncSender<bool>, Instant)>,
+    revoke_dialog: Option<network_dialog::Pending>,
     pending_inserts: usize,
-    revoking: bool,
     recording: Option<RecordSession>,
     pressed_at: Option<Instant>,
     /// The longest pause in the held key's repeats during this dictation.
@@ -346,7 +343,7 @@ impl App {
     }
 
     fn can_switch(&mut self) -> bool {
-        if self.recording.is_some() || self.busy || self.connecting || self.has_failed() {
+        if self.recording.is_some() || self.busy || self.connecting.is_some() || self.has_failed() {
             self.failure_notice(network::words(self.s,
                 "Bitte das laufende Diktat oder die Verbindung beenden; fehlgeschlagenes Diktat erneut versuchen oder verwerfen.",
                 "Finish the dictation or connection first; retry or discard any failed dictation."));
@@ -356,11 +353,23 @@ impl App {
         }
     }
 
-    fn connect_remote(&mut self, peer: hushkey_net::Peer) {
+    fn connect_remote(&mut self, peer: hushkey_net::Peer, window_session: u64) {
+        if !self
+            .connections
+            .can_select(&peer, self.config.remote.as_ref())
+        {
+            self.failure_notice(network::words(
+                self.s,
+                "Der Eintrag für dieses Gerät hat sich geändert. Bitte erneut auswählen.",
+                "The listing for this device changed. Select it again.",
+            ));
+            return;
+        }
         let same_identity = self.config.remote.as_ref().is_some_and(|p| p.id == peer.id);
         if self.recording.is_some()
             || self.busy
-            || self.connecting
+            || self.connecting.is_some()
+            || self.revoke_dialog.is_some()
             || (self.has_failed() && !same_identity)
         {
             self.failure_notice(network::words(self.s,
@@ -379,15 +388,17 @@ impl App {
         self.stop_listening(false);
         self.config.mode = Mode::PushToTalk;
         self.save(|c| c.mode = Mode::PushToTalk);
-        self.connecting = true;
-        self.connections.checking = false;
-        self.connections.link = Link::Connecting;
-        self.connections.client_status = format!(
-            "{} · {}",
-            peer.name,
-            network::words(self.s, "Verbindung wird aufgebaut …", "Connecting …")
-        );
         self.connect_generation += 1;
+        self.connecting = Some(Outgoing {
+            window_session,
+            pairing: Pairing {
+                id: self.connect_generation,
+                peer: peer.clone(),
+                code: String::new(),
+            },
+        });
+        self.connections.checking = false;
+        self.connections.pairing_error = None;
         let text = network::words(
             self.s,
             "Remote-Verbindung wird aufgebaut …",
@@ -396,35 +407,9 @@ impl App {
         self.tray.show(Badge::Loading, text);
         self.notice(GREY, text);
         self.network
-            .as_ref()
+            .as_mut()
             .unwrap()
             .connect(peer, self.connect_generation);
-    }
-
-    fn show_approval(
-        &mut self,
-        request: hushkey_net::Approval,
-        hosting: bool,
-        reply: mpsc::SyncSender<bool>,
-        expires: Instant,
-    ) {
-        if expires <= Instant::now() || (hosting && !self.config.server_enabled) {
-            let _ = reply.send(false);
-            return;
-        }
-        let title = format!("Hush-Key · LAN · {}", request.code);
-        if hosting {
-            self.connections.request = Some(request.peer.clone());
-        }
-        let dialog = network_dialog::request(
-            &title,
-            &network::consent(self.s, &request, hosting),
-            expires.saturating_duration_since(Instant::now()),
-            move |allowed| {
-                let _ = reply.send(allowed);
-            },
-        );
-        self.dialogs.push((hosting, dialog));
     }
 
     fn network_event(&mut self, event: network::Event) {
@@ -441,21 +426,31 @@ impl App {
                 }
             }
             network::Event::Approval {
+                id,
                 request,
-                hosting,
+                active,
                 reply,
                 expires,
+                ..
             } => {
-                if hosting
-                    && (self.recording.is_some()
-                        || self.listening.is_some()
-                        || self.busy
-                        || self.pending_inserts > 0)
+                self.receive_pairing(id, request, active, reply, expires);
+            }
+            network::Event::ApprovalEnded { id } => self.decide_pairing(id, false),
+            network::Event::PairingCode {
+                generation,
+                request,
+            } => {
+                if let Some(target) = self
+                    .connecting
+                    .as_mut()
+                    .map(|pending| &mut pending.pairing)
+                    .filter(|target| {
+                        target.id == generation
+                            && target.peer.id == request.peer.id
+                            && target.peer.address == request.peer.address
+                    })
                 {
-                    // Do not let an unsolicited request steal a dictation's focus.
-                    self.deferred_approval = Some((request, reply, expires));
-                } else {
-                    self.show_approval(request, hosting, reply, expires);
+                    target.code = request.code;
                 }
             }
             network::Event::Discovered(result) => {
@@ -497,10 +492,20 @@ impl App {
                 }
             }
             network::Event::Connected { generation, result } => {
-                if generation != self.connect_generation {
+                self.drain_settings_actions();
+                let Some(outgoing) = self
+                    .connecting
+                    .take_if(|pending| pending.pairing.id == generation)
+                else {
                     return;
-                }
-                self.connecting = false;
+                };
+                let target = outgoing.pairing;
+                let result = result.and_then(|(peer, pending)| {
+                    if peer != target.peer {
+                        return Err("Connection target changed".into());
+                    }
+                    pending.finish().map(|backend| (peer, backend))
+                });
                 match result {
                     Ok((peer, backend)) => {
                         self.connections.paused = false;
@@ -529,33 +534,26 @@ impl App {
                         self.tray.recovery_available(self.has_failed());
                         self.notice_until = None;
                         self.overlay.hide();
-                        self.idle();
-                        self.notice(
-                            GREEN,
-                            &network::overlay_text(
-                                self.config.remote.as_ref(),
-                                network::words(
-                                    self.s,
-                                    "verbunden · verschlüsselt",
-                                    "connected · encrypted",
-                                ),
-                            ),
-                        );
+                        self.tray
+                            .show(Badge::Loading, &self.connections.client_status);
+                        self.begin_check();
                     }
                     Err(e) => {
-                        self.connections.link = Link::Offline;
-                        self.connections.client_status = format!(
-                            "{}: {e}",
+                        let reason = if e == "host denied pairing" {
                             network::words(
                                 self.s,
-                                "Verbindung fehlgeschlagen",
-                                "Connection failed"
+                                "Der Host hat die Kopplung abgelehnt.",
+                                "The host declined pairing.",
                             )
-                        );
+                            .to_owned()
+                        } else {
+                            e
+                        };
+                        let message = self.connections.pairing_failed(target.peer, reason);
                         self.idle();
-                        self.failure_notice(&format!("Remote: {e}"));
+                        self.notice_for(GREY, &message, FAILURE_NOTICE);
                         if self.backend.is_none() {
-                            self.tray.show(Badge::Failed, &format!("Remote: {e}"));
+                            self.tray.show(Badge::Failed, &message);
                         }
                     }
                 }
@@ -570,6 +568,9 @@ impl App {
             if !platform::pump() {
                 return self.quit();
             }
+            // Apply already queued cancellations and window closures before accepting a
+            // network worker's completed handshake and persisting its peer.
+            self.poll_settings();
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
                 if let Some(action) = Tray::icon_action(event) {
                     self.menu(action);
@@ -586,19 +587,8 @@ impl App {
             while let Ok(msg) = rx.try_recv() {
                 self.handle(msg);
             }
-            self.dialogs.retain(|(_, dialog)| !dialog.done());
-            self.poll_settings();
             self.poll_connections();
             self.restart_after_update();
-            if self.recording.is_none()
-                && self.listening.is_none()
-                && !self.busy
-                && self.pending_inserts == 0
-            {
-                if let Some((request, reply, expires)) = self.deferred_approval.take() {
-                    self.show_approval(request, true, reply, expires);
-                }
-            }
             if self.quit_requested {
                 return self.quit();
             }
@@ -659,12 +649,8 @@ impl App {
     }
 
     fn quit(mut self) -> ExitCode {
-        for (_, dialog) in &self.dialogs {
-            dialog.cancel();
-        }
-        if let Some((_, reply, _)) = self.deferred_approval.take() {
-            let _ = reply.send(false);
-        }
+        self.revoke_dialog.take();
+        self.dismiss_pairings();
         self.overlay.hide();
         if let Some(mut session) = self.recording.take() {
             let _ = session.cancel();
@@ -764,12 +750,13 @@ impl App {
         match msg {
             Msg::Network(event) => self.network_event(event),
             Msg::RevokeConfirmed(allowed) => {
-                self.revoking = false;
+                self.revoke_dialog.take();
                 if allowed {
+                    self.dismiss_pairings();
                     self.connect_generation += 1;
-                    self.connecting = false;
                     self.connections.checking = false;
                     self.connections.paused = true;
+                    self.connections.pairing_error = None;
                     self.connections.link = Link::Revoked;
                     self.connections.client_status = network::words(
                         self.s,
@@ -777,12 +764,6 @@ impl App {
                         "Permission revoked · choose Connect to pair again",
                     )
                     .into();
-                    for (_, dialog) in &self.dialogs {
-                        dialog.cancel();
-                    }
-                    if let Some((_, reply, _)) = self.deferred_approval.take() {
-                        let _ = reply.send(false);
-                    }
                     if let Some(network) = &self.network {
                         if let Err(e) = network.revoke_all() {
                             self.failure_notice(&format!("Revoke: {e}"));
@@ -1081,11 +1062,10 @@ impl App {
     }
 
     fn key_down(&mut self) {
-        // An incoming consent prompt must never hold up capture/key release.
-        for (hosting, dialog) in &self.dialogs {
-            if *hosting {
-                dialog.cancel();
-            }
+        // A tap can finish before the next UI poll. Suppress any pending
+        // activation here so a slow settings launch never steals its target.
+        if let Some(incoming) = &mut self.connections.incoming {
+            incoming.focus = connections::PairingFocus::Finished;
         }
         self.pressed_at = Some(Instant::now());
         if self.listening.is_some()
@@ -1096,7 +1076,7 @@ impl App {
         {
             return;
         }
-        if self.connecting || self.has_failed() {
+        if self.connecting.is_some() || self.has_failed() {
             self.failure_notice(network::words(self.s,
                 "Verbindung läuft oder ein Diktat wartet auf Wiederholung. Bitte im Netzwerkmenü prüfen.",
                 "Connecting or a failed dictation needs attention. Check the network menu."));
@@ -1207,8 +1187,8 @@ impl App {
             Action::NetworkWindow => self.open_settings(),
             Action::NetworkDiscover => self.find_servers(false),
             Action::NetworkConnect(peer) => {
-                self.settings.window.show();
-                self.connect_remote(peer);
+                let session = self.show_settings_window();
+                self.connect_remote(peer, session);
             }
             Action::NetworkLocal => {
                 if self.can_switch() {
@@ -1217,6 +1197,7 @@ impl App {
                     self.connect_generation += 1;
                     self.connections.checking = false;
                     self.connections.paused = false;
+                    self.connections.pairing_error = None;
                     self.connections.client_status.clear();
                     self.connections.link = Link::Local;
                     self.backend = None;
@@ -1226,6 +1207,9 @@ impl App {
             }
             Action::NetworkServer => {
                 let enabled = !self.config.server_enabled;
+                if !enabled {
+                    self.deny_incoming();
+                }
                 if let Some(network) = &mut self.network {
                     if let Err(e) = network.set_enabled(enabled) {
                         self.connections.host_error = Some(e.clone());
@@ -1241,35 +1225,29 @@ impl App {
                     ));
                     return;
                 }
-                if !enabled {
-                    for (hosting, dialog) in &self.dialogs {
-                        if *hosting {
-                            dialog.cancel();
-                        }
-                    }
-                    if let Some((_, reply, _)) = self.deferred_approval.take() {
-                        let _ = reply.send(false);
-                    }
-                }
                 self.config.server_enabled = enabled;
                 self.save(|c| c.server_enabled = enabled);
                 if enabled {
-                    self.settings.window.show();
+                    self.show_settings_window();
                 }
             }
             Action::NetworkRevoke => {
-                if !self.revoking {
-                    self.revoking = true;
+                if self.revoke_dialog.is_none() {
                     let tx = self.tx.clone();
                     let dialog = network_dialog::request("Hush-Key", network::words(self.s,
                         "Alle Gerätefreigaben widerrufen? Geräte müssen danach erneut genehmigt werden.",
                         "Revoke all device permissions? Devices will need approval again."), Duration::from_secs(85),
                         move |allowed| { let _ = tx.send(Msg::RevokeConfirmed(allowed)); });
-                    self.dialogs.push((false, dialog));
+                    self.revoke_dialog = Some(dialog);
                 }
             }
             Action::NetworkRetry => {
-                if !self.busy && self.recording.is_none() && self.has_failed() {
+                if !self.busy
+                    && self.recording.is_none()
+                    && self.connecting.is_none()
+                    && self.revoke_dialog.is_none()
+                    && self.has_failed()
+                {
                     if let Some(backend) = self.backend.clone() {
                         self.busy = true;
                         self.tray.recovery_available(false);
@@ -1466,7 +1444,7 @@ impl App {
         }
         if on
             && (self.config.check_listen_available().is_err()
-                || self.connecting
+                || self.connecting.is_some()
                 || self.recording.is_some()
                 || self.busy
                 || self.has_failed())

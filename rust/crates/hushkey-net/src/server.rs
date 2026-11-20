@@ -8,7 +8,7 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicU64, AtomicUsize},
-        Mutex,
+        Mutex, Weak,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -20,6 +20,25 @@ pub struct Server {
     listener: Option<JoinHandle<()>>,
     discovery: Mutex<Option<JoinHandle<()>>>,
 }
+
+/// Liveness of a specific inbound request. UI code may keep a clone while the
+/// user compares the code and discard the request when its connection ends.
+#[derive(Clone)]
+pub struct ApprovalActive {
+    pending: Arc<AtomicBool>,
+    server: Weak<State>,
+    epoch: u64,
+}
+
+impl ApprovalActive {
+    pub fn is_active(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+            && self.server.upgrade().is_some_and(|s| s.valid(self.epoch))
+    }
+}
+
+pub type HostApprove = Arc<dyn Fn(Approval, ApprovalActive) -> bool + Send + Sync>;
+
 pub(crate) struct State {
     pub identity: Identity,
     pub stop: AtomicBool,
@@ -31,7 +50,7 @@ pub(crate) struct State {
     approval_busy: Arc<AtomicBool>,
     compute_busy: Arc<AtomicBool>,
     waiting_finals: AtomicUsize,
-    approve: Approve,
+    approve: HostApprove,
     compute: Compute,
 }
 pub(crate) struct Policy {
@@ -94,6 +113,15 @@ impl Server {
         identity: Identity,
         bind: SocketAddr,
         approve: Approve,
+        compute: Compute,
+    ) -> Result<Self, String> {
+        Self::start_with_approval_status(identity, bind, Arc::new(move |a, _| approve(a)), compute)
+    }
+
+    pub fn start_with_approval_status(
+        identity: Identity,
+        bind: SocketAddr,
+        approve: HostApprove,
         compute: Compute,
     ) -> Result<Self, String> {
         let tcp = TcpListener::bind(bind).map_err(|e| format!("TCP server bind {bind}: {e}"))?;
@@ -358,9 +386,32 @@ fn session(
             peer: peer.clone(),
             code: ch.code.clone(),
         };
+        // The client waits for our Decision before sending another frame.
+        // A nonblocking peek lets an idle approval notice EOF without
+        // consuming any bytes from the encrypted transport.
+        ch.io.stream.set_nonblocking(true).map_err(err)?;
+        let active = ApprovalActive {
+            pending: Arc::new(AtomicBool::new(true)),
+            server: Arc::downgrade(state),
+            epoch,
+        };
+        let status = active.clone();
         let f = state.approve.clone();
-        let rx = job(permit, move || f(approval))?;
-        wait(rx, wire::APPROVAL, &cancelled)?
+        let rx = job(permit, move || f(approval, status))?;
+        let result = wait(rx, wire::APPROVAL, &|| {
+            cancelled()
+                || match ch.io.stream.peek(&mut [0; 1]) {
+                    // EOF or unsolicited data invalidates this pending exchange.
+                    Ok(_) => true,
+                    Err(e) => !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ),
+                }
+        });
+        active.pending.store(false, Ordering::Release);
+        ch.io.stream.set_nonblocking(false).map_err(err)?;
+        result?
     } else {
         true
     };

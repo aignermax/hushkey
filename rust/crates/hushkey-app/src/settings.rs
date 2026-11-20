@@ -2,6 +2,8 @@
 //! network workers. Its window sees only displayable state and requests changes.
 mod runtime;
 mod view;
+#[cfg(target_os = "linux")]
+mod x11;
 pub(crate) use runtime::run_window;
 pub(crate) use runtime::SettingsWindow;
 
@@ -42,18 +44,35 @@ pub(crate) struct Preferences {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Pairing {
+    pub id: u64,
+    pub peer: Peer,
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Host {
     pub name: String,
+    pub device_id: Option<String>,
     pub enabled: bool,
     pub listening: bool,
     pub model_ready: bool,
     pub error: Option<String>,
     pub clients: Vec<Peer>,
-    pub pending: Option<Peer>,
+    pub pending: Option<Pairing>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PairingFailure {
+    pub peer: Peer,
+    pub reason: String,
+    pub can_retry: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Client {
+    pub pairing: Option<Pairing>,
+    pub pairing_error: Option<PairingFailure>,
     pub selected: Option<Peer>,
     pub peers: Vec<Peer>,
     pub link: Link,
@@ -67,7 +86,10 @@ pub(crate) struct Client {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) enum Intent {
     Discover,
-    Connect(String),
+    Connect(Peer),
+    DecidePairing { id: u64, allow: bool },
+    CancelPairing(u64),
+    WindowClosed,
     Probe,
     Local,
     Server(bool),
@@ -105,8 +127,37 @@ pub(crate) fn selected_peer<'a>(
 mod tests {
     use super::*;
 
+    pub(super) fn snapshot() -> Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "german": false, "version": "1.0.0", "build": "test", "ready": "Ready",
+            "local_recognition": "tiny · CPU", "history": [], "update": "Idle", "feedback": null,
+            "preferences": {
+                "key": "right_ctrl", "language": null, "model": "tiny", "insert": "paste",
+                "restore_clipboard": true, "listening": false, "autostart": false,
+                "auto_updates": false, "include_prereleases": true, "use_gpu": false, "theme": "light"
+            },
+            "host": {"name": "Local", "enabled": false, "listening": false, "model_ready": true,
+                     "error": null, "clients": [], "pending": null},
+            "client": {"selected": null, "peers": [], "link": "Local", "checking": false,
+                       "searching": false, "search_status": "", "detail": "", "can_retry": false}
+        }))
+        .unwrap()
+    }
+
+    pub(super) fn pairing(id: u64) -> Pairing {
+        Pairing {
+            id,
+            peer: hushkey_net::Peer {
+                id: "a".repeat(64),
+                name: "Studio".into(),
+                address: "127.0.0.1:5000".parse().unwrap(),
+            },
+            code: "00123456".into(),
+        }
+    }
+
     #[test]
-    fn a_click_follows_identity_across_refresh_and_cannot_pick_a_namesake() {
+    fn lookup_prefers_current_discovery_over_saved_addresses_and_rejects_namesakes() {
         let saved = Peer {
             name: "Studio".into(),
             id: "a".repeat(64),
