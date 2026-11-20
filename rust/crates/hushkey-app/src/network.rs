@@ -1,10 +1,13 @@
 //! Desktop ownership of LAN computation. No network worker touches native UI.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
 use hushkey_core::{Engine, Error, TranscribeOptions, Transcriber, Transcript};
-use hushkey_net::{Approval, Client, Identity, Peer, Server};
+use hushkey_net::{Approval, ApprovalActive, Client, Identity, Peer, PendingClient, Server};
 
 use crate::{config, strings};
 
@@ -28,15 +31,23 @@ pub enum Event {
         result: Result<CheckedPeer, String>,
     },
     Approval {
+        id: u64,
+        active: ApprovalActive,
         request: Approval,
-        hosting: bool,
         reply: mpsc::SyncSender<bool>,
         expires: Instant,
+    },
+    ApprovalEnded {
+        id: u64,
+    },
+    PairingCode {
+        generation: u64,
+        request: Approval,
     },
     Discovered(std::result::Result<Vec<Peer>, String>),
     Connected {
         generation: u64,
-        result: std::result::Result<(Peer, Arc<Recoverable>), String>,
+        result: std::result::Result<(Peer, PendingConnection), String>,
     },
 }
 
@@ -49,6 +60,7 @@ pub struct Network {
     pub engine: Arc<Mutex<Option<Arc<Engine>>>>,
     notify: Notify,
     bind: std::net::SocketAddr,
+    outbound_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Network {
@@ -76,6 +88,7 @@ impl Network {
             engine,
             notify,
             bind,
+            outbound_cancel: None,
         };
         if enabled {
             let _ = network.set_enabled(true);
@@ -94,10 +107,10 @@ impl Network {
         }
         self.server.take();
         let host_engine = self.engine.clone();
-        let server = Server::start(
+        let server = Server::start_with_approval_status(
             self.identity.clone(),
             self.bind,
-            approval(self.notify.clone(), true),
+            host_approval(self.notify.clone()),
             Arc::new(move |audio, options| {
                 let local = host_engine.lock().map_err(|_| "local engine unavailable")?.clone()
                     .ok_or("The server's local model is not ready. Select local computation and wait for it to load.")?;
@@ -118,6 +131,9 @@ impl Network {
     }
 
     pub fn revoke_all(&self) -> std::result::Result<(), String> {
+        if let Some(cancelled) = &self.outbound_cancel {
+            cancelled.store(true, Ordering::Release);
+        }
         if let Some(server) = &self.server {
             server.revoke_all()
         } else {
@@ -135,13 +151,36 @@ impl Network {
         });
     }
 
-    pub fn connect(&self, peer: Peer, generation: u64) {
+    pub fn connect(&mut self, peer: Peer, generation: u64) {
+        self.cancel_connect();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.outbound_cancel = Some(cancelled.clone());
         let (identity, notify) = (self.identity.clone(), self.notify.clone());
         std::thread::spawn(move || {
-            let result = Client::connect(identity, &peer, approval(notify.clone(), false))
-                .map(|client| (peer, Arc::new(Recoverable::new(Arc::new(Remote(client))))));
+            let report = notify.clone();
+            let stale = cancelled.clone();
+            let show_code = Arc::new(move |request| {
+                if stale.load(Ordering::Acquire) {
+                    return false;
+                }
+                report(Event::PairingCode {
+                    generation,
+                    request,
+                });
+                true
+            });
+            let result = Client::prepare_connect(identity, &peer, show_code, &|| {
+                cancelled.load(Ordering::Acquire)
+            })
+            .map(|client| (peer, PendingConnection { client, cancelled }));
             notify(Event::Connected { generation, result });
         });
+    }
+
+    pub fn cancel_connect(&mut self) {
+        if let Some(flag) = self.outbound_cancel.take() {
+            flag.store(true, Ordering::Release);
+        }
     }
 
     /// Recover only the saved device. Discovery provides an address hint;
@@ -177,6 +216,28 @@ impl Network {
     }
 }
 
+impl Drop for Network {
+    fn drop(&mut self) {
+        self.cancel_connect();
+    }
+}
+
+pub struct PendingConnection {
+    client: PendingClient,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PendingConnection {
+    /// Called on the UI thread after matching the generation and selected peer.
+    pub fn finish(self) -> Result<Arc<Recoverable>, String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err("connection cancelled".into());
+        }
+        let client = self.client.finish()?;
+        Ok(Arc::new(Recoverable::new(Arc::new(Remote(client)))))
+    }
+}
+
 pub type CheckedPeer = (Option<Duration>, Arc<Recoverable>);
 
 fn check_peer(identity: &Identity, peer: &Peer) -> Result<CheckedPeer, String> {
@@ -189,18 +250,32 @@ fn check_peer(identity: &Identity, peer: &Peer) -> Result<CheckedPeer, String> {
     Ok((rtt, Arc::new(Recoverable::new(Arc::new(Remote(client))))))
 }
 
-fn approval(notify: Notify, hosting: bool) -> hushkey_net::Approve {
-    Arc::new(move |request| {
+fn host_approval(notify: Notify) -> hushkey_net::HostApprove {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    Arc::new(move |request, active| {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let (reply, answer) = mpsc::sync_channel(1);
+        let expires = Instant::now() + Duration::from_secs(85);
         notify(Event::Approval {
+            id,
+            active: active.clone(),
             request,
-            hosting,
             reply,
-            expires: Instant::now() + Duration::from_secs(85),
+            expires,
         });
-        answer
-            .recv_timeout(Duration::from_secs(90))
-            .unwrap_or(false)
+        let allowed = loop {
+            if !active.is_active() || Instant::now() >= expires {
+                break false;
+            }
+            match answer.recv_timeout(Duration::from_millis(50)) {
+                Ok(allowed) => break allowed && active.is_active() && Instant::now() < expires,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        drop(answer);
+        notify(Event::ApprovalEnded { id });
+        allowed
     })
 }
 
@@ -352,37 +427,6 @@ pub fn words<'a>(s: &strings::Strings, de: &'a str, en: &'a str) -> &'a str {
     }
 }
 
-pub fn consent(s: &strings::Strings, request: &Approval, hosting: bool) -> String {
-    let intro = if hosting {
-        words(
-            s,
-            "möchte deine Spracherkennung verwenden.",
-            "wants to use your speech recognition.",
-        )
-    } else {
-        words(
-            s,
-            "soll deine Sprache verarbeiten.",
-            "will process your speech.",
-        )
-    };
-    let scope = if hosting {
-        words(s, "Dieses Gerät darf danach deine lokale Spracherkennung verwenden. Dieser Rechner entschlüsselt und verarbeitet dessen Sprache im Arbeitsspeicher.", "This device will be allowed to use your local speech recognition. This computer decrypts and processes its speech in memory.")
-    } else {
-        words(s, "Der gewählte Rechner darf deine Diktate verarbeiten und muss sie dazu im Arbeitsspeicher entschlüsseln. Das gibt ihm keinen Zugriff auf deine eigene Spracherkennung.", "The selected computer may process your dictations and must decrypt them in memory. This does not grant it access to your own speech recognition.")
-    };
-    let disclosure = words(s,
-        "Audio und Text werden verschlüsselt übertragen. Hush-Key speichert auf dem Server keine Aufnahmen oder Transkripte. Nur vertrauenswürdige Geräte genehmigen.\n\nVergleiche den Code auf BEIDEN Geräten. Klicke nur auf OK, wenn beide Codes übereinstimmen. Die Freigabe wird für dieses Gerät gespeichert und kann im Netzwerkmenü widerrufen werden.",
-        "Audio and text are encrypted in transit. Hush-Key saves no recordings or transcripts on the server. Approve only trusted devices.\n\nCompare the code on BOTH devices. Click OK only if both codes match. Permission is saved for this device and can be revoked in the network menu.");
-    format!(
-        "{} {intro}\n\nID: {}\n{}\n\nCode: {}\n\n{scope}\n\n{disclosure}",
-        request.peer.name,
-        request.peer.id,
-        request.peer.address.ip(),
-        request.code
-    )
-}
-
 /// The normal application-scoped Windows firewall prompt can be dismissed
 /// accidentally. This explicit menu action installs private-LAN-only rules
 /// via UAC, with executable paths passed as argv data to a fixed script.
@@ -440,6 +484,110 @@ exit $p.ExitCode
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn test_network(enabled: bool) -> (tempfile::TempDir, Network, mpsc::Receiver<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let network = Network::with_identity(
+            Identity::load_or_create(dir.path()).unwrap(),
+            enabled,
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(move |event| {
+                let _ = tx.send(event);
+            }),
+        );
+        (dir, network, rx)
+    }
+
+    fn event(rx: &mpsc::Receiver<Event>) -> Event {
+        rx.recv_timeout(Duration::from_secs(3)).unwrap()
+    }
+
+    #[test]
+    fn inline_pairing_cancels_denies_and_repairs_only_on_connect() {
+        let (_host_dir, host, host_events) = test_network(true);
+        let (_client_dir, mut client, client_events) = test_network(false);
+        let peer = Peer {
+            id: host.identity.id(),
+            name: host.identity.name(),
+            address: host.server.as_ref().unwrap().local_addr(),
+        };
+        for generation in 1..=5 {
+            client.connect(peer.clone(), generation);
+            let Event::PairingCode {
+                generation: seen,
+                request: sas,
+            } = event(&client_events)
+            else {
+                panic!("client should show the code inline")
+            };
+            assert_eq!(seen, generation);
+            assert_eq!(sas.peer.id, peer.id);
+            let Event::Approval {
+                id,
+                active,
+                request,
+                reply,
+                ..
+            } = event(&host_events)
+            else {
+                panic!("host must receive an explicit approval")
+            };
+            assert_eq!(request.peer.id, client.identity.id());
+            assert_eq!(request.code, sas.code);
+            assert!(active.is_active());
+            if generation == 1 {
+                client.cancel_connect();
+            } else {
+                reply.send(generation != 2).unwrap();
+            }
+            let Event::ApprovalEnded { id: ended } = event(&host_events) else {
+                panic!("host request should close")
+            };
+            assert_eq!(id, ended);
+            let Event::Connected {
+                generation: finished,
+                result,
+            } = event(&client_events)
+            else {
+                panic!("expected connection result")
+            };
+            assert_eq!(finished, generation);
+            match generation {
+                1 | 2 => {
+                    if generation == 1 {
+                        assert!(!active.is_active());
+                        assert!(reply.send(true).is_err(), "late approval accepted");
+                    }
+                    assert!(result.is_err());
+                    assert!(host.server.as_ref().unwrap().clients().is_empty());
+                    assert!(Client::resume(client.identity.clone(), &peer).is_err());
+                }
+                3 => {
+                    // Even a completed network callback queued on the UI thread
+                    // cannot persist a pin once the selection has changed.
+                    client.cancel_connect();
+                    assert!(result.unwrap().1.finish().is_err());
+                    assert!(Client::resume(client.identity.clone(), &peer).is_err());
+                }
+                4 => {
+                    result.unwrap().1.finish().unwrap();
+                    let saved = Client::resume(client.identity.clone(), &peer).unwrap();
+                    saved.probe().unwrap();
+                    host.revoke_all().unwrap();
+                    assert!(saved.probe().is_err());
+                    assert!(host_events.try_recv().is_err());
+                }
+                _ => {
+                    result.unwrap().1.finish().unwrap();
+                    Client::resume(client.identity.clone(), &peer)
+                        .unwrap()
+                        .probe()
+                        .unwrap();
+                }
+            }
+        }
+    }
 
     #[test]
     fn saved_destination_recovers_after_host_restart_without_approval_or_audio() {
@@ -562,7 +710,7 @@ mod tests {
         let identity = Identity::load_or_create(dir.path()).unwrap();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let (tx, rx) = mpsc::channel();
-        let network = Network::with_identity(
+        let mut network = Network::with_identity(
             identity,
             true,
             occupied.local_addr().unwrap(),
@@ -596,9 +744,10 @@ mod tests {
         );
         loop {
             match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
-                Event::Approval { reply, .. } => reply.send(true).unwrap(),
+                Event::PairingCode { generation: 1, .. } => {}
                 Event::Connected { result, .. } => {
-                    let (_, backend) = result.unwrap();
+                    let (_, pending) = result.unwrap();
+                    let backend = pending.finish().unwrap();
                     assert_eq!(
                         backend
                             .transcribe(&[0.1], &TranscribeOptions::accurate())

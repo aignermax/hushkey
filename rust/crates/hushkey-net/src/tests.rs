@@ -34,6 +34,68 @@ fn empty() -> Compute {
 }
 
 #[test]
+fn cancellation_while_host_consent_is_pending_leaves_both_trust_stores_empty() {
+    let (_hd, hi) = identity();
+    let (_cd, ci) = identity();
+    let (entered, prompt) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let blocked = Mutex::new(blocked);
+    let server = Server::start_with_approval_status(
+        hi.clone(),
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(move |_, active| {
+            entered.send(active).unwrap();
+            blocked
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            true
+        }),
+        empty(),
+    )
+    .unwrap();
+    let p = peer(&hi, &server);
+    let cancelled = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let connect = scope.spawn(|| {
+            Client::prepare_connect(ci.clone(), &p, yes(), &|| cancelled.load(Ordering::Acquire))
+        });
+        let active = prompt.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(active.is_active());
+        cancelled.store(true, Ordering::Release);
+        assert!(connect.join().unwrap().is_err());
+        let until = Instant::now() + Duration::from_secs(2);
+        while active.is_active() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !active.is_active(),
+            "server kept the withdrawn request live"
+        );
+        release.send(()).unwrap();
+    });
+    drop(server);
+    assert!(!hi
+        .authorized(identity::Role::ComputeGrant, &ci.id(), hi.epoch().unwrap())
+        .unwrap());
+    assert!(Client::resume(ci, &p).is_err());
+}
+
+#[test]
+fn delayed_ui_completion_cannot_reinstate_a_revoked_pin() {
+    let (_hd, hi) = identity();
+    let (_cd, ci) = identity();
+    let server = host(hi.clone(), yes(), empty());
+    let p = peer(&hi, &server);
+    let pending = Client::prepare_connect(ci.clone(), &p, yes(), &|| false).unwrap();
+    assert!(Client::resume(ci.clone(), &p).is_err());
+    ci.clear_trust().unwrap();
+    assert!(pending.finish().is_err());
+    assert!(Client::resume(ci, &p).is_err());
+}
+
+#[test]
 fn authenticated_probes_track_concurrent_clients_across_disconnects() {
     let (_hd, hi) = identity();
     let (_ad, ai) = identity();

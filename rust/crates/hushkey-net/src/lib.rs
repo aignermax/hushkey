@@ -5,12 +5,12 @@ mod discovery;
 mod identity;
 mod server;
 mod wire;
-pub use client::{Client, PROBE_UNSUPPORTED};
+pub use client::{Client, PendingClient, PROBE_UNSUPPORTED};
 pub use discovery::discover;
 use hushkey_core::{TranscribeOptions, Transcript};
 pub use identity::Identity;
 use serde::{Deserialize, Serialize};
-pub use server::Server;
+pub use server::{ApprovalActive, HostApprove, Server};
 use std::{
     net::SocketAddr,
     sync::{

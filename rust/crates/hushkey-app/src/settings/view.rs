@@ -82,6 +82,8 @@ impl Page {
 pub(super) struct View {
     page: Page,
     host_tab: bool,
+    host_request: Option<u64>,
+    client_request: Option<u64>,
     logo: Option<TextureHandle>,
     dark: Option<bool>,
 }
@@ -106,6 +108,23 @@ impl View {
             // egui activates newly registered font families at the next pass.
             ctx.request_repaint();
             return Vec::new();
+        }
+        let host_request = state.host.pending.as_ref().map(|pair| pair.id);
+        let client_request = state.client.pairing.as_ref().map(|pair| pair.id);
+        let incoming = host_request.is_some() && self.host_request != host_request;
+        let outgoing = client_request.is_some() && self.client_request != client_request;
+        self.host_request = host_request;
+        self.client_request = client_request;
+        let reveal_pairing = incoming || outgoing;
+        if reveal_pairing {
+            self.page = Page::Connections;
+            self.host_tab = incoming;
+            if incoming {
+                // Windows may keep another application in the foreground.
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
         }
         let mut intents = Vec::new();
         let mut show_update = false;
@@ -300,6 +319,7 @@ impl View {
                                         lang,
                                         state,
                                         &mut self.host_tab,
+                                        reveal_pairing,
                                         &mut intents,
                                     ),
                                     Page::Dictation => {

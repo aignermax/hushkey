@@ -1,8 +1,6 @@
 use super::{autostart, network, Action, App, Duration, Instant, Mode};
 use crate::config::AUTO_MODEL;
-use crate::settings::{
-    selected_peer, Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot,
-};
+use crate::settings::{Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot};
 use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
 use hushkey_net::Server;
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -75,21 +73,10 @@ impl App {
         let action = match intent {
             Intent::Discover => return self.find_servers(true),
             Intent::Probe => return self.begin_check(),
-            Intent::Connect(id) => {
-                if let Some(peer) =
-                    selected_peer(&id, &self.connections.peers, self.config.remote.as_ref())
-                        .cloned()
-                {
-                    self.connect_remote(peer);
-                } else {
-                    self.failure_notice(network::words(
-                        self.s,
-                        "Dieses Gerät ist nicht mehr in der Liste. Bitte erneut suchen.",
-                        "This device is no longer listed. Search again.",
-                    ));
-                }
-                return;
-            }
+            Intent::DecidePairing { id, allow } => return self.decide_pairing(id, allow),
+            Intent::CancelPairing(id) => return self.cancel_pairing(id),
+            Intent::WindowClosed => return self.dismiss_pairings(),
+            Intent::Connect(peer) => return self.connect_remote(peer),
             Intent::Local => Action::NetworkLocal,
             Intent::Server(on) if on != self.config.server_enabled => Action::NetworkServer,
             Intent::Revoke => Action::NetworkRevoke,
@@ -160,17 +147,6 @@ impl App {
     fn settings_snapshot(&self) -> Snapshot {
         let net = self.network.as_ref();
         let server = net.and_then(|n| n.server.as_ref()).filter(|s| s.alive());
-        let request = self
-            .deferred_approval
-            .as_ref()
-            .filter(|(_, _, expiry)| *expiry > Instant::now())
-            .map(|(req, _, _)| &req.peer)
-            .or_else(|| {
-                self.connections
-                    .request
-                    .as_ref()
-                    .filter(|_| self.dialogs.iter().any(|(host, d)| *host && !d.done()))
-            });
         let mut peers = self.connections.peers.clone();
         if let Some(saved) = &self.config.remote {
             if !peers.iter().any(|p| p.id == saved.id) {
@@ -204,6 +180,7 @@ impl App {
                 theme: self.config.theme,
             },
             host: Host {
+                device_id: net.map(|n| n.identity.id()),
                 name: net.map(|n| n.identity.name()).unwrap_or_else(|| {
                     network::words(self.s, "Dieser Rechner", "This computer").into()
                 }),
@@ -211,10 +188,16 @@ impl App {
                 listening: server.is_some(),
                 model_ready: self.engine.is_some(),
                 clients: server.map(Server::clients).unwrap_or_default(),
-                pending: request.cloned(),
+                pending: self
+                    .connections
+                    .incoming
+                    .as_ref()
+                    .filter(|pending| pending.shown && pending.live())
+                    .map(|pending| pending.pairing.clone()),
                 error: self.connections.host_error.clone(),
             },
             client: Client {
+                pairing: self.connecting.clone(),
                 selected: self.config.remote.clone(),
                 peers,
                 link: self.connections.link,
@@ -222,7 +205,10 @@ impl App {
                 searching: self.discovering,
                 search_status: self.connections.search_status.clone(),
                 detail: self.connections.client_status.clone(),
-                can_retry: self.has_failed() && !self.busy && !self.connecting && !self.revoking,
+                can_retry: self.has_failed()
+                    && !self.busy
+                    && self.connecting.is_none()
+                    && self.revoke_dialog.is_none(),
             },
             feedback: self
                 .settings
@@ -269,8 +255,10 @@ impl App {
             self.s.transcribing
         } else if self.has_failed() {
             w("Diktat wartet", "Dictation needs attention")
-        } else if self.connecting {
+        } else if self.connecting.is_some() {
             w("Verbindet …", "Connecting …")
+        } else if self.config.remote.is_some() && self.connections.link == Link::Waiting {
+            w("Datentest steht aus", "Awaiting data test")
         } else if self.config.remote.is_some()
             && matches!(self.connections.link, Link::Offline | Link::Revoked)
         {

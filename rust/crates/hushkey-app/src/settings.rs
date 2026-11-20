@@ -42,18 +42,27 @@ pub(crate) struct Preferences {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Pairing {
+    pub id: u64,
+    pub peer: Peer,
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Host {
     pub name: String,
+    pub device_id: Option<String>,
     pub enabled: bool,
     pub listening: bool,
     pub model_ready: bool,
     pub error: Option<String>,
     pub clients: Vec<Peer>,
-    pub pending: Option<Peer>,
+    pub pending: Option<Pairing>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Client {
+    pub pairing: Option<Pairing>,
     pub selected: Option<Peer>,
     pub peers: Vec<Peer>,
     pub link: Link,
@@ -67,7 +76,10 @@ pub(crate) struct Client {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) enum Intent {
     Discover,
-    Connect(String),
+    Connect(Peer),
+    DecidePairing { id: u64, allow: bool },
+    CancelPairing(u64),
+    WindowClosed,
     Probe,
     Local,
     Server(bool),
@@ -106,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_click_follows_identity_across_refresh_and_cannot_pick_a_namesake() {
+    fn lookup_prefers_current_discovery_over_saved_addresses_and_rejects_namesakes() {
         let saved = Peer {
             name: "Studio".into(),
             id: "a".repeat(64),

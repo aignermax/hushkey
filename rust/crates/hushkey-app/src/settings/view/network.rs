@@ -6,6 +6,7 @@ use hushkey_net::Peer;
 use super::graphics::{diagram, icon, Icon};
 use super::style::{bold, text, Palette};
 use super::{Intent, Link, Locale, Snapshot};
+use crate::settings::Pairing;
 
 pub(super) fn show(
     ui: &mut Ui,
@@ -13,6 +14,7 @@ pub(super) fn show(
     lang: Locale,
     state: &Snapshot,
     host_tab: &mut bool,
+    reveal_pairing: bool,
     intents: &mut Vec<Intent>,
 ) {
     ui.horizontal(|ui| {
@@ -50,11 +52,100 @@ pub(super) fn show(
             });
     });
     ui.add_space(12.);
+    let pairing = if *host_tab {
+        state.host.pending.as_ref()
+    } else {
+        state.client.pairing.as_ref()
+    };
+    if let Some(pairing) = pairing {
+        let card = ui.push_id(("pairing", *host_tab, pairing.id), |ui| {
+            pairing_card(ui, p, lang, pairing, *host_tab, intents);
+        });
+        if reveal_pairing {
+            ui.scroll_to_rect_animation(
+                card.response.rect,
+                None,
+                egui::style::ScrollAnimation::none(),
+            );
+        }
+        ui.add_space(12.);
+    }
     if *host_tab {
         host(ui, p, lang, state, intents);
     } else {
         client(ui, p, lang, state, intents);
     }
+}
+
+fn privacy(ui: &mut Ui, p: Palette, lang: Locale) {
+    let response =
+        ui.add(Button::new(bold(lang.t("Datenschutz", "Privacy"), 13., p.blue)).frame(false));
+    let notice = lang.t(
+        "Beim Diktieren sendet hushkey deine Sprachaufnahme verschlüsselt an den gewählten Host. Dort wird sie verarbeitet. Verbinde dich nur mit einem Host, dem du vertraust. Prüfe seine Geräte-ID und vergleiche den Code auf beiden Geräten.",
+        "When you dictate, hushkey sends your encrypted audio to the selected host for processing. Connect only to a host you trust. Check its device ID and compare the code on both devices.",
+    );
+    if response.has_focus() || response.hovered() {
+        response.show_tooltip_text(notice);
+    }
+}
+
+fn pairing_card(
+    ui: &mut Ui,
+    p: Palette,
+    lang: Locale,
+    pair: &Pairing,
+    hosting: bool,
+    intents: &mut Vec<Intent>,
+) {
+    let title = if hosting {
+        format!(
+            "{} {}",
+            pair.peer.name,
+            lang.t("möchte sich verbinden", "wants to connect")
+        )
+    } else if lang.0 {
+        format!("Warten auf Freigabe durch {}", pair.peer.name)
+    } else {
+        format!("Waiting for approval from {}", pair.peer.name)
+    };
+    Frame::new()
+        .fill(p.soft)
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(15, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(bold(&title, 16., p.ink));
+            if !pair.code.is_empty() {
+                ui.label(egui::RichText::new(&pair.code).monospace().size(24.).color(p.ink));
+                ui.label(text(if hosting {
+                    lang.t(
+                        "Vergleiche den Code mit dem auf dem Client. Stimmen beide überein, kannst du Diktate von diesem Gerät zulassen.",
+                        "Compare this code with the client’s code. If they match, you can allow dictation from this device.",
+                    )
+                } else {
+                    lang.t(
+                        "Vergleiche den Code mit dem auf dem Host. Dort wird die Verbindung freigegeben.",
+                        "Compare this code with the one on the host. The host approves the connection.",
+                    )
+                }, 13., p.ink));
+            }
+            ui.add_space(3.);
+            ui.horizontal_wrapped(|ui| {
+                if hosting {
+                    if p.action(ui, lang.t("Freigeben", "Allow"), true, !pair.code.is_empty()) {
+                        intents.push(Intent::DecidePairing { id: pair.id, allow: true });
+                    }
+                    if p.action(ui, lang.t("Ablehnen", "Deny"), false, true) {
+                        intents.push(Intent::DecidePairing { id: pair.id, allow: false });
+                    }
+                } else {
+                    if p.action(ui, lang.t("Abbrechen", "Cancel"), false, true) {
+                        intents.push(Intent::CancelPairing(pair.id));
+                    }
+                    privacy(ui, p, lang);
+                }
+            });
+        });
 }
 
 fn empty(ui: &mut Ui, p: Palette, message: &str) {
@@ -109,14 +200,20 @@ fn device(ui: &mut Ui, p: Palette, glyph: Icon, title: &str, sub: &str, end: imp
 }
 
 fn peer_row(ui: &mut Ui, p: Palette, glyph: Icon, peer: &Peer, end: impl FnOnce(&mut Ui)) {
-    ui.push_id(&peer.id, |ui| {
-        let id: String = peer.id.chars().take(12).collect();
+    ui.push_id((&peer.id, &peer.name, peer.address), |ui| {
         let address = if matches!(glyph, Icon::Laptop) {
             peer.address.ip().to_string()
         } else {
             peer.address.to_string()
         };
-        device(ui, p, glyph, &peer.name, &format!("{address} · {id}"), end)
+        device(
+            ui,
+            p,
+            glyph,
+            &peer.name,
+            &format!("{address} · {}", peer.id),
+            end,
+        )
     });
 }
 
@@ -209,6 +306,9 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
             17.,
             p.ink,
         ));
+        if client.pairing.is_none() {
+            privacy(ui, p, lang);
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let label = if client.searching {
                 lang.t("Sucht …", "Searching …")
@@ -257,9 +357,9 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
                     ui,
                     lang.t("Verbinden", "Connect"),
                     false,
-                    !matches!(client.link, Link::Connecting),
+                    client.pairing.is_none() && !matches!(client.link, Link::Connecting),
                 ) {
-                    intents.push(Intent::Connect(peer.id.clone()));
+                    intents.push(Intent::Connect(peer.clone()));
                 }
             });
         }
@@ -334,21 +434,13 @@ fn host(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut V
             }
         });
     });
-    if let Some(peer) = &host.pending {
-        p.group(ui, lang.t("Freigabeanfrage", "Pairing request"));
-        Frame::new()
-            .fill(p.soft)
-            .corner_radius(10)
-            .inner_margin(Margin::symmetric(15, 12))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(bold(&peer.name, 14., p.ink));
-                let instructions = lang.t(
-                    "Vergleiche den Code auf beiden Geräten. Im Freigabedialog kannst du die Anfrage bestätigen oder ablehnen.",
-                    "Compare the code on both devices. Accept or decline the request in the pairing dialog.",
-                );
-                ui.label(text(instructions, 13., p.ink));
-            });
+    if let Some(id) = &host.device_id {
+        ui.add_space(4.);
+        ui.label(text(
+            &format!("{} · {id}", lang.t("Geräte-ID", "Device ID")),
+            12.,
+            p.muted,
+        ));
     }
     p.group(
         ui,

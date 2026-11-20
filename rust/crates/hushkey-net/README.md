@@ -6,9 +6,11 @@ static public key, never the name or address. Protocol v2 is bound into the
 Noise prologue. No plaintext transport or downgrade exists.
 
 The UI owns consent wording and must explain that the host sees audio and
-text in memory. Both approval callbacks must return true on first pairing;
-the client callback must compare the displayed eight decimal digits with the
-host. Discovery alone never grants trust. Callbacks run off network threads.
+text in memory. Both approval callbacks must return true on first pairing.
+The desktop client's explicit Connect action authorizes the selected identity
+for one attempt. The client shows the eight-digit code from its authenticated
+session so the host operator can compare it before accepting. Discovery alone
+never grants trust. Callbacks run off network threads.
 
 ## Resource contract
 
@@ -26,6 +28,14 @@ Selecting a server never grants it reverse compute access. Both roles require
 their own consent. Requests are never retried internally: a lost reply is an error
 and caller-side insertion must happen only once after a successful return.
 Cancellation closes the connection and discards any eventual result.
+
+`Client::prepare_connect` supports a cancellable selection in a UI. It
+returns a pending client after the host approves. The UI calls `finish` only
+if that selection is still current. Dropping the pending client does not pin
+the host. The host records its grant after receiving the client's encrypted
+approval and before sending Ready, as in the original v2 exchange.
+`Server::start_with_approval_status` gives the host UI a request-specific
+liveness handle so it can dismiss an expired or withdrawn request.
 
 `Client::resume` restores a locally pinned host at a saved or rediscovered
 address. `Client::probe` verifies its Noise identity, then times an encrypted

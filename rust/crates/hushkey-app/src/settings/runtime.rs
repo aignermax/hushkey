@@ -108,14 +108,18 @@ impl Session {
         })
     }
 
-    fn focus(&mut self) {
+    fn focus(&mut self, reopen_if_closing: bool) {
         #[cfg(windows)]
         unsafe {
-            // The tray menu received the user gesture. Let its window process
-            // activate itself when it receives Focus below.
+            // Transfer foreground permission when the tray has it, before
+            // even a newly launched settings process attempts activation.
             windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(self.child.id());
         }
-        self.focus_requested += 1;
+        // An initial launch is itself the open request. A close before that
+        // first focus frame should close this window, without relaunching.
+        if reopen_if_closing {
+            self.focus_requested += 1;
+        }
         self.pending.lock().unwrap().focus = Some(self.focus_requested);
         let _ = self.wake.try_send(());
     }
@@ -133,6 +137,7 @@ pub(crate) struct SettingsWindow {
     session: Option<Session>,
     actions: Vec<Intent>,
     error: Option<String>,
+    closed: bool,
 }
 
 impl SettingsWindow {
@@ -141,13 +146,37 @@ impl SettingsWindow {
             session: None,
             actions: Vec::new(),
             error: None,
+            closed: false,
         }
     }
 
     fn start(&mut self) {
         match Session::start() {
-            Ok(session) => self.session = Some(session),
-            Err(error) => self.error = Some(error.to_string()),
+            Ok(mut session) => {
+                session.focus(false);
+                self.session = Some(session);
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                self.closed = true;
+            }
+        }
+    }
+
+    fn record_close(&mut self) {
+        self.closed = true;
+        // A new window can open before the tray drains its actions. In that
+        // case, dismiss only requests that belonged to the closing session.
+        if let Some(state) = self.session.as_ref().and_then(|s| s.last.as_ref()) {
+            if let Some(pair) = &state.host.pending {
+                self.actions.push(Intent::DecidePairing {
+                    id: pair.id,
+                    allow: false,
+                });
+            }
+            if let Some(pair) = &state.client.pairing {
+                self.actions.push(Intent::CancelPairing(pair.id));
+            }
         }
     }
 
@@ -161,6 +190,7 @@ impl SettingsWindow {
                 Ok(Reply::Focused(id)) => session.focus_confirmed = id,
                 Ok(Reply::Failed(error)) => {
                     self.error = Some(error);
+                    self.record_close();
                     self.stop();
                     return;
                 }
@@ -174,6 +204,9 @@ impl SettingsWindow {
         match session.child.try_wait() {
             Ok(None) => return, // stdout closed just before process exit
             Ok(Some(status)) => {
+                if !status.success() || !reopen {
+                    self.record_close();
+                }
                 self.session = None;
                 if !status.success() {
                     self.error = Some(format!("window process exited with {status}"));
@@ -181,6 +214,7 @@ impl SettingsWindow {
                 }
             }
             Err(error) => {
+                self.record_close();
                 self.stop();
                 self.error = Some(error.to_string());
                 return;
@@ -206,7 +240,7 @@ impl SettingsWindow {
     pub(crate) fn show(&mut self) {
         self.poll();
         if let Some(session) = &mut self.session {
-            session.focus();
+            session.focus(true);
         } else {
             self.start();
         }
@@ -225,6 +259,10 @@ impl SettingsWindow {
 
     pub(crate) fn actions(&mut self) -> Vec<Intent> {
         self.poll();
+        if std::mem::take(&mut self.closed) && self.session.is_none() {
+            // This also covers closing the window before its first snapshot.
+            self.actions.push(Intent::WindowClosed);
+        }
         std::mem::take(&mut self.actions)
     }
 

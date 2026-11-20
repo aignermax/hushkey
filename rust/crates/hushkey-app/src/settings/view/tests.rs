@@ -23,6 +23,7 @@ struct Window {
     view: View,
     bounds: Rect,
     labels: Vec<(String, Rect)>,
+    attention: bool,
 }
 
 impl Window {
@@ -32,6 +33,7 @@ impl Window {
             view: View::default(),
             bounds: Rect::from_min_size(Pos2::ZERO, vec2(width, height)),
             labels: Vec::new(),
+            attention: false,
         };
         window.ctx.style_mut(|s| {
             s.animation_time = 0.;
@@ -52,6 +54,10 @@ impl Window {
         let output = self
             .ctx
             .run(input, |ctx| actions = self.view.render(ctx, state));
+        self.attention = output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, egui::ViewportCommand::RequestUserAttention(_)));
         self.labels = output
             .shapes
             .iter()
@@ -105,6 +111,120 @@ impl Window {
             );
         }
     }
+}
+
+fn pairing(id: u64) -> crate::settings::Pairing {
+    crate::settings::Pairing {
+        id,
+        peer: hushkey_net::Peer {
+            id: "a".repeat(64),
+            name: "Studio".into(),
+            address: "127.0.0.1:5000".parse().unwrap(),
+        },
+        code: "00123456".into(),
+    }
+}
+
+#[test]
+fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_request() {
+    let mut state = snapshot();
+    let mut window = Window::new(1000., 680., &state);
+    window.click(&state, "General");
+    state.host.pending = Some(pairing(11));
+    assert!(window.frame(&state, vec![]).is_empty());
+    assert!(window.attention);
+    window.label("Studio wants to connect");
+    window.label("00123456");
+    window.frame(&state, vec![]);
+    assert!(!window.attention);
+    window.click(&state, "General");
+    window.frame(&state, vec![]);
+    window.label("Check for updates");
+    state.host.pending = Some(pairing(12));
+    assert!(window.frame(&state, vec![]).is_empty());
+    let pos = window.label("Allow").center();
+    let button = |pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    window.frame(&state, vec![Event::PointerMoved(pos), button(true)]);
+    state.host.pending = Some(pairing(13));
+    assert!(window.frame(&state, vec![button(false)]).is_empty());
+    assert_eq!(
+        window.click(&state, "Allow"),
+        vec![Intent::DecidePairing {
+            id: 13,
+            allow: true
+        }]
+    );
+    assert_eq!(
+        window.click(&state, "Deny"),
+        vec![Intent::DecidePairing {
+            id: 13,
+            allow: false
+        }]
+    );
+}
+
+#[test]
+fn pending_host_request_reopens_at_the_card_on_a_small_german_window() {
+    let mut state = snapshot();
+    state.german = true;
+    state.client.selected = Some(pairing(0).peer);
+    state.host.pending = Some(pairing(14));
+    let mut window = Window::new(440., 360., &state);
+    window.frame(&state, vec![]);
+    for label in [
+        "Studio möchte sich verbinden",
+        "00123456",
+        "Freigeben",
+        "Ablehnen",
+    ] {
+        assert!(window.bounds.contains_rect(window.label(label)), "{label}");
+    }
+    assert_eq!(
+        window.click(&state, "Ablehnen"),
+        vec![Intent::DecidePairing {
+            id: 14,
+            allow: false
+        }]
+    );
+}
+
+#[test]
+fn one_connect_selects_the_exact_host_and_the_waiting_card_allows_cancel() {
+    let mut state = snapshot();
+    let mut pair = pairing(15);
+    state.client.peers.push(pair.peer.clone());
+    let mut window = Window::new(1000., 680., &state);
+    assert_eq!(
+        window.click(&state, "Connect"),
+        vec![Intent::Connect(pair.peer.clone())]
+    );
+    pair.code.clear();
+    state.client.pairing = Some(pair);
+    state.client.link = Link::Connecting;
+    assert!(window.frame(&state, vec![]).is_empty());
+    window.label("Waiting for approval from Studio");
+    state.client.pairing.as_mut().unwrap().code = "00123456".into();
+    window.frame(&state, vec![]);
+    window.label("00123456");
+    assert!(window.labels.iter().all(|(label, _)| label != "Allow"));
+    let privacy = window.label("Privacy").center();
+    window.frame(&state, vec![Event::PointerMoved(privacy)]);
+    window.frame(&state, vec![]);
+    assert!(window
+        .labels
+        .iter()
+        .any(|(label, _)| label.contains("encrypted audio")));
+    window.frame(&state, vec![Event::PointerGone]);
+    window.frame(&state, vec![]);
+    assert_eq!(
+        window.click(&state, "Cancel"),
+        vec![Intent::CancelPairing(15)]
+    );
 }
 
 #[test]
