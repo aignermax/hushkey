@@ -27,13 +27,34 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Updates {
-    /// Releases; pre-releases too while running one.
+    /// Check automatically for stable releases.
     #[default]
     Auto,
     /// Pre-releases too.
     Pre,
-    /// No checks.
+    /// Check for stable releases on request.
     Off,
+    /// Check for stable releases and previews on request.
+    ManualPre,
+}
+
+impl Updates {
+    pub fn automatic(self) -> bool {
+        matches!(self, Self::Auto | Self::Pre)
+    }
+
+    pub fn includes_previews(self) -> bool {
+        matches!(self, Self::Pre | Self::ManualPre)
+    }
+
+    pub fn from_options(automatic: bool, previews: bool) -> Self {
+        match (automatic, previews) {
+            (true, false) => Self::Auto,
+            (true, true) => Self::Pre,
+            (false, false) => Self::Off,
+            (false, true) => Self::ManualPre,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +283,25 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_channels_preserve_existing_settings_and_manual_preferences() {
+        assert_eq!(Config::parse("{}").unwrap().updates, Updates::Auto);
+        for (value, automatic, previews) in [
+            ("auto", true, false),
+            ("off", false, false),
+            ("pre", true, true),
+            ("manual_pre", false, true),
+        ] {
+            let policy = Config::parse(&format!(r#"{{"updates":"{value}"}}"#))
+                .unwrap()
+                .updates;
+            assert_eq!(policy.automatic(), automatic);
+            assert_eq!(policy.includes_previews(), previews);
+            assert_eq!(Updates::from_options(automatic, previews), policy);
+            assert_eq!(serde_json::to_value(policy).unwrap(), value);
+        }
+    }
 
     #[test]
     fn old_settings_keep_local_computation_and_offer_a_consent_gated_server() {

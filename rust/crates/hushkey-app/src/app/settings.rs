@@ -110,7 +110,43 @@ impl App {
             Intent::RestoreClipboard(on) => Action::RestoreClipboard(on),
             Intent::Listen(on) if on != (self.config.mode == Mode::Listen) => Action::Listen,
             Intent::Autostart(on) if on != autostart::enabled() => Action::Autostart,
-            Intent::Updates(policy) => Action::Updates(policy),
+            Intent::AutoUpdates(on) => Action::Updates(crate::config::Updates::from_options(
+                on,
+                self.config.updates.includes_previews(),
+            )),
+            Intent::IncludePrereleases(on) => Action::Updates(
+                crate::config::Updates::from_options(self.config.updates.automatic(), on),
+            ),
+            Intent::CheckUpdate => return self.check_update(true),
+            Intent::InstallUpdate(version) => return self.install_offered_update(&version),
+            Intent::CopyDictation(text) => {
+                // A dictation may have completed while this click was in transit.
+                // Never copy the new occupant of an old row.
+                match self
+                    .history
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.text == text)
+                {
+                    Some(index) => Action::Copy(index),
+                    None => {
+                        return self.failure_notice(network::words(
+                            self.s,
+                            "Dieses Diktat ist nicht mehr im Verlauf.",
+                            "This dictation is no longer in your history.",
+                        ))
+                    }
+                }
+            }
+            Intent::UseGpu(on) => {
+                if self.config.use_gpu != on && self.config.remote.is_none() && self.can_switch() {
+                    self.stop_listening(true);
+                    self.config.use_gpu = on;
+                    self.save(|c| c.use_gpu = on);
+                    self.load_engine();
+                }
+                return;
+            }
             Intent::Theme(theme) => Action::Theme(theme),
             Intent::OpenLogs => Action::OpenLogs,
             // Repeated "set" requests must not flip a checkbox back.
@@ -144,6 +180,14 @@ impl App {
             version: env!("CARGO_PKG_VERSION").into(),
             build: running_build(),
             ready: self.dictation_status().into(),
+            update: self.update_status(),
+            history: self
+                .history
+                .entries()
+                .iter()
+                .map(|entry| entry.text.clone())
+                .collect(),
+            acceleration: self.acceleration_label(),
             preferences: Preferences {
                 key: self.config.key.clone(),
                 language: self.config.language.clone(),
@@ -152,7 +196,9 @@ impl App {
                 restore_clipboard: self.config.restore_clipboard,
                 listening: self.config.mode == Mode::Listen,
                 autostart: autostart::enabled(),
-                updates: self.config.updates,
+                auto_updates: self.config.updates.automatic(),
+                include_prereleases: self.config.updates.includes_previews(),
+                use_gpu: self.config.use_gpu,
                 theme: self.config.theme,
             },
             host: Host {
@@ -182,6 +228,36 @@ impl App {
                 .as_ref()
                 .filter(|(t, _)| t.elapsed() < Duration::from_secs(12))
                 .map(|(_, s)| s.clone()),
+        }
+    }
+
+    fn acceleration_label(&self) -> String {
+        use hushkey_core::Acceleration;
+        let w = |de, en| network::words(self.s, de, en);
+        if let Some(peer) = &self.config.remote {
+            return format!("{} · {}", w("Erkennung auf", "Recognition on"), peer.name);
+        }
+        let Some(engine) = &self.engine else {
+            return w("Modell nicht bereit", "Model not ready").into();
+        };
+        match engine.acceleration() {
+            Acceleration::Gpu { backend, device } if !device.is_empty() && device != backend => {
+                format!("{device} · {backend}")
+            }
+            Acceleration::Gpu { backend, .. } => backend.clone(),
+            Acceleration::Cpu => "CPU".into(),
+            Acceleration::CpuFallback => {
+                w("CPU · GPU nicht verfügbar", "CPU · GPU unavailable").into()
+            }
+            Acceleration::QuantizedCpu => {
+                w("CPU · quantisiertes Modell", "CPU · quantized model").into()
+            }
+            Acceleration::CpuBuild => w(
+                "CPU · Programm ohne GPU-Unterstützung",
+                "CPU · CPU-only build",
+            )
+            .into(),
+            Acceleration::Unknown => w("Gerät nicht ermittelt", "Device undetermined").into(),
         }
     }
 

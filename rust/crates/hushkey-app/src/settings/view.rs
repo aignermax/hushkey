@@ -4,13 +4,15 @@ mod graphics;
 mod network;
 mod preferences;
 mod style;
+#[cfg(test)]
+mod tests;
 
 use eframe::egui::{
     self, vec2, Align, Align2, CentralPanel, Color32, Context, FontId, Frame, Layout, Margin,
     ScrollArea, Sense, SidePanel, TextureHandle, TopBottomPanel, Ui, WidgetInfo, WidgetType,
 };
 
-use super::{Intent, Link, Snapshot};
+use super::{Intent, Link, Snapshot, UpdateStatus};
 use crate::{
     config::Theme,
     strings::{DE, EN},
@@ -38,6 +40,7 @@ impl Locale {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum Page {
     Dictation,
+    History,
     #[default]
     Connections,
     General,
@@ -47,6 +50,7 @@ impl Page {
     fn title(self, lang: Locale) -> &'static str {
         match self {
             Self::Dictation => lang.t("Diktat", "Dictation"),
+            Self::History => lang.t("Letzte Diktate", "Recent dictations"),
             Self::Connections => lang.t("Verbindungen", "Connections"),
             Self::General => lang.t("Allgemein", "General"),
         }
@@ -57,6 +61,10 @@ impl Page {
             Self::Dictation => lang.t(
                 "So nimmst du Sprache auf und fügst Text ein.",
                 "Choose how to record speech and insert text.",
+            ),
+            Self::History => lang.t(
+                "Kopiere ein Diktat erneut in die Zwischenablage.",
+                "Copy a previous dictation to the clipboard.",
             ),
             Self::Connections => lang.t(
                 "Geräte und Freigaben im lokalen Netzwerk.",
@@ -100,6 +108,7 @@ impl View {
             return Vec::new();
         }
         let mut intents = Vec::new();
+        let mut show_update = false;
         let width = ctx.screen_rect().width();
         let compact = width < 630.;
         let header = Frame::new()
@@ -145,6 +154,17 @@ impl View {
                                 Theme::Dark
                             }));
                         }
+                        if matches!(state.update, UpdateStatus::Available { .. })
+                            && p.action(
+                                ui,
+                                lang.t("Update verfügbar", "Update available"),
+                                true,
+                                true,
+                            )
+                        {
+                            self.page = Page::General;
+                            show_update = true;
+                        }
                     });
                 });
                 ui.painter().hline(
@@ -164,7 +184,7 @@ impl View {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         let tab_width =
-                            (ui.available_width() - ui.spacing().item_spacing.x * 2.) / 3.;
+                            (ui.available_width() - ui.spacing().item_spacing.x * 3.) / 4.;
                         self.navigation(ui, lang, p, tab_width, true);
                     });
                 });
@@ -285,9 +305,15 @@ impl View {
                                     Page::Dictation => {
                                         preferences::dictation(ui, p, lang, state, &mut intents)
                                     }
-                                    Page::General => {
-                                        preferences::general(ui, p, lang, state, &mut intents)
-                                    }
+                                    Page::History => history(ui, p, lang, state, &mut intents),
+                                    Page::General => preferences::general(
+                                        ui,
+                                        p,
+                                        lang,
+                                        state,
+                                        &mut intents,
+                                        show_update,
+                                    ),
                                 }
                                 if let Some(message) =
                                     state.feedback.as_deref().filter(|m| !m.is_empty())
@@ -311,15 +337,25 @@ impl View {
     fn navigation(&mut self, ui: &mut Ui, lang: Locale, p: Palette, width: f32, compact: bool) {
         for (page, glyph) in [
             (Page::Dictation, Icon::Mic),
+            (Page::History, Icon::History),
             (Page::Connections, Icon::Network),
             (Page::General, Icon::Gear),
         ] {
             let (rect, response) = ui
                 .allocate_exact_size(vec2(width, if compact { 33. } else { 43. }), Sense::click());
             let selected = page == self.page;
-            let title = page.title(lang);
+            let title = if compact && page == Page::History {
+                lang.t("Verlauf", "History")
+            } else {
+                page.title(lang)
+            };
             response.widget_info(|| {
-                WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, title)
+                WidgetInfo::selected(
+                    WidgetType::SelectableLabel,
+                    true,
+                    selected,
+                    page.title(lang),
+                )
             });
             let fill = if selected {
                 p.soft
@@ -338,15 +374,23 @@ impl View {
             let layout = ui
                 .painter()
                 .layout_no_wrap(title.to_owned(), font.clone(), ink);
+            let show_icon = !compact || width >= 125.;
+            let icon_space = if show_icon { 26. } else { 0. };
             let left = if compact {
-                (rect.center().x - (layout.size().x + 26.) * 0.5).max(rect.left() + 2.)
+                rect.center().x - (layout.size().x + icon_space) * 0.5
             } else {
                 rect.left() + 13.
             };
-            let center = egui::pos2(left + 8., rect.center().y);
-            icon(ui.painter(), center, glyph, ink);
+            if show_icon {
+                icon(
+                    ui.painter(),
+                    egui::pos2(left + 8., rect.center().y),
+                    glyph,
+                    ink,
+                );
+            }
             ui.painter().text(
-                center + vec2(if compact { 16. } else { 20. }, 0.),
+                egui::pos2(left + icon_space, rect.center().y),
                 Align2::LEFT_CENTER,
                 title,
                 font,
@@ -358,4 +402,54 @@ impl View {
             }
         }
     }
+}
+
+fn history(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut Vec<Intent>) {
+    p.card(ui, |ui| {
+        if state.history.is_empty() {
+            Frame::new().inner_margin(16).show(ui, |ui| {
+                ui.label(bold(
+                    lang.t("Noch keine Diktate", "No dictations yet"),
+                    14.,
+                    p.ink,
+                ));
+                ui.add_space(3.);
+                ui.label(text(
+                    lang.t(
+                        "Dein nächstes Diktat erscheint hier.",
+                        "Your next dictation will appear here.",
+                    ),
+                    13.,
+                    p.muted,
+                ));
+            });
+        }
+        for (index, entry) in state.history.iter().enumerate() {
+            if index > 0 {
+                p.divider(ui);
+            }
+            ui.push_id(index, |ui| {
+                Frame::new()
+                    .inner_margin(Margin::symmetric(15, 12))
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            vec2(ui.available_width(), 32.),
+                            Layout::right_to_left(Align::Min),
+                            |ui| {
+                                if p.action(ui, lang.t("Kopieren", "Copy"), false, true) {
+                                    intents.push(Intent::CopyDictation(entry.clone()));
+                                }
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        egui::Label::new(text(entry, 14., p.ink))
+                                            .wrap()
+                                            .selectable(true),
+                                    );
+                                });
+                            },
+                        );
+                    });
+            });
+        }
+    });
 }

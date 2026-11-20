@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hushkey_core::{
-    read_wav_16k, Engine, EngineConfig, Event, RecordConfig, RecordSession, TranscribeOptions,
-    WavReplay,
+    read_wav_16k, Acceleration, Engine, EngineConfig, Event, RecordConfig, RecordSession,
+    TranscribeOptions, WavReplay,
 };
 
 fn fixtures() -> Option<(PathBuf, PathBuf)> {
@@ -36,6 +36,19 @@ fn engine(model: PathBuf) -> Arc<Engine> {
     let mut config = EngineConfig::new(model);
     config.language = Some("en".into());
     Arc::new(Engine::new(config).expect("model loads"))
+}
+
+#[test]
+fn unavailable_gpu_is_reported_as_cpu() {
+    let (model, _) = fixtures_or_skip!();
+    let mut config = EngineConfig::new(model);
+    config.gpu_device = i32::MAX;
+    let engine = Engine::new(config).expect("whisper falls back to CPU");
+    assert!(!engine.on_gpu(), "unavailable GPU reported as active");
+    assert!(matches!(
+        engine.acceleration(),
+        Acceleration::CpuFallback | Acceleration::CpuBuild | Acceleration::QuantizedCpu
+    ));
 }
 
 #[test]

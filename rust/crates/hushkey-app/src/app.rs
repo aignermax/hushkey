@@ -23,7 +23,7 @@ use hushkey_core::{
 use tray_icon::menu::MenuEvent;
 use tray_icon::TrayIconEvent;
 
-use crate::config::{self, Config, Insert, Mode, Updates};
+use crate::config::{self, Config, Insert, Mode};
 use crate::history::History;
 use crate::icon::Badge;
 use crate::log;
@@ -36,6 +36,7 @@ use crate::update::{self, Release};
 
 mod connections;
 mod settings;
+mod updates;
 use crate::network::Link;
 use connections::Connections;
 use settings::Settings;
@@ -94,11 +95,7 @@ enum Msg {
     Listen(u64, Event),
     /// The inserter finished one text.
     Inserted(Result<Restore, String>),
-    UpdateChecked {
-        result: Result<Option<Release>, String>,
-        asked: bool,
-        policy: Updates,
-    },
+    UpdateChecked(u64, Result<Option<Release>, String>),
     /// An update was put in place: the program to start (`None`: the
     /// password dialog was dismissed), or why not.
     UpdateInstalled(Result<Option<std::path::PathBuf>, String>),
@@ -210,8 +207,7 @@ pub fn run(after_update: bool) -> ExitCode {
         notice_until: None,
         guide_since: None,
         guide_away: false,
-        update: None,
-        updating: false,
+        updates: updates::UpdateState::default(),
         removing_old: false,
         quit_requested: false,
         next_update_check: Instant::now() + Duration::from_secs(30),
@@ -329,10 +325,7 @@ struct App {
     /// The welcome has had its time in this run (the hints while recording
     /// and the last word after the first dictation still come).
     guide_away: bool,
-    /// A newer release, offered in the tray.
-    update: Option<Release>,
-    /// An update is being downloaded and put in place.
-    updating: bool,
+    updates: updates::UpdateState,
     /// The Python hushkey's leftovers are being removed.
     removing_old: bool,
     /// The updated program is starting; this one goes.
@@ -591,6 +584,7 @@ impl App {
             self.dialogs.retain(|(_, dialog)| !dialog.done());
             self.poll_settings();
             self.poll_connections();
+            self.restart_after_update();
             if self.recording.is_none()
                 && self.listening.is_none()
                 && !self.busy
@@ -629,10 +623,11 @@ impl App {
             }
             if Instant::now() > self.next_update_check {
                 self.next_update_check = Instant::now() + UPDATE_CHECK;
-                if self.config.updates != Updates::Off {
+                if self.config.updates.automatic() {
                     self.check_update(false);
                 }
             }
+            self.notify_available_update();
             if self
                 .notice_until
                 .is_some_and(|until| Instant::now() > until)
@@ -725,14 +720,14 @@ impl App {
                 let engine = Engine::new(engine)
                     .map(Arc::new)
                     .map_err(|e| e.to_string())?;
+                log::line(&format!(
+                    "Whisper acceleration: {:?}",
+                    engine.acceleration()
+                ));
                 // Only a GPU has pipelines to build; on the CPU this would
                 // just be seconds of work.
                 if engine.on_gpu() {
                     warm_up(&engine);
-                } else if config.use_gpu
-                    && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"))
-                {
-                    log::line("quantized model: it runs on the CPU in this build");
                 }
                 Ok(engine)
             })();
@@ -936,59 +931,8 @@ impl App {
                     self.idle();
                 }
             }
-            Msg::UpdateChecked {
-                result,
-                asked,
-                policy,
-            } if policy == self.config.updates => match result {
-                Ok(release) => {
-                    if let Some(r) = &release {
-                        log::line(&format!("update available: v{}", r.version));
-                    } else if asked {
-                        self.notice(GREY, self.s.up_to_date);
-                    }
-                    let version = release.as_ref().map(|r| r.version.to_string());
-                    self.tray.offer_update(version.as_deref());
-                    self.update = release;
-                }
-                Err(e) => {
-                    log::line(&format!("update check: {e}"));
-                    if asked {
-                        self.notice(GREY, self.s.update_failed);
-                    }
-                }
-            },
-            Msg::UpdateChecked { .. } => {} // The user changed channels during the check.
-            Msg::UpdateInstalled(Ok(None)) => {
-                log::line("update cancelled at the password dialog");
-                self.updating = false;
-                // Replaces "installing the update …", which has no end.
-                self.notice(GREY, self.s.update_cancelled);
-                self.idle();
-            }
-            Msg::UpdateInstalled(Ok(Some(exe))) => {
-                log::line(&format!("update in place, restarting: {}", exe.display()));
-                match platform::setup::launch(&exe, &["--after-update"]) {
-                    Ok(()) => self.quit_requested = true,
-                    Err(e) => {
-                        log::line(&format!("update: could not start it: {e}"));
-                        self.updating = false;
-                        self.notice(GREY, self.s.update_failed);
-                        self.idle();
-                    }
-                }
-            }
-            Msg::UpdateInstalled(Err(e)) => {
-                log::line(&format!("update failed: {e}"));
-                self.updating = false;
-                let text = if e.starts_with(crate::setup::PACKAGE_BUSY) {
-                    self.s.package_busy
-                } else {
-                    self.s.update_failed
-                };
-                self.failure_notice(text);
-                self.idle();
-            }
+            Msg::UpdateChecked(id, result) => self.update_checked(id, result),
+            Msg::UpdateInstalled(result) => self.update_installed(result),
             Msg::OldRemoved(result) => {
                 self.removing_old = false;
                 match result {
@@ -1095,7 +1039,7 @@ impl App {
             && self.listening.is_none()
             && self.recording.is_none()
             && !self.busy
-            && !self.updating
+            && !self.updates.installing()
     }
 
     /// The first steps, for a new install until its first dictation: how
@@ -1131,6 +1075,7 @@ impl App {
             || self.recording.is_some()
             || self.busy
             || self.draining.is_some()
+            || self.updates.installing()
         {
             return;
         }
@@ -1402,19 +1347,29 @@ impl App {
                 self.save(|c| c.theme = theme);
             }
             Action::Updates(policy) => {
-                if self.config.updates != policy {
+                if self.config.updates != policy && !self.updates.installing() {
+                    self.updates.policy_changed(self.config.updates, policy);
                     self.config.updates = policy;
                     self.save(|c| c.updates = policy);
-                    self.update = None;
-                    self.tray.offer_update(None);
+                    self.tray
+                        .offer_update(self.updates.offered_version().as_deref());
                     self.next_update_check = Instant::now();
                 }
             }
             Action::Copy(i) => {
                 if let Some(entry) = self.history.entries().get(i) {
                     match platform::copy(&entry.text) {
-                        Ok(()) => self.notice(GREY, &self.s.copied(None)),
-                        Err(e) => log::line(&format!("copy failed: {e}")),
+                        Ok(()) => {
+                            let text = self.s.copied(None);
+                            self.settings.feedback = Some((Instant::now(), text.clone()));
+                            self.notice(GREY, &text);
+                        }
+                        Err(e) => {
+                            log::line(&format!("copy failed: {e}"));
+                            let label =
+                                network::words(self.s, "Kopieren fehlgeschlagen", "Copy failed");
+                            self.failure_notice(&format!("{label}: {e}"));
+                        }
                     }
                 }
             }
@@ -1427,11 +1382,13 @@ impl App {
                 }
             }
             Action::OpenLogs => platform::open_folder(&config::state_dir()),
-            Action::Update => match self.update.clone() {
-                Some(release) if !self.updating => self.install_update(release),
-                Some(_) => {}
-                None => self.check_update(true),
-            },
+            Action::Update => {
+                if let Some(version) = self.updates.offered_version() {
+                    self.install_offered_update(&version);
+                } else {
+                    self.check_update(true);
+                }
+            }
             Action::RemoveOld if !self.removing_old => {
                 self.removing_old = true;
                 // The entry says so while it runs (that can take minutes),
@@ -1447,41 +1404,6 @@ impl App {
             Action::Quit => {}
         }
         self.tray.sync(&self.config, autostart::enabled());
-    }
-
-    fn check_update(&self, asked: bool) {
-        // A program some other package manager put in /usr is that one's
-        // to update (hushkey's own .deb updates through apt, see
-        // update::install).
-        let policy = self.config.updates;
-        if !platform::setup::updates_itself() {
-            let _ = self.tx.send(Msg::UpdateChecked {
-                result: Ok(None),
-                asked,
-                policy,
-            });
-            return;
-        }
-        let (tx, pre) = (self.tx.clone(), update::wants_pre(policy));
-        std::thread::spawn(move || {
-            let _ = tx.send(Msg::UpdateChecked {
-                result: update::check(pre),
-                asked,
-                policy,
-            });
-        });
-    }
-
-    fn install_update(&mut self, release: Release) {
-        log::line(&format!("installing the update to v{}", release.version));
-        self.updating = true;
-        self.notice_until = None;
-        self.overlay.show(GREY, self.s.update_running);
-        self.tray.show(Badge::Loading, self.s.update_running);
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Msg::UpdateInstalled(update::install(&release)));
-        });
     }
 
     /// Change the settings file as it is now (the user may have edited it),
@@ -1522,6 +1444,9 @@ impl App {
     }
 
     fn set_listening(&mut self, on: bool) {
+        if on && self.updates.installing() {
+            return;
+        }
         if on
             && (self.config.check_listen_available().is_err()
                 || self.connecting

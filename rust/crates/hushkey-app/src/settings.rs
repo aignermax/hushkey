@@ -5,8 +5,9 @@ mod view;
 pub(crate) use runtime::run_window;
 pub(crate) use runtime::SettingsWindow;
 
-use crate::config::{Insert, Theme, Updates};
+use crate::config::{Insert, Theme};
 pub(crate) use crate::network::Link;
+pub(crate) use crate::update::Status as UpdateStatus;
 use hushkey_net::Peer;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,9 @@ pub(crate) struct Snapshot {
     pub version: String,
     pub build: String,
     pub ready: String,
+    pub acceleration: String,
+    pub history: Vec<String>,
+    pub update: UpdateStatus,
     pub preferences: Preferences,
     pub host: Host,
     pub client: Client,
@@ -31,7 +35,9 @@ pub(crate) struct Preferences {
     pub restore_clipboard: bool,
     pub listening: bool,
     pub autostart: bool,
-    pub updates: Updates,
+    pub auto_updates: bool,
+    pub include_prereleases: bool,
+    pub use_gpu: bool,
     pub theme: Theme,
 }
 
@@ -75,7 +81,12 @@ pub(crate) enum Intent {
     RestoreClipboard(bool),
     Listen(bool),
     Autostart(bool),
-    Updates(Updates),
+    AutoUpdates(bool),
+    IncludePrereleases(bool),
+    CheckUpdate,
+    InstallUpdate(String),
+    CopyDictation(String),
+    UseGpu(bool),
     Theme(Theme),
     OpenLogs,
 }

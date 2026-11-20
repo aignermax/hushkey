@@ -5,8 +5,7 @@
 //! `v0.11.0-rc.2`) and it carries this system's asset and `SHA256SUMS`:
 //! the program, or for an install from the Linux .deb the .deb, which
 //! apt installs after asking for the password.
-//! Pre-releases count only for a running pre-release, or with
-//! `"updates": "pre"` in the settings.
+//! Pre-releases count only when the user opts in, including on preview builds.
 //!
 //! Where a release also carries the program compressed (`<asset>.xz`),
 //! that is downloaded instead: the Windows and Linux programs are mostly
@@ -19,7 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{self, Updates};
+use crate::config;
 use crate::platform::setup;
 
 const RELEASES: &str = "https://api.github.com/repos/aignermax/hushkey/releases?per_page=30";
@@ -118,6 +117,7 @@ impl std::fmt::Display for Version {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: Version,
+    pub preview: bool,
     /// The asset's file name.
     asset: String,
     asset_url: String,
@@ -136,12 +136,23 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Whether pre-releases count, by the settings and the running version.
-pub fn wants_pre(updates: Updates) -> bool {
-    match updates {
-        Updates::Pre => true,
-        Updates::Auto | Updates::Off => Version::current().is_pre(),
-    }
+/// What the settings window can display, without URLs or installer state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Status {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available {
+        version: String,
+        preview: bool,
+    },
+    Installing {
+        version: String,
+    },
+    Failed(String),
+    Cancelled,
+    Managed,
 }
 
 /// The newest release newer than this program, if any.
@@ -156,13 +167,16 @@ pub fn check(include_pre: bool) -> Result<Option<Release>, String> {
         .map_err(|e| format!("releases: {e}"))?;
     let releases: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("releases: {e}"))?;
+    if !releases.is_array() {
+        return Err("unexpected release listing".into());
+    }
     Ok(newest(&releases, setup::update_asset, include_pre)
         .filter(|r| r.version > Version::current()))
 }
 
 /// The highest qualifying release in a GitHub releases listing, with the
 /// first asset `wanted` takes.
-fn newest(
+pub(crate) fn newest(
     releases: &serde_json::Value,
     wanted: impl Fn(&str) -> bool,
     include_pre: bool,
@@ -187,7 +201,8 @@ fn newest(
         .filter(|r| r["draft"] != true)
         .filter_map(|r| {
             let version = Version::parse(r["tag_name"].as_str()?)?;
-            if version.is_pre() && !include_pre {
+            let preview = version.is_pre() || r["prerelease"] == true;
+            if preview && !include_pre {
                 return None;
             }
             let plain = asset_of(r, &wanted);
@@ -196,6 +211,7 @@ fn newest(
             let plain = plain.filter(|(name, _)| *name != asset);
             Some(Release {
                 version,
+                preview,
                 asset,
                 asset_url,
                 sums_url,
@@ -425,6 +441,24 @@ mod tests {
         let pre = newest(&listing(), app, true).unwrap();
         assert_eq!(pre.version, v("0.12.0-rc.1"));
         assert!(newest(&listing(), |n| n == "other.zip", true).is_none());
+    }
+
+    #[test]
+    fn either_github_or_the_tag_can_mark_a_preview() {
+        let mut releases = listing();
+        let pick = |n: &str| n == "app.exe";
+        for (tag, marked) in [("v0.14.0", true), ("v0.14.0-alpha.1", false)] {
+            releases[0]["tag_name"] = tag.into();
+            releases[0]["prerelease"] = marked.into();
+            let stable = newest(&releases, pick, false).unwrap();
+            assert_eq!(stable.version, v("0.11.0"));
+            assert!(!stable.preview);
+            let preview = newest(&releases, pick, true).unwrap();
+            assert_eq!(preview.version, v(tag));
+            assert!(preview.preview);
+        }
+        releases[0]["draft"] = true.into();
+        assert_eq!(newest(&releases, pick, true).unwrap().version, v("0.11.0"));
     }
 
     #[test]

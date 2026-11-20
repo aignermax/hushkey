@@ -9,6 +9,7 @@ use super::Locale;
 #[derive(Clone, Copy)]
 pub(super) enum Icon {
     Mic,
+    History,
     Network,
     Gear,
     Moon,
@@ -49,6 +50,10 @@ pub(super) fn icon(painter: &Painter, center: Pos2, kind: Icon, color: Color32) 
             ]);
             path(&[(10., 15.5), (10., 19.)]);
             path(&[(7., 19.), (13., 19.)]);
+        }
+        Icon::History => {
+            painter.circle_stroke(center, 7.7, line);
+            path(&[(10., 5.), (10., 10.), (13.8, 12.2)]);
         }
         Icon::Network => {
             outline(6.5, 1.5, 13.5, 13., 2);

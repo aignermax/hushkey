@@ -1,10 +1,10 @@
 use eframe::egui::{self, Align, ComboBox, Frame, Layout, Margin, Ui};
 
-use crate::config::{Insert, Theme, Updates};
+use crate::config::{Insert, Theme};
 use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
 
 use super::style::{bold, text, Palette};
-use super::{Intent, Locale, Snapshot};
+use super::{Intent, Locale, Snapshot, UpdateStatus};
 
 fn choose<T: PartialEq>(
     ui: &mut Ui,
@@ -148,6 +148,23 @@ pub(super) fn dictation(
             },
         );
         p.divider(ui);
+        let gpu = lang.t(
+            "GPU für lokale Diktate verwenden",
+            "Use GPU for local dictation",
+        );
+        let actual = format!(
+            "{} · {}",
+            lang.t("Aktuell", "Currently"),
+            state.acceleration
+        );
+        p.row(ui, gpu, &actual, |ui| {
+            ui.add_enabled_ui(state.client.selected.is_none(), |ui| {
+                if p.switch(ui, gpu, pref.use_gpu) {
+                    intents.push(Intent::UseGpu(!pref.use_gpu));
+                }
+            });
+        });
+        p.divider(ui);
         let listen = lang.t("Fortlaufend zuhören", "Continuous listening");
         p.row(
             ui,
@@ -222,6 +239,7 @@ pub(super) fn general(
     lang: Locale,
     state: &Snapshot,
     intents: &mut Vec<Intent>,
+    show_update: bool,
 ) {
     let pref = &state.preferences;
     ui.label(bold(lang.t("Programm", "Application"), 17., p.ink));
@@ -242,40 +260,6 @@ pub(super) fn general(
             |ui| {
                 if p.switch(ui, autostart, pref.autostart) {
                     intents.push(Intent::Autostart(!pref.autostart));
-                }
-            },
-        );
-        p.divider(ui);
-        let updates = lang.t("Nach Updates suchen", "Check for updates");
-        let channels = [
-            (Updates::Auto, lang.t("Automatisch", "Automatic")),
-            (
-                Updates::Pre,
-                lang.t("Auch Vorabversionen", "Include prereleases"),
-            ),
-            (Updates::Off, lang.t("Aus", "Off")),
-        ];
-        p.row(
-            ui,
-            updates,
-            lang.t(
-                "Automatisch nach neuen Versionen suchen.",
-                "Choose which releases to check for automatically.",
-            ),
-            |ui| {
-                let selected = channels
-                    .iter()
-                    .find(|(kind, _)| *kind == pref.updates)
-                    .unwrap()
-                    .1;
-                if let Some(value) = choose(
-                    ui,
-                    updates,
-                    &pref.updates,
-                    selected,
-                    channels.map(|(kind, title)| (kind, title.into())),
-                ) {
-                    intents.push(Intent::Updates(value));
                 }
             },
         );
@@ -310,17 +294,42 @@ pub(super) fn general(
     });
     p.group(ui, lang.t("Über hushkey", "About hushkey"));
     p.card(ui, |ui| {
-        p.row(
-            ui,
-            "Version",
-            lang.t(
-                "Installierte Programmversion.",
-                "Installed application version.",
-            ),
-            |ui| {
-                ui.label(text(&state.version, 12., p.muted).monospace());
-            },
-        );
+        if show_update {
+            ui.scroll_to_cursor(Some(Align::Min));
+        }
+        update_row(ui, p, lang, state, intents);
+        if !matches!(state.update, UpdateStatus::Managed) {
+            ui.add_enabled_ui(
+                !matches!(state.update, UpdateStatus::Installing { .. }),
+                |ui| {
+                    p.divider(ui);
+                    let auto = lang.t(
+                        "Automatisch nach Updates suchen",
+                        "Automatically check for updates",
+                    );
+                    p.row(ui, auto, "", |ui| {
+                        if p.switch(ui, auto, pref.auto_updates) {
+                            intents.push(Intent::AutoUpdates(!pref.auto_updates));
+                        }
+                    });
+                    p.divider(ui);
+                    let pre = lang.t("Vorabversionen einschließen", "Include prereleases");
+                    p.row(
+                        ui,
+                        pre,
+                        lang.t(
+                            "Auch beim manuellen Suchen.",
+                            "Applies to manual checks too.",
+                        ),
+                        |ui| {
+                            if p.switch(ui, pre, pref.include_prereleases) {
+                                intents.push(Intent::IncludePrereleases(!pref.include_prereleases));
+                            }
+                        },
+                    );
+                },
+            );
+        }
         p.divider(ui);
         p.row(
             ui,
@@ -359,5 +368,100 @@ pub(super) fn general(
                 }
             },
         );
+    });
+}
+
+fn update_row(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut Vec<Intent>) {
+    let check = lang.t("Nach Updates suchen", "Check for updates");
+    let (status, button, enabled) = match &state.update {
+        UpdateStatus::Idle => (
+            lang.t("Installierte Programmversion.", "Installed version.")
+                .into(),
+            check,
+            true,
+        ),
+        UpdateStatus::Checking => (
+            lang.t(
+                "Neue Versionen werden gesucht …",
+                "Checking for new versions…",
+            )
+            .into(),
+            check,
+            false,
+        ),
+        UpdateStatus::UpToDate => (
+            lang.t(
+                "Du hast die aktuelle Version.",
+                "You have the latest version.",
+            )
+            .into(),
+            check,
+            true,
+        ),
+        UpdateStatus::Available { version, preview } => {
+            let release = if *preview {
+                lang.t("Vorabversion", "Prerelease")
+            } else {
+                "Version"
+            };
+            let available = if lang.0 {
+                format!("{release} {version} ist verfügbar.")
+            } else {
+                format!("{release} {version} is available.")
+            };
+            (
+                available,
+                lang.t("Update installieren", "Install update"),
+                true,
+            )
+        }
+        UpdateStatus::Installing { version } => {
+            let installing = if lang.0 {
+                format!("Version {version} wird installiert …")
+            } else {
+                format!("Installing version {version}…")
+            };
+            (
+                installing,
+                lang.t("Wird installiert …", "Installing…"),
+                false,
+            )
+        }
+        UpdateStatus::Failed(message) => (
+            format!(
+                "{} {message}",
+                lang.t("Update fehlgeschlagen.", "Update failed.")
+            ),
+            lang.t("Erneut suchen", "Check again"),
+            true,
+        ),
+        UpdateStatus::Cancelled => (
+            lang.t("Update abgebrochen.", "Update cancelled.").into(),
+            check,
+            true,
+        ),
+        UpdateStatus::Managed => (
+            lang.t(
+                "Updates verwaltest du über die Paketverwaltung.",
+                "Use your package manager to update hushkey.",
+            )
+            .into(),
+            check,
+            false,
+        ),
+    };
+    p.row(ui, &format!("Version {}", state.version), &status, |ui| {
+        if p.action(
+            ui,
+            button,
+            matches!(state.update, UpdateStatus::Available { .. }),
+            enabled,
+        ) {
+            if let UpdateStatus::Available { version, .. } = &state.update {
+                intents.push(Intent::InstallUpdate(version.clone()));
+            } else {
+                intents.push(Intent::CheckUpdate);
+            }
+        }
     });
 }

@@ -7,6 +7,7 @@
 //! [`ListenSession`] listens continuously and reports each utterance as an
 //! [`Event::Utterance`].
 
+mod acceleration;
 mod audio;
 mod brain;
 pub mod commands;
@@ -20,6 +21,7 @@ pub mod model;
 mod resample;
 mod session;
 
+pub use acceleration::Acceleration;
 pub use audio::{
     read_wav_16k, AudioInput, AudioSink, Microphone, SamplesFn, WavReplay, SAMPLE_RATE,
 };

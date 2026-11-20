@@ -17,7 +17,7 @@ cuda = ["whisper-rs/cuda"]
 download = ["dep:ureq"]
 
 [dependencies]
-whisper-rs.workspace = true
+whisper-rs = { workspace = true, features = ["raw-api"] }
 cpal.workspace = true
 hound.workspace = true
 thiserror.workspace = true

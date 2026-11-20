@@ -3,13 +3,14 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
     WhisperVadContext, WhisperVadContextParams, WhisperVadParams,
 };
 
+use crate::acceleration::{install_log_hook, observe_state, Acceleration};
 use crate::audio::{rms, SAMPLE_RATE};
 use crate::error::{Error, Result};
 
@@ -134,15 +135,12 @@ pub struct Engine {
     state: Mutex<WhisperState>,
     vad: Option<Mutex<WhisperVadContext>>,
     config: EngineConfig,
-    /// Whether the model runs on a GPU (see [`Engine::on_gpu`]).
-    on_gpu: bool,
+    acceleration: Acceleration,
     /// The last prompt and its tokens: sessions reuse one prompt for every
     /// call, and passing tokens (borrowed by whisper-rs) avoids the copy
     /// `set_initial_prompt` leaks on each call.
     prompt_tokens: Mutex<Option<(String, Arc<Vec<i32>>)>>,
 }
-
-static QUIET_LOGS: Once = Once::new();
 
 /// Prepare the process for hushkey; call it at program start, before other
 /// threads run and before the first [`Engine`] loads.
@@ -187,14 +185,7 @@ unsafe extern "C" fn abort_requested(user: *mut c_void) -> bool {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Engine> {
-        QUIET_LOGS.call_once(|| {
-            // whisper.cpp prints its model and backend details to stderr; a
-            // library must not write to the host's console unless asked to
-            // (HUSHKEY_WHISPER_LOG=1, for diagnosing a backend).
-            if std::env::var_os("HUSHKEY_WHISPER_LOG").is_none() {
-                whisper_rs::install_logging_hooks();
-            }
-        });
+        install_log_hook();
         let model = config.model.to_str().ok_or_else(|| {
             Error::InvalidArgument(format!(
                 "model path is not UTF-8: {}",
@@ -208,17 +199,27 @@ impl Engine {
         // only (rust/packaging/glslc-trim, which sets this variable for the
         // build): there a quantized model runs on the CPU.
         let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
-        let use_gpu = config.use_gpu && !(trimmed && quantized_weights(&config.model));
-        let on_gpu = use_gpu && cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda"));
+        let forced_cpu = if !config.use_gpu {
+            Some(Acceleration::Cpu)
+        } else if !cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda")) {
+            Some(Acceleration::CpuBuild)
+        } else if trimmed && quantized_weights(&config.model) {
+            Some(Acceleration::QuantizedCpu)
+        } else {
+            None
+        };
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(use_gpu).gpu_device(config.gpu_device);
+        params
+            .use_gpu(forced_cpu.is_none())
+            .gpu_device(config.gpu_device);
         let load_error = |reason: String| Error::ModelLoad {
             path: config.model.clone(),
             reason,
         };
         let ctx = WhisperContext::new_with_params(model, params)
             .map_err(|e| load_error(e.to_string()))?;
-        let state = ctx.create_state().map_err(|e| load_error(e.to_string()))?;
+        let (state, observed) = observe_state(|| ctx.create_state());
+        let state = state.map_err(|e| load_error(e.to_string()))?;
         let vad = match &config.vad_model {
             None => None,
             Some(path) => {
@@ -248,7 +249,7 @@ impl Engine {
             state: Mutex::new(state),
             vad,
             config,
-            on_gpu,
+            acceleration: forced_cpu.unwrap_or(observed),
             prompt_tokens: Mutex::new(None),
         })
     }
@@ -257,10 +258,14 @@ impl Engine {
         &self.config
     }
 
-    /// Whether the model runs on a GPU: asked for, built with a GPU
-    /// backend, and not a quantized model in a build without its shaders.
+    /// Whether whisper.cpp initialized a GPU backend for this model's inference state.
     pub fn on_gpu(&self) -> bool {
-        self.on_gpu
+        matches!(self.acceleration, Acceleration::Gpu { .. })
+    }
+
+    /// The active backend or the reason the model runs on the CPU.
+    pub fn acceleration(&self) -> &Acceleration {
+        &self.acceleration
     }
 
     /// Whether a VAD model is loaded (needed for continuous listening).

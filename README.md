@@ -87,14 +87,14 @@ the usual system dialog.
 | Dictate | Hold the key, speak, release: the text is inserted where the cursor is (nothing is sent; review and press Enter yourself) |
 | Caps Lock | A short tap still toggles capitals; only a hold dictates |
 | Continuous listening | Tray menu › *Continuous listening*: every sentence you say is inserted, no key needed; one listening session is one history entry |
-| Recent dictations | Tray menu › *Recent dictations*: click one to copy it again |
+| Recent dictations | Open **Settings → Recent dictations** to read or copy the last three entries. They are also available from the tray menu. |
 
 While you speak, a small pill at the top of the screen with the mouse shows
 what has been heard so far.
 
 Click the tray icon to open **Settings**. On Linux, choose **Settings…** in
-the indicator menu. **Dictation** holds the talk key, language, local model
-and insertion settings. **Connections** shows the selected server, measured
+the indicator menu. **Dictation** holds the talk key, language, model, GPU
+preference and insertion settings, and shows where recognition runs. **Connections** shows the selected server, measured
 response time, host readiness and active clients. **General** holds startup,
 updates, appearance and the running program's version and build identifier.
 Changes take effect in the running app. Close the window to keep dictating
@@ -165,12 +165,16 @@ cache, but keep settings, history and network keys separately.
 
 ## Updates
 
-hushkey looks for a newer release at start and every four hours and offers it
-in the tray menu (*Install update: v…*); nothing installs unasked. Installing
-downloads the new program, checks it against the release's `SHA256SUMS`,
-swaps it in and restarts. Installed from the `.deb`, the update is the next
-`.deb`, installed through apt after the system's password dialog. While you run a pre-release, newer pre-releases are
-offered too; `"updates": "pre"` or `"off"` in `config.json` changes that.
+Open **Settings → General** and choose **Check for updates** next to the
+installed version. Enable **Include prereleases** to receive release
+candidates as well. Automatic checks run after startup and every four hours
+by default. You can turn them off and still check manually.
+
+When a newer eligible version is available, the settings window shows an
+update notice. Choose **Install update** to download it, verify it against
+the release's `SHA256SUMS`, and restart HushKey. The tray also offers the
+update. On a Debian package installation, apt installs the verified `.deb`
+after the system's password dialog.
 
 ## Advanced settings
 

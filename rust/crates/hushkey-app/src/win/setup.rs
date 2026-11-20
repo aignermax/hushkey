@@ -135,7 +135,15 @@ pub fn update_asset(name: &str) -> bool {
 /// Put a downloaded and checked update in place (`_sha256`: checked
 /// already, and the file is the user's own).
 pub fn install_update(file: &Path, _sha256: &str) -> Result<Option<PathBuf>, String> {
-    place(file).map(Some)
+    place_at(file, update_target()?).map(Some)
+}
+
+fn update_target() -> Result<PathBuf, String> {
+    if std::env::var_os("HUSHKEY_DATA_DIR").is_some_and(|p| !p.is_empty()) {
+        std::env::current_exe().map_err(|e| e.to_string())
+    } else {
+        Ok(installed_exe())
+    }
 }
 
 pub fn installed_exe() -> PathBuf {
@@ -304,23 +312,40 @@ fn quiet(program: &str, args: &[&str]) -> Result<(), String> {
 /// be renamed but not overwritten, so the old one is moved aside first
 /// (and removed by [`clean_after_update`] once it has exited).
 pub fn place(source: &Path) -> Result<PathBuf, String> {
-    let target = installed_exe();
+    place_at(source, installed_exe())
+}
+
+fn place_at(source: &Path, target: PathBuf) -> Result<PathBuf, String> {
     if source == target {
         return Ok(target);
     }
     let dir = target.parent().expect("an exe in a folder");
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let partial = target.with_extension("exe.part");
+    let partial = target.with_extension(format!("exe.{}.part", std::process::id()));
     std::fs::copy(source, &partial).map_err(|e| format!("{}: {e}", partial.display()))?;
-    if target.exists() {
-        clean_after_update();
+    let previous = if target.exists() {
+        clean_old_copies(&target);
         let aside = (0..100)
             .map(|n| target.with_extension(format!("exe.old{n}")))
             .find(|p| !p.exists())
             .ok_or("too many old copies of hushkey.exe")?;
         std::fs::rename(&target, &aside).map_err(|e| format!("{}: {e}", target.display()))?;
+        Some(aside)
+    } else {
+        None
+    };
+    if let Err(error) = std::fs::rename(&partial, &target) {
+        if let Some(previous) = previous {
+            std::fs::rename(&previous, &target).map_err(|restore| {
+                format!(
+                    "{}: {error}; could not restore {}: {restore}",
+                    target.display(),
+                    previous.display()
+                )
+            })?;
+        }
+        return Err(format!("{}: {error}", target.display()));
     }
-    std::fs::rename(&partial, &target).map_err(|e| format!("{}: {e}", target.display()))?;
     Ok(target)
 }
 
@@ -466,8 +491,36 @@ pub fn retire_python() -> Result<(), String> {
 
 /// Remove the copies an update moved aside (those still running stay).
 pub fn clean_after_update() {
-    let target = installed_exe();
+    if let Ok(target) = update_target() {
+        clean_old_copies(&target);
+    }
+}
+
+fn clean_old_copies(target: &Path) {
     for n in 0..100 {
         let _ = std::fs::remove_file(target.with_extension(format!("exe.old{n}")));
+    }
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    #[test]
+    fn a_portable_update_replaces_only_the_selected_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("hushkey.exe");
+        let portable = dir.path().join("test.exe");
+        let payload = dir.path().join(ASSET);
+        std::fs::write(&installed, "installed").unwrap();
+        std::fs::write(&portable, "old").unwrap();
+        std::fs::write(&payload, "new").unwrap();
+        assert_eq!(place_at(&payload, portable.clone()).unwrap(), portable);
+        assert_eq!(std::fs::read(&portable).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(portable.with_extension("exe.old0")).unwrap(),
+            b"old"
+        );
+        assert_eq!(std::fs::read(installed).unwrap(), b"installed");
     }
 }
