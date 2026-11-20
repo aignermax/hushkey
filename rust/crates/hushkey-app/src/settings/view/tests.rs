@@ -1,22 +1,6 @@
 use super::*;
+use crate::settings::tests::{pairing, snapshot};
 use egui::{Event, PointerButton, Pos2, RawInput, Rect, Shape};
-
-fn snapshot() -> Snapshot {
-    serde_json::from_value(serde_json::json!({
-        "german": false, "version": "1.0.0", "build": "test", "ready": "Ready",
-        "local_recognition": "tiny · CPU", "history": [], "update": "Idle", "feedback": null,
-        "preferences": {
-            "key": "right_ctrl", "language": null, "model": "tiny", "insert": "paste",
-            "restore_clipboard": true, "listening": false, "autostart": false,
-            "auto_updates": false, "include_prereleases": true, "use_gpu": false, "theme": "light"
-        },
-        "host": {"name": "Local", "enabled": false, "listening": false, "model_ready": true,
-                 "error": null, "clients": [], "pending": null},
-        "client": {"selected": null, "peers": [], "link": "Local", "checking": false,
-                   "searching": false, "search_status": "", "detail": "", "can_retry": false}
-    }))
-    .unwrap()
-}
 
 struct Window {
     ctx: Context,
@@ -113,18 +97,6 @@ impl Window {
     }
 }
 
-fn pairing(id: u64) -> crate::settings::Pairing {
-    crate::settings::Pairing {
-        id,
-        peer: hushkey_net::Peer {
-            id: "a".repeat(64),
-            name: "Studio".into(),
-            address: "127.0.0.1:5000".parse().unwrap(),
-        },
-        code: "00123456".into(),
-    }
-}
-
 #[test]
 fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_request() {
     let mut state = snapshot();
@@ -134,7 +106,7 @@ fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_reque
     assert!(window.frame(&state, vec![]).is_empty());
     assert!(window.attention);
     window.label("Studio wants to connect");
-    window.label("00123456");
+    window.label("0012 3456");
     window.frame(&state, vec![]);
     assert!(!window.attention);
     window.click(&state, "General");
@@ -142,7 +114,7 @@ fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_reque
     window.label("Check for updates");
     state.host.pending = Some(pairing(12));
     assert!(window.frame(&state, vec![]).is_empty());
-    let pos = window.label("Allow").center();
+    let pos = window.label("Allow dictation").center();
     let button = |pressed| Event::PointerButton {
         pos,
         button: PointerButton::Primary,
@@ -153,7 +125,7 @@ fn host_request_routes_once_and_responds_only_to_a_click_for_the_displayed_reque
     state.host.pending = Some(pairing(13));
     assert!(window.frame(&state, vec![button(false)]).is_empty());
     assert_eq!(
-        window.click(&state, "Allow"),
+        window.click(&state, "Allow dictation"),
         vec![Intent::DecidePairing {
             id: 13,
             allow: true
@@ -178,8 +150,8 @@ fn pending_host_request_reopens_at_the_card_on_a_small_german_window() {
     window.frame(&state, vec![]);
     for label in [
         "Studio möchte sich verbinden",
-        "00123456",
-        "Freigeben",
+        "0012 3456",
+        "Diktate zulassen",
         "Ablehnen",
     ] {
         assert!(window.bounds.contains_rect(window.label(label)), "{label}");
@@ -205,25 +177,78 @@ fn one_connect_selects_the_exact_host_and_the_waiting_card_allows_cancel() {
     );
     pair.code.clear();
     state.client.pairing = Some(pair);
-    state.client.link = Link::Connecting;
     assert!(window.frame(&state, vec![]).is_empty());
     window.label("Waiting for approval from Studio");
     state.client.pairing.as_mut().unwrap().code = "00123456".into();
     window.frame(&state, vec![]);
-    window.label("00123456");
-    assert!(window.labels.iter().all(|(label, _)| label != "Allow"));
+    window.label("0012 3456");
+    assert!(window
+        .labels
+        .iter()
+        .all(|(label, _)| label != "Allow dictation"));
     let privacy = window.label("Privacy").center();
     window.frame(&state, vec![Event::PointerMoved(privacy)]);
+    window.frame(&state, vec![]);
+    assert!(
+        window
+            .labels
+            .iter()
+            .any(|(label, _)| label.contains("encrypted audio")),
+        "hover {privacy:?}, labels {:?}",
+        window.labels
+    );
+    window.frame(&state, vec![Event::PointerGone]);
+    window.frame(&state, vec![]);
+    for _ in 0..40 {
+        window.press(&state, egui::Key::Tab);
+        if window
+            .labels
+            .iter()
+            .any(|(label, _)| label.contains("encrypted audio"))
+        {
+            break;
+        }
+    }
     window.frame(&state, vec![]);
     assert!(window
         .labels
         .iter()
         .any(|(label, _)| label.contains("encrypted audio")));
-    window.frame(&state, vec![Event::PointerGone]);
-    window.frame(&state, vec![]);
     assert_eq!(
         window.click(&state, "Cancel"),
         vec![Intent::CancelPairing(15)]
+    );
+}
+
+#[test]
+fn failed_host_remains_identifiable_and_retry_uses_the_displayed_endpoint() {
+    let mut state = snapshot();
+    let peer = pairing(21).peer;
+    state.client.pairing_error = Some(crate::settings::PairingFailure {
+        peer: peer.clone(),
+        reason: "Request declined".into(),
+        can_retry: true,
+    });
+    let mut window = Window::new(1000., 900., &state);
+    window.label("Could not connect to Studio");
+    window.label("Request declined");
+    window.label(&format!("{} · {}", peer.address, peer.id));
+    window.label("Local dictation");
+    assert_eq!(
+        window.click(&state, "Try again"),
+        vec![Intent::Connect(peer.clone())]
+    );
+    let moved = hushkey_net::Peer {
+        address: "127.0.0.1:5001".parse().unwrap(),
+        ..peer
+    };
+    state.client.peers.push(moved.clone());
+    state.client.pairing_error.as_mut().unwrap().can_retry = false;
+    window.frame(&state, vec![]);
+    assert!(window.labels.iter().all(|(label, _)| label != "Try again"));
+    assert_eq!(
+        window.click(&state, "Connect"),
+        vec![Intent::Connect(moved)]
     );
 }
 

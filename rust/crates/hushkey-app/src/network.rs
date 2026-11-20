@@ -16,7 +16,6 @@ use crate::{config, strings};
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) enum Link {
     Local,
-    Connecting,
     Waiting,
     Online { rtt_ms: u64 },
     Legacy,

@@ -61,8 +61,16 @@ pub(crate) struct Host {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PairingFailure {
+    pub peer: Peer,
+    pub reason: String,
+    pub can_retry: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Client {
     pub pairing: Option<Pairing>,
+    pub pairing_error: Option<PairingFailure>,
     pub selected: Option<Peer>,
     pub peers: Vec<Peer>,
     pub link: Link,
@@ -116,6 +124,35 @@ pub(crate) fn selected_peer<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn snapshot() -> Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "german": false, "version": "1.0.0", "build": "test", "ready": "Ready",
+            "local_recognition": "tiny · CPU", "history": [], "update": "Idle", "feedback": null,
+            "preferences": {
+                "key": "right_ctrl", "language": null, "model": "tiny", "insert": "paste",
+                "restore_clipboard": true, "listening": false, "autostart": false,
+                "auto_updates": false, "include_prereleases": true, "use_gpu": false, "theme": "light"
+            },
+            "host": {"name": "Local", "enabled": false, "listening": false, "model_ready": true,
+                     "error": null, "clients": [], "pending": null},
+            "client": {"selected": null, "peers": [], "link": "Local", "checking": false,
+                       "searching": false, "search_status": "", "detail": "", "can_retry": false}
+        }))
+        .unwrap()
+    }
+
+    pub(super) fn pairing(id: u64) -> Pairing {
+        Pairing {
+            id,
+            peer: hushkey_net::Peer {
+                id: "a".repeat(64),
+                name: "Studio".into(),
+                address: "127.0.0.1:5000".parse().unwrap(),
+            },
+            code: "00123456".into(),
+        }
+    }
 
     #[test]
     fn lookup_prefers_current_discovery_over_saved_addresses_and_rejects_namesakes() {

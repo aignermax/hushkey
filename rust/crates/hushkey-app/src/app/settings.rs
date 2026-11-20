@@ -12,6 +12,11 @@ pub(super) struct Settings {
 }
 
 impl Settings {
+    pub fn show_incoming(&mut self) {
+        self.window.show_incoming();
+        self.next_refresh = Instant::now();
+    }
+
     pub fn new() -> Self {
         Self {
             window: SettingsWindow::new(),
@@ -192,12 +197,23 @@ impl App {
                     .connections
                     .incoming
                     .as_ref()
-                    .filter(|pending| pending.shown && pending.live())
+                    .filter(|pending| pending.live())
                     .map(|pending| pending.pairing.clone()),
                 error: self.connections.host_error.clone(),
             },
             client: Client {
                 pairing: self.connecting.clone(),
+                pairing_error: self
+                    .connections
+                    .pairing_error
+                    .as_ref()
+                    .map(|(peer, reason)| crate::settings::PairingFailure {
+                        peer: peer.clone(),
+                        reason: reason.clone(),
+                        can_retry: self
+                            .connections
+                            .can_select(peer, self.config.remote.as_ref()),
+                    }),
                 selected: self.config.remote.clone(),
                 peers,
                 link: self.connections.link,

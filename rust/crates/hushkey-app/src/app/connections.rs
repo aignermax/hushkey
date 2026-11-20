@@ -9,7 +9,20 @@ pub(super) struct Incoming {
     pub active: ApprovalActive,
     pub reply: mpsc::SyncSender<bool>,
     pub expires: Instant,
-    pub shown: bool,
+    pub focus: PairingFocus,
+}
+
+pub(super) enum PairingFocus {
+    AwaitingWindow,
+    Finished,
+}
+
+impl PairingFocus {
+    fn poll(&mut self, idle: bool, focus_now: impl FnOnce() -> bool) {
+        if matches!(self, Self::AwaitingWindow) && (!idle || focus_now()) {
+            *self = Self::Finished;
+        }
+    }
 }
 
 impl Incoming {
@@ -23,6 +36,7 @@ pub(super) struct Connections {
     pub search_status: String,
     pub quiet_search: bool,
     pub client_status: String,
+    pub pairing_error: Option<(Peer, String)>,
     pub host_error: Option<String>,
     pub incoming: Option<Incoming>,
     pub paused: bool,
@@ -41,6 +55,7 @@ impl Connections {
             search_status: String::new(),
             quiet_search: false,
             client_status: String::new(),
+            pairing_error: None,
             host_error: None,
             incoming: None,
             paused: false,
@@ -52,16 +67,36 @@ impl Connections {
         }
     }
 
+    pub fn can_select(&self, peer: &Peer, saved: Option<&Peer>) -> bool {
+        // A failed attempt stays available for an explicit retry when discovery
+        // stops listing it. A newer listing always wins over the remembered address.
+        if let Some(listed) = crate::settings::selected_peer(&peer.id, &self.peers, None) {
+            return listed == peer;
+        }
+        saved == Some(peer)
+            || self
+                .pairing_error
+                .as_ref()
+                .is_some_and(|(failed, _)| failed == peer)
+    }
+
+    pub fn pairing_failed(&mut self, peer: Peer, reason: String) -> String {
+        let message = format!("{} · {reason}", peer.name);
+        self.pairing_error = Some((peer, reason));
+        self.next_check = Instant::now();
+        message
+    }
+
     fn answer_pairing(&mut self, id: u64, allow: bool) {
         if let Some(incoming) = self.incoming.take_if(|p| p.pairing.id == id) {
-            let approved = allow && incoming.shown && incoming.live();
+            let approved = allow && incoming.live();
             let _ = incoming.reply.send(approved);
         }
     }
 }
 
 impl App {
-    pub(super) fn receive_pairing(&mut self, incoming: Incoming) {
+    pub(super) fn receive_pairing(&mut self, mut incoming: Incoming) {
         // The worker may have ended or a different host session may have started
         // while the event was waiting in the tray thread's queue.
         if self
@@ -80,7 +115,11 @@ impl App {
             let _ = incoming.reply.send(false);
             return;
         }
+        if !self.pairing_can_focus() {
+            incoming.focus = PairingFocus::Finished;
+        }
         self.connections.incoming = Some(incoming);
+        self.settings.show_incoming();
     }
 
     pub(super) fn decide_pairing(&mut self, id: u64, allow: bool) {
@@ -113,19 +152,6 @@ impl App {
         }
         self.connect_generation += 1;
         self.connecting = None;
-        self.connections.link = if self.config.remote.is_none() {
-            Link::Local
-        } else if self.connections.paused {
-            Link::Revoked
-        } else {
-            Link::Waiting
-        };
-        self.connections.client_status = network::words(
-            self.s,
-            "Verbindungsaufbau abgebrochen",
-            "Connection cancelled",
-        )
-        .into();
         self.connections.next_check = Instant::now();
         self.tray.recovery_available(self.has_failed());
         self.idle();
@@ -138,22 +164,30 @@ impl App {
         }
     }
 
-    fn present_incoming(&mut self) {
-        let Some(pending) = &mut self.connections.incoming else {
-            return;
-        };
-        if !pending.live() {
-            self.deny_incoming();
-        } else if !pending.shown
-            && self.recording.is_none()
-            && !self.hearing
+    fn pairing_can_focus(&self) -> bool {
+        self.config.mode != Mode::Listen
+            && self.listening.is_none()
             && self.draining.is_none()
+            && self.pressed_at.is_none()
+            && platform::since_last_seen().is_none()
+            && self.recording.is_none()
             && !self.busy
             && self.pending_inserts == 0
-        {
-            // Bringing settings forward must not steal a dictation's insertion target.
-            pending.shown = true;
-            self.open_settings();
+    }
+
+    fn poll_pairing_focus(&mut self) {
+        if self.connections.incoming.is_none() {
+            return;
+        }
+        let idle = self.pairing_can_focus();
+        if let Some(pending) = &mut self.connections.incoming {
+            if pending.live() {
+                pending
+                    .focus
+                    .poll(idle, || self.settings.window.focus_incoming_now());
+            } else {
+                self.deny_incoming();
+            }
         }
     }
 
@@ -282,7 +316,7 @@ impl App {
     }
 
     pub(super) fn poll_connections(&mut self) {
-        self.present_incoming();
+        self.poll_pairing_focus();
         let now = Instant::now();
         if self.config.remote.is_some() && now >= self.connections.next_check {
             self.begin_check();
@@ -303,6 +337,57 @@ impl App {
 mod tests {
     use super::*;
     use hushkey_net::{Client, Identity};
+
+    #[test]
+    fn dictation_suppresses_unresolved_pairing_focus_even_after_the_key_is_released() {
+        let mut focus = PairingFocus::AwaitingWindow;
+        focus.poll(true, || false); // The passive child is still starting.
+        focus.poll(false, || panic!("capture must keep focus"));
+        focus.poll(true, || {
+            panic!("late window readiness must not activate it")
+        });
+
+        let mut next_request = PairingFocus::AwaitingWindow;
+        next_request.poll(true, || true);
+        next_request.poll(true, || {
+            panic!("a ready request only gets one foreground attempt")
+        });
+    }
+
+    #[test]
+    fn refused_pairing_keeps_the_active_route_and_only_retries_the_selected_device() {
+        let failed = Peer {
+            name: "Host B".into(),
+            id: "b".repeat(64),
+            address: "127.0.0.1:47000".parse().unwrap(),
+        };
+        let saved = Peer {
+            name: "Host A".into(),
+            id: "a".repeat(64),
+            ..failed.clone()
+        };
+        let moved = Peer {
+            address: "127.0.0.2:47000".parse().unwrap(),
+            ..failed.clone()
+        };
+        for (link, selected) in [
+            (Link::Local, None),
+            (Link::Online { rtt_ms: 2 }, Some(&saved)),
+        ] {
+            let mut connections = Connections::new();
+            connections.link = link;
+            connections.client_status = "route status".into();
+            let notice = connections.pairing_failed(failed.clone(), "declined".into());
+            assert_eq!(notice, "Host B · declined");
+            assert_eq!(connections.link, link);
+            assert_eq!(connections.client_status, "route status");
+            assert!(connections.can_select(&failed, selected));
+            assert!(!connections.can_select(&moved, selected));
+            connections.peers.push(moved.clone());
+            assert!(!connections.can_select(&failed, selected));
+            assert!(connections.can_select(&moved, selected));
+        }
+    }
 
     #[test]
     fn stale_click_keeps_the_current_request_and_expiry_denies_a_late_accept() {
@@ -326,7 +411,7 @@ mod tests {
                         active,
                         reply,
                         expires: Instant::now() + Duration::from_secs(5),
-                        shown: true,
+                        focus: PairingFocus::AwaitingWindow,
                     })
                     .unwrap();
                 answer.recv_timeout(Duration::from_secs(5)).unwrap_or(false)

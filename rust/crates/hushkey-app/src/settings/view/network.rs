@@ -73,6 +73,43 @@ pub(super) fn show(
     if *host_tab {
         host(ui, p, lang, state, intents);
     } else {
+        if let Some(failure) = &state.client.pairing_error {
+            if pairing.is_none() {
+                let failed = &failure.peer;
+                Frame::new()
+                    .fill(p.warm_bg)
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(15, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let title = if lang.0 {
+                            format!("Verbindung mit {} fehlgeschlagen", failed.name)
+                        } else {
+                            format!("Could not connect to {}", failed.name)
+                        };
+                        ui.label(bold(&title, 15., p.ink));
+                        ui.label(text(
+                            &format!("{} · {}", failed.address, failed.id),
+                            12.,
+                            p.muted,
+                        ));
+                        ui.label(text(&failure.reason, 13., p.ink));
+                        if failure.can_retry {
+                            ui.push_id((&failed.id, &failed.name, failed.address), |ui| {
+                                if p.action(
+                                    ui,
+                                    lang.t("Erneut versuchen", "Try again"),
+                                    false,
+                                    true,
+                                ) {
+                                    intents.push(Intent::Connect(failed.clone()));
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(12.);
+            }
+        }
         client(ui, p, lang, state, intents);
     }
 }
@@ -84,7 +121,13 @@ fn privacy(ui: &mut Ui, p: Palette, lang: Locale) {
         "Beim Diktieren sendet hushkey deine Sprachaufnahme verschlüsselt an den gewählten Host. Dort wird sie verarbeitet. Verbinde dich nur mit einem Host, dem du vertraust. Prüfe seine Geräte-ID und vergleiche den Code auf beiden Geräten.",
         "When you dictate, hushkey sends your encrypted audio to the selected host for processing. Connect only to a host you trust. Check its device ID and compare the code on both devices.",
     );
-    if response.has_focus() || response.hovered() {
+    // A tooltip's initial sizing pass can briefly cover its own anchor.
+    let over_label = ui.input(|i| {
+        i.pointer
+            .hover_pos()
+            .is_some_and(|p| response.interact_rect.contains(p))
+    });
+    if response.has_focus() || over_label {
         response.show_tooltip_text(notice);
     }
 }
@@ -116,7 +159,12 @@ fn pairing_card(
             ui.set_width(ui.available_width());
             ui.label(bold(&title, 16., p.ink));
             if !pair.code.is_empty() {
-                ui.label(egui::RichText::new(&pair.code).monospace().size(24.).color(p.ink));
+                let code = if pair.code.len() == 8 && pair.code.bytes().all(|ch| ch.is_ascii_digit()) {
+                    format!("{} {}", &pair.code[..4], &pair.code[4..])
+                } else {
+                    pair.code.clone()
+                };
+                ui.label(egui::RichText::new(code).monospace().size(24.).color(p.ink));
                 ui.label(text(if hosting {
                     lang.t(
                         "Vergleiche den Code mit dem auf dem Client. Stimmen beide überein, kannst du Diktate von diesem Gerät zulassen.",
@@ -132,7 +180,7 @@ fn pairing_card(
             ui.add_space(3.);
             ui.horizontal_wrapped(|ui| {
                 if hosting {
-                    if p.action(ui, lang.t("Freigeben", "Allow"), true, !pair.code.is_empty()) {
+                    if p.action(ui, lang.t("Diktate zulassen", "Allow dictation"), true, !pair.code.is_empty()) {
                         intents.push(Intent::DecidePairing { id: pair.id, allow: true });
                     }
                     if p.action(ui, lang.t("Ablehnen", "Deny"), false, true) {
@@ -231,7 +279,6 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
         ),
         Link::Local => (lang.t("Lokal", "Local"), p.muted, p.alt),
         Link::Waiting => (lang.t("Gespeichert", "Saved"), p.muted, p.alt),
-        Link::Connecting => (lang.t("Verbindet …", "Connecting …"), p.blue, p.soft),
     };
     p.card(ui, |ui| {
         Frame::new()
@@ -270,8 +317,7 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
                                 ui,
                                 test,
                                 true,
-                                !client.checking
-                                    && !matches!(client.link, Link::Connecting | Link::Revoked),
+                                !client.checking && client.pairing.is_none(),
                             ) {
                                 intents.push(Intent::Probe);
                             }
@@ -357,7 +403,7 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
                     ui,
                     lang.t("Verbinden", "Connect"),
                     false,
-                    client.pairing.is_none() && !matches!(client.link, Link::Connecting),
+                    client.pairing.is_none(),
                 ) {
                     intents.push(Intent::Connect(peer.clone()));
                 }
@@ -376,7 +422,7 @@ fn client(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut
                     ui,
                     lang.t("Lokal verwenden", "Use locally"),
                     false,
-                    !client.can_retry,
+                    !client.can_retry && client.pairing.is_none(),
                 )
             {
                 intents.push(Intent::Local);

@@ -15,13 +15,15 @@ use std::{
 #[derive(Serialize, Deserialize)]
 enum Request {
     State(Box<Snapshot>),
-    Focus(u64),
+    Show { id: u64, activate: bool },
 }
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
     Action(Intent),
     Focused(u64),
+    #[cfg(windows)]
+    Ready(isize),
     Failed(String),
 }
 
@@ -47,7 +49,7 @@ fn read_frames<T: DeserializeOwned>(
 #[derive(Default)]
 struct Pending {
     state: Option<Box<Snapshot>>,
-    focus: Option<u64>,
+    show: Option<(u64, bool)>,
 }
 
 struct Session {
@@ -57,6 +59,9 @@ struct Session {
     replies: mpsc::Receiver<Reply>,
     focus_requested: u64,
     focus_confirmed: u64,
+    reopen_active: bool,
+    #[cfg(windows)]
+    hwnd: isize,
     last: Option<Snapshot>,
 }
 
@@ -83,8 +88,8 @@ impl Session {
                         break;
                     }
                 }
-                if let Some(id) = pending.focus {
-                    if write_frame(&mut writer, &Request::Focus(id)).is_err() {
+                if let Some((id, activate)) = pending.show {
+                    if write_frame(&mut writer, &Request::Show { id, activate }).is_err() {
                         break;
                     }
                 }
@@ -104,23 +109,32 @@ impl Session {
             replies,
             focus_requested: 0,
             focus_confirmed: 0,
+            reopen_active: false,
+            #[cfg(windows)]
+            hwnd: 0,
             last: None,
         })
     }
 
-    fn focus(&mut self, reopen_if_closing: bool) {
+    fn show(&mut self, activate: bool, reopen_if_closing: bool) {
         #[cfg(windows)]
-        unsafe {
+        if activate {
             // Transfer foreground permission when the tray has it, before
             // even a newly launched settings process attempts activation.
-            windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(self.child.id());
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                    self.child.id(),
+                );
+            }
         }
         // An initial launch is itself the open request. A close before that
         // first focus frame should close this window, without relaunching.
         if reopen_if_closing {
             self.focus_requested += 1;
         }
-        self.pending.lock().unwrap().focus = Some(self.focus_requested);
+        let mut pending = self.pending.lock().unwrap();
+        self.reopen_active = activate || pending.show.is_some_and(|(_, active)| active);
+        pending.show = Some((self.focus_requested, self.reopen_active));
         let _ = self.wake.try_send(());
     }
 
@@ -150,10 +164,10 @@ impl SettingsWindow {
         }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, activate: bool) {
         match Session::start() {
             Ok(mut session) => {
-                session.focus(false);
+                session.show(activate, false);
                 self.session = Some(session);
             }
             Err(error) => {
@@ -168,15 +182,7 @@ impl SettingsWindow {
         // A new window can open before the tray drains its actions. In that
         // case, dismiss only requests that belonged to the closing session.
         if let Some(state) = self.session.as_ref().and_then(|s| s.last.as_ref()) {
-            if let Some(pair) = &state.host.pending {
-                self.actions.push(Intent::DecidePairing {
-                    id: pair.id,
-                    allow: false,
-                });
-            }
-            if let Some(pair) = &state.client.pairing {
-                self.actions.push(Intent::CancelPairing(pair.id));
-            }
+            self.actions.extend(close_pairings(state));
         }
     }
 
@@ -188,6 +194,8 @@ impl SettingsWindow {
             match session.replies.try_recv() {
                 Ok(Reply::Action(action)) => self.actions.push(action),
                 Ok(Reply::Focused(id)) => session.focus_confirmed = id,
+                #[cfg(windows)]
+                Ok(Reply::Ready(hwnd)) => session.hwnd = hwnd,
                 Ok(Reply::Failed(error)) => {
                     self.error = Some(error);
                     self.record_close();
@@ -201,6 +209,7 @@ impl SettingsWindow {
         // A tray click may have arrived while the native window was closing.
         // Only reopen if that process never handled the click.
         let reopen = session.focus_requested != session.focus_confirmed;
+        let activate = session.reopen_active;
         match session.child.try_wait() {
             Ok(None) => return, // stdout closed just before process exit
             Ok(Some(status)) => {
@@ -221,7 +230,7 @@ impl SettingsWindow {
             }
         }
         if reopen {
-            self.start();
+            self.start(activate);
         }
     }
 
@@ -238,12 +247,53 @@ impl SettingsWindow {
     }
 
     pub(crate) fn show(&mut self) {
+        self.present(true);
+    }
+
+    pub(crate) fn show_incoming(&mut self) {
+        self.present(false);
+    }
+
+    fn present(&mut self, activate: bool) {
         self.poll();
         if let Some(session) = &mut self.session {
-            session.focus(true);
+            session.show(activate, true);
         } else {
-            self.start();
+            self.start(activate);
         }
+    }
+
+    /// Called by the tray while dictation is idle. Never queue a later
+    /// activation in the renderer, which could steal a new insertion target.
+    pub(crate) fn focus_incoming_now(&mut self) -> bool {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+                ShowWindow, SW_SHOWNOACTIVATE,
+            };
+            self.poll();
+            let Some(session) = &self.session else {
+                return false;
+            };
+            let hwnd = session.hwnd as windows_sys::Win32::Foundation::HWND;
+            let mut pid = 0;
+            unsafe {
+                if hwnd.is_null()
+                    || GetWindowThreadProcessId(hwnd, &mut pid) == 0
+                    || pid != session.child.id()
+                    || IsWindowVisible(hwnd) == 0
+                {
+                    return false;
+                }
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+                SetForegroundWindow(hwnd);
+            }
+        }
+        // If activation is restricted, the card already requests attention.
+        true
     }
 
     pub(crate) fn visible(&mut self) -> bool {
@@ -284,17 +334,43 @@ struct Window {
     replies: mpsc::Sender<Reply>,
 }
 
+fn close_pairings(state: &Snapshot) -> impl Iterator<Item = Intent> {
+    let host = state
+        .host
+        .pending
+        .as_ref()
+        .map(|pair| Intent::DecidePairing {
+            id: pair.id,
+            allow: false,
+        });
+    let client = state
+        .client
+        .pairing
+        .as_ref()
+        .map(|pair| Intent::CancelPairing(pair.id));
+    host.into_iter().chain(client)
+}
+
 impl eframe::App for Window {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if ctx.input(|input| input.viewport().close_requested()) {
+            // Dismiss the requests actually presented here before graphics
+            // teardown. A new Show racing this frame belongs to a new window.
+            if let Some(state) = &self.state {
+                for action in close_pairings(state) {
+                    let _ = self.replies.send(Reply::Action(action));
+                }
+            }
+            return;
+        }
         for request in self.requests.try_iter() {
             match request {
                 Request::State(snapshot) => self.state = Some(snapshot),
-                Request::Focus(id) => {
-                    if ctx.input(|input| input.viewport().close_requested()) {
-                        continue;
+                Request::Show { id, activate } => {
+                    if activate {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     let _ = self.replies.send(Reply::Focused(id));
                 }
             }
@@ -383,6 +459,7 @@ pub(crate) fn run_window() -> Result<(), String> {
         io::Result::Ok(())
     });
     let viewport = egui::ViewportBuilder::default()
+        .with_active(false)
         .with_inner_size([1000.0, 680.0])
         .with_min_inner_size([440.0, 360.0])
         .with_icon(egui::IconData {
@@ -424,6 +501,15 @@ pub(crate) fn run_window() -> Result<(), String> {
                 crate::log::line("settings window renderer: OpenGL");
             }
             let _ = context.set(cc.egui_ctx.clone());
+            #[cfg(windows)]
+            {
+                use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = cc.window_handle() {
+                    if let RawWindowHandle::Win32(native) = handle.as_raw() {
+                        let _ = to_tray.send(Reply::Ready(native.hwnd.get()));
+                    }
+                }
+            }
             Ok(Box::new(Window {
                 view: View::default(),
                 state: None,
@@ -446,6 +532,78 @@ pub(crate) fn run_window() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::tests::{pairing, snapshot};
+
+    #[test]
+    fn closing_frame_dismisses_only_its_presented_requests_before_teardown() {
+        use eframe::App as _;
+        let (send, requests) = mpsc::channel();
+        let (replies, actions) = mpsc::channel();
+        let mut state = snapshot();
+        state.host.pending = Some(pairing(21));
+        state.client.pairing = Some(pairing(22));
+        let mut window = Window {
+            view: View::default(),
+            state: Some(Box::new(state.clone())),
+            requests,
+            replies,
+        };
+        state.host.pending = Some(pairing(23));
+        send.send(Request::State(Box::new(state))).unwrap();
+        send.send(Request::Show {
+            id: 2,
+            activate: true,
+        })
+        .unwrap();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let _ = egui::Context::default().run(input, |ctx| {
+            window.update(ctx, &mut eframe::Frame::_new_kittest())
+        });
+        assert!(matches!(
+            actions.try_recv(),
+            Ok(Reply::Action(Intent::DecidePairing {
+                id: 21,
+                allow: false
+            }))
+        ));
+        assert!(matches!(
+            actions.try_recv(),
+            Ok(Reply::Action(Intent::CancelPairing(22)))
+        ));
+        assert!(actions.try_recv().is_err());
+    }
+
+    #[test]
+    fn passive_show_keeps_focus_and_explicit_tray_show_restores_the_window() {
+        use eframe::App as _;
+        let (send, requests) = mpsc::channel();
+        let (replies, _actions) = mpsc::channel();
+        let mut window = Window {
+            view: View::default(),
+            state: None,
+            requests,
+            replies,
+        };
+        let ctx = egui::Context::default();
+        for activate in [false, true] {
+            send.send(Request::Show { id: 1, activate }).unwrap();
+            let output = ctx.run(Default::default(), |ctx| {
+                window.update(ctx, &mut eframe::Frame::_new_kittest())
+            });
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(commands.contains(&egui::ViewportCommand::Focus), activate);
+            assert_eq!(
+                commands.contains(&egui::ViewportCommand::Minimized(false)),
+                activate
+            );
+        }
+    }
 
     #[test]
     fn failed_window_with_a_pending_focus_is_reported_without_relaunch() {
@@ -464,6 +622,9 @@ mod tests {
             replies: mpsc::channel().1,
             focus_requested: 1,
             focus_confirmed: 0,
+            reopen_active: true,
+            #[cfg(windows)]
+            hwnd: 0,
             last: None,
         });
         assert!(!window.visible());

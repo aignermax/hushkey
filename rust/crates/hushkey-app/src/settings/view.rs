@@ -291,6 +291,7 @@ impl View {
             .show(ctx, |ui| {
                 ScrollArea::vertical()
                     .id_salt(("settings page", self.page, self.host_tab))
+                    .animated(!reveal_pairing)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let margin = if compact {

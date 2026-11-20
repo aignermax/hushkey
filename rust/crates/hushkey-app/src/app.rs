@@ -354,11 +354,9 @@ impl App {
     }
 
     fn connect_remote(&mut self, peer: hushkey_net::Peer) {
-        if crate::settings::selected_peer(
-            &peer.id,
-            &self.connections.peers,
-            self.config.remote.as_ref(),
-        ) != Some(&peer)
+        if !self
+            .connections
+            .can_select(&peer, self.config.remote.as_ref())
         {
             self.failure_notice(network::words(
                 self.s,
@@ -397,12 +395,7 @@ impl App {
             code: String::new(),
         });
         self.connections.checking = false;
-        self.connections.link = Link::Connecting;
-        self.connections.client_status = format!(
-            "{} · {}",
-            peer.name,
-            network::words(self.s, "Verbindung wird aufgebaut …", "Connecting …")
-        );
+        self.connections.pairing_error = None;
         let text = network::words(
             self.s,
             "Remote-Verbindung wird aufgebaut …",
@@ -446,7 +439,7 @@ impl App {
                     active,
                     reply,
                     expires,
-                    shown: false,
+                    focus: connections::PairingFocus::AwaitingWindow,
                 });
             }
             network::Event::ApprovalEnded { id } => self.decide_pairing(id, false),
@@ -501,11 +494,7 @@ impl App {
                 }
             }
             network::Event::Connected { generation, result } => {
-                let Some(target) = self
-                    .connecting
-                    .as_ref()
-                    .filter(|target| target.id == generation)
-                else {
+                let Some(target) = self.connecting.take_if(|target| target.id == generation) else {
                     return;
                 };
                 let result = result.and_then(|(peer, pending)| {
@@ -514,7 +503,6 @@ impl App {
                     }
                     pending.finish().map(|backend| (peer, backend))
                 });
-                self.connecting = None;
                 match result {
                     Ok((peer, backend)) => {
                         self.connections.paused = false;
@@ -548,19 +536,21 @@ impl App {
                         self.begin_check();
                     }
                     Err(e) => {
-                        self.connections.link = Link::Offline;
-                        self.connections.client_status = format!(
-                            "{}: {e}",
+                        let reason = if e == "host denied pairing" {
                             network::words(
                                 self.s,
-                                "Verbindung fehlgeschlagen",
-                                "Connection failed"
+                                "Der Host hat die Kopplung abgelehnt.",
+                                "The host declined pairing.",
                             )
-                        );
+                            .to_owned()
+                        } else {
+                            e
+                        };
+                        let message = self.connections.pairing_failed(target.peer, reason);
                         self.idle();
-                        self.failure_notice(&format!("Remote: {e}"));
+                        self.notice_for(GREY, &message, FAILURE_NOTICE);
                         if self.backend.is_none() {
-                            self.tray.show(Badge::Failed, &format!("Remote: {e}"));
+                            self.tray.show(Badge::Failed, &message);
                         }
                     }
                 }
@@ -763,6 +753,7 @@ impl App {
                     self.connect_generation += 1;
                     self.connections.checking = false;
                     self.connections.paused = true;
+                    self.connections.pairing_error = None;
                     self.connections.link = Link::Revoked;
                     self.connections.client_status = network::words(
                         self.s,
@@ -1068,6 +1059,11 @@ impl App {
     }
 
     fn key_down(&mut self) {
+        // A tap can finish before the next UI poll. Suppress any pending
+        // activation here so a slow settings launch never steals its target.
+        if let Some(incoming) = &mut self.connections.incoming {
+            incoming.focus = connections::PairingFocus::Finished;
+        }
         self.pressed_at = Some(Instant::now());
         if self.listening.is_some()
             || self.recording.is_some()
@@ -1198,6 +1194,7 @@ impl App {
                     self.connect_generation += 1;
                     self.connections.checking = false;
                     self.connections.paused = false;
+                    self.connections.pairing_error = None;
                     self.connections.client_status.clear();
                     self.connections.link = Link::Local;
                     self.backend = None;
