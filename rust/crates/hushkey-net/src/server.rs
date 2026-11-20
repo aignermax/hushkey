@@ -37,6 +37,33 @@ pub(crate) struct State {
 pub(crate) struct Policy {
     pub enabled: bool,
     pub epoch: u64,
+    // Oldest first. A client's ephemeral TCP port can change on every probe.
+    clients: Vec<(Peer, Instant)>,
+}
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
+
+impl Policy {
+    fn remember(&mut self, peer: Peer, now: Instant) {
+        self.clients.retain(|(p, seen)| {
+            p.id != peer.id && now.saturating_duration_since(*seen) < CLIENT_TIMEOUT
+        });
+        // Trust normally bounds this to 256. Also bound it if an external
+        // process replaces the grants before our previous observations expire.
+        if self.clients.len() == 256 {
+            self.clients.remove(0);
+        }
+        self.clients.push((peer, now));
+    }
+    fn clients_at(&self, now: Instant) -> Vec<Peer> {
+        let mut clients: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(_, seen)| now.saturating_duration_since(*seen) < CLIENT_TIMEOUT)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        clients.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        clients
+    }
 }
 impl State {
     pub fn enabled(&self) -> bool {
@@ -79,6 +106,7 @@ impl Server {
             policy: Mutex::new(Policy {
                 enabled: true,
                 epoch: 0,
+                clients: Vec::new(),
             }),
             connections: Mutex::new(HashMap::new()),
             active: AtomicUsize::new(0),
@@ -111,12 +139,25 @@ impl Server {
     pub fn alive(&self) -> bool {
         self.state.live.load(Ordering::Acquire) && !self.state.stop.load(Ordering::Acquire)
     }
+    /// Verified clients seen in the last 15 seconds, ordered by device ID.
+    /// Addresses are observed TCP source addresses, including ephemeral ports.
+    pub fn clients(&self) -> Vec<Peer> {
+        if !self.alive() {
+            return Vec::new();
+        }
+        self.state
+            .policy
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clients_at(Instant::now())
+    }
     pub fn set_enabled(&self, enabled: bool) {
         {
             let mut p = self.state.policy.lock().unwrap_or_else(|e| e.into_inner());
             p.enabled = enabled;
             if !enabled {
                 p.epoch = p.epoch.wrapping_add(1);
+                p.clients.clear();
             }
         }
         if !enabled {
@@ -128,6 +169,7 @@ impl Server {
         let result = {
             let mut p = self.state.policy.lock().unwrap_or_else(|e| e.into_inner());
             p.epoch = p.epoch.wrapping_add(1);
+            p.clients.clear();
             let r = self.state.identity.clear_trust();
             if r.is_err() {
                 p.enabled = false;
@@ -223,6 +265,15 @@ fn accept(tcp: TcpListener, state: Arc<State>) {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10))
             }
+            // Some platforms report an individual reset/abort on accept.
+            // The listening socket can continue serving the other peers.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
             Err(_) => {
                 state.stop.store(true, Ordering::Release);
                 state.close_connections();
@@ -256,6 +307,29 @@ fn session(
 ) -> Result<(), String> {
     let cancelled = || !state.valid(epoch);
     let (name, server_pinned) = match ch.recv_msg(Some(&cancelled))? {
+        Msg::Probe { name } if valid_name(&name) => {
+            // A periodic check must never initiate a pairing dialog.
+            if !state
+                .identity
+                .authorized(Role::ComputeGrant, &ch.remote, trust_epoch)?
+            {
+                return Err("device permission revoked; reconnect explicitly to pair".into());
+            }
+            let mut policy = state.policy.lock().map_err(err)?;
+            if !policy.enabled || policy.epoch != epoch {
+                return Err("server unavailable or permission revoked".into());
+            }
+            policy.remember(
+                Peer {
+                    name,
+                    id: ch.remote.clone(),
+                    address: addr,
+                },
+                Instant::now(),
+            );
+            drop(policy);
+            return ch.send_msg(&Msg::Pong, Some(&cancelled));
+        }
         Msg::Hello {
             name,
             server_pinned,
@@ -266,6 +340,11 @@ fn session(
         .identity
         .authorized(Role::ComputeGrant, &ch.remote, trust_epoch)?;
     let pairing = !server_pinned || !compute_granted;
+    let peer = Peer {
+        name,
+        id: ch.remote.clone(),
+        address: addr,
+    };
     ch.send_msg(
         &Msg::Offer {
             name: state.identity.name(),
@@ -276,11 +355,7 @@ fn session(
     let allowed = if pairing {
         let permit = Permit::take(&state.approval_busy)?;
         let approval = Approval {
-            peer: Peer {
-                name,
-                id: ch.remote.clone(),
-                address: addr,
-            },
+            peer: peer.clone(),
             code: ch.code.clone(),
         };
         let f = state.approve.clone();
@@ -302,13 +377,14 @@ fn session(
     }
     {
         // Serialize trust commit with disable/revoke, so a stale dialog cannot regrant trust.
-        let p = state.policy.lock().map_err(err)?;
+        let mut p = state.policy.lock().map_err(err)?;
         if !p.enabled || p.epoch != epoch || state.stop.load(Ordering::Acquire) {
             return Err("server unavailable or pairing revoked".into());
         }
         state
             .identity
             .confirm(Role::ComputeGrant, &ch.remote, trust_epoch, pairing)?;
+        p.remember(peer, Instant::now());
     }
     ch.send_msg(&Msg::Ready, Some(&cancelled))?;
     ch.io.idle = wire::IDLE;
@@ -431,6 +507,37 @@ impl Drop for WaitingFinal<'_> {
 #[cfg(test)]
 mod scheduling_tests {
     use super::*;
+
+    #[test]
+    fn only_peers_with_recent_authenticated_activity_remain_visible() {
+        let start = Instant::now();
+        let mut policy = Policy {
+            enabled: true,
+            epoch: 0,
+            clients: Vec::new(),
+        };
+        let a = Peer {
+            id: "a".repeat(64),
+            name: "A".into(),
+            address: "127.0.0.1:2345".parse().unwrap(),
+        };
+        let b = Peer {
+            id: "b".repeat(64),
+            name: "B".into(),
+            ..a.clone()
+        };
+        policy.remember(a.clone(), start);
+        policy.remember(b.clone(), start);
+        policy.remember(b.clone(), start + Duration::from_secs(5));
+        assert_eq!(
+            policy.clients_at(start + CLIENT_TIMEOUT - Duration::from_millis(1)),
+            vec![a, b.clone()]
+        );
+        assert_eq!(policy.clients_at(start + CLIENT_TIMEOUT), vec![b]);
+        assert!(policy
+            .clients_at(start + Duration::from_secs(5) + CLIENT_TIMEOUT)
+            .is_empty());
+    }
 
     #[test]
     fn local_revoke_aborts_a_final_waiting_for_acceptance() {

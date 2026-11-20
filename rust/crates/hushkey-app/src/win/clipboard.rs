@@ -514,6 +514,22 @@ mod tests {
     }
 
     #[test]
+    fn manual_paste_survives_a_remote_clipboard_read_without_monitor_exclusions() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _saved = Saved(read_text());
+        write_text("previous clipboard", true).unwrap();
+        let copied = super::super::copy_for_paste("Grüße aus RustDesk ", None).unwrap();
+        assert!(!copied.arrived());
+        assert_eq!(read_text().as_deref(), Some("Grüße aus RustDesk"));
+        let exclusion = unsafe {
+            RegisterClipboardFormatW(wide("ExcludeClipboardContentFromMonitorProcessing").as_ptr())
+        };
+        assert_ne!(exclusion, 0);
+        assert_eq!(unsafe { IsClipboardFormatAvailable(exclusion) }, 0);
+        assert_eq!(read_text().as_deref(), Some("Grüße aus RustDesk"));
+    }
+
+    #[test]
     fn an_offer_reports_the_fetch_and_stays_pasteable() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let _saved = Saved(read_text());

@@ -1,0 +1,213 @@
+use super::{autostart, network, Action, App, Duration, Instant, Mode};
+use crate::settings::{
+    selected_peer, Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot,
+};
+use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
+use hushkey_net::Server;
+use std::sync::{Arc, LazyLock, OnceLock};
+
+pub(super) struct Settings {
+    pub window: SettingsWindow,
+    pub feedback: Option<(Instant, String)>,
+    next_refresh: Instant,
+}
+
+impl Settings {
+    pub fn new() -> Self {
+        Self {
+            window: SettingsWindow::new(),
+            feedback: None,
+            next_refresh: Instant::now(),
+        }
+    }
+}
+
+/// Two local builds can have the same release version. Hash the actual program
+/// once, off the tray thread, and only if the user opens the window.
+fn running_build() -> String {
+    static ID: LazyLock<Arc<OnceLock<String>>> = LazyLock::new(|| {
+        let id = Arc::new(OnceLock::new());
+        let output = id.clone();
+        std::thread::spawn(move || {
+            let hash = std::env::current_exe()
+                .ok()
+                .and_then(|p| crate::update::sha256_file(&p).ok())
+                .map(|hash| hash[..12].to_string())
+                .unwrap_or_else(|| "—".into());
+            let _ = output.set(hash);
+        });
+        id
+    });
+    ID.get().cloned().unwrap_or_else(|| "…".into())
+}
+
+impl App {
+    pub(super) fn open_settings(&mut self) {
+        let already_open = self.settings.window.visible();
+        self.settings.window.show();
+        self.settings.next_refresh = Instant::now();
+        if !already_open {
+            self.find_servers(true);
+        }
+    }
+
+    pub(super) fn poll_settings(&mut self) {
+        if let Some(error) = self.settings.window.take_error() {
+            let label = network::words(self.s, "Einstellungsfenster", "Settings window");
+            crate::log::line(&format!("{label}: {error}"));
+            self.failure_notice(&format!("{label}: {error}"));
+        }
+        for intent in self.settings.window.actions() {
+            self.settings.feedback = None;
+            self.apply_setting(intent);
+            self.settings.next_refresh = Instant::now();
+        }
+        let now = Instant::now();
+        if now >= self.settings.next_refresh && self.settings.window.visible() {
+            self.settings.next_refresh = now + Duration::from_millis(300);
+            let snapshot = self.settings_snapshot();
+            self.settings.window.update(&snapshot);
+        }
+    }
+
+    fn apply_setting(&mut self, intent: Intent) {
+        let action = match intent {
+            Intent::Discover => return self.find_servers(true),
+            Intent::Probe => return self.begin_check(),
+            Intent::Connect(id) => {
+                if let Some(peer) =
+                    selected_peer(&id, &self.connections.peers, self.config.remote.as_ref())
+                        .cloned()
+                {
+                    self.connect_remote(peer);
+                } else {
+                    self.failure_notice(network::words(
+                        self.s,
+                        "Dieses Gerät ist nicht mehr in der Liste. Bitte erneut suchen.",
+                        "This device is no longer listed. Search again.",
+                    ));
+                }
+                return;
+            }
+            Intent::Local => Action::NetworkLocal,
+            Intent::Server(on) if on != self.config.server_enabled => Action::NetworkServer,
+            Intent::Revoke => Action::NetworkRevoke,
+            Intent::Retry => Action::NetworkRetry,
+            Intent::Discard => Action::NetworkDiscard,
+            Intent::Key(key) => match KEY_LABELS.iter().find(|(k, _)| *k == key) {
+                Some(&(k, _)) => Action::Key(k),
+                None => return,
+            },
+            Intent::Language(code) => match LANGUAGES.iter().find(|(c, _)| *c == code.as_deref()) {
+                Some(&(c, _)) => Action::Language(c),
+                None => return,
+            },
+            Intent::Model(model) => match MODELS.iter().find(|(m, _)| *m == model) {
+                Some(&(m, _)) => Action::Model(m),
+                None => return,
+            },
+            Intent::Insert(mode) => Action::Insert(mode),
+            Intent::RestoreClipboard(on) => Action::RestoreClipboard(on),
+            Intent::Listen(on) if on != (self.config.mode == Mode::Listen) => Action::Listen,
+            Intent::Autostart(on) if on != autostart::enabled() => Action::Autostart,
+            Intent::Updates(policy) => Action::Updates(policy),
+            Intent::Theme(theme) => Action::Theme(theme),
+            Intent::OpenLogs => Action::OpenLogs,
+            // Repeated "set" requests must not flip a checkbox back.
+            Intent::Server(_) | Intent::Listen(_) | Intent::Autostart(_) => return,
+        };
+        self.menu(action);
+    }
+
+    fn settings_snapshot(&self) -> Snapshot {
+        let net = self.network.as_ref();
+        let server = net.and_then(|n| n.server.as_ref()).filter(|s| s.alive());
+        let request = self
+            .deferred_approval
+            .as_ref()
+            .filter(|(_, _, expiry)| *expiry > Instant::now())
+            .map(|(req, _, _)| &req.peer)
+            .or_else(|| {
+                self.connections
+                    .request
+                    .as_ref()
+                    .filter(|_| self.dialogs.iter().any(|(host, d)| *host && !d.done()))
+            });
+        let mut peers = self.connections.peers.clone();
+        if let Some(saved) = &self.config.remote {
+            if !peers.iter().any(|p| p.id == saved.id) {
+                peers.push(saved.clone());
+            }
+        }
+        Snapshot {
+            german: network::german(self.s),
+            version: env!("CARGO_PKG_VERSION").into(),
+            build: running_build(),
+            ready: self.dictation_status().into(),
+            preferences: Preferences {
+                key: self.config.key.clone(),
+                language: self.config.language.clone(),
+                model: self.config.model.clone(),
+                insert: self.config.insert,
+                restore_clipboard: self.config.restore_clipboard,
+                listening: self.config.mode == Mode::Listen,
+                autostart: autostart::enabled(),
+                updates: self.config.updates,
+                theme: self.config.theme,
+            },
+            host: Host {
+                name: net.map(|n| n.identity.name()).unwrap_or_else(|| {
+                    network::words(self.s, "Dieser Rechner", "This computer").into()
+                }),
+                enabled: self.config.server_enabled,
+                listening: server.is_some(),
+                model_ready: self.engine.is_some(),
+                clients: server.map(Server::clients).unwrap_or_default(),
+                pending: request.cloned(),
+                error: self.connections.host_error.clone(),
+            },
+            client: Client {
+                selected: self.config.remote.clone(),
+                peers,
+                link: self.connections.link,
+                checking: self.connections.checking,
+                searching: self.discovering,
+                search_status: self.connections.search_status.clone(),
+                detail: self.connections.client_status.clone(),
+                can_retry: self.has_failed() && !self.busy && !self.connecting && !self.revoking,
+            },
+            feedback: self
+                .settings
+                .feedback
+                .as_ref()
+                .filter(|(t, _)| t.elapsed() < Duration::from_secs(12))
+                .map(|(_, s)| s.clone()),
+        }
+    }
+
+    fn dictation_status(&self) -> &'static str {
+        let w = |de, en| network::words(self.s, de, en);
+        if self.recording.is_some() || self.hearing {
+            w("Aufnahme läuft", "Recording")
+        } else if self.busy {
+            self.s.transcribing
+        } else if self.has_failed() {
+            w("Diktat wartet", "Dictation needs attention")
+        } else if self.connecting {
+            w("Verbindet …", "Connecting …")
+        } else if self.config.remote.is_some()
+            && matches!(self.connections.link, Link::Offline | Link::Revoked)
+        {
+            w("Verbindung getrennt", "Disconnected")
+        } else if self.backend.is_none() {
+            w(
+                "Warte auf Spracherkennung",
+                "Waiting for speech recognition",
+            )
+        } else if self.listening.is_some() {
+            self.s.listening
+        } else {
+            w("Bereit zum Diktieren", "Ready to dictate")
+        }
+    }
+}

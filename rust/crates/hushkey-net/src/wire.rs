@@ -221,6 +221,8 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub(crate) enum Msg {
+    Probe { name: String },
+    Pong,
     Hello { name: String, server_pinned: bool },
     Offer { name: String, compute_granted: bool },
     Decision { allowed: bool },

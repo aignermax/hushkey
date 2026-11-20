@@ -33,6 +33,117 @@ fn empty() -> Compute {
     Arc::new(|_, _| Ok(Transcript::default()))
 }
 
+#[test]
+fn authenticated_probes_track_concurrent_clients_across_disconnects() {
+    let (_hd, hi) = identity();
+    let (_ad, ai) = identity();
+    let (_bd, bi) = identity();
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let count = approvals.clone();
+    let server = host(
+        hi.clone(),
+        Arc::new(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            true
+        }),
+        Arc::new(|_, _| panic!("a probe must never transcribe")),
+    );
+    let p = peer(&hi, &server);
+    assert!(Client::resume(ai.clone(), &p).is_err());
+    Client::connect(ai.clone(), &p, yes()).unwrap();
+    Client::connect(bi.clone(), &p, yes()).unwrap();
+    let a = Client::resume(ai.clone(), &p).unwrap();
+    let b = Client::resume(bi.clone(), &p).unwrap();
+
+    // One partially opened connection must not stall either client.
+    let stalled = TcpStream::connect(p.address).unwrap();
+    std::thread::scope(|s| {
+        let a = s.spawn(|| a.probe().unwrap());
+        let b = s.spawn(|| b.probe().unwrap());
+        assert!(!a.join().unwrap().is_zero());
+        assert!(!b.join().unwrap().is_zero());
+    });
+    drop(stalled);
+    let mut ids = vec![ai.id(), bi.id()];
+    ids.sort();
+    assert_eq!(
+        server
+            .clients()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    server.set_enabled(false);
+    assert!(server.clients().is_empty());
+    assert!(a.probe().is_err());
+    server.set_enabled(true);
+    a.probe().unwrap();
+    let clients = server.clients();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].name, ai.name());
+    assert_eq!(clients[0].id, ai.id());
+    assert!(clients[0].address.ip().is_loopback());
+
+    server.revoke_all().unwrap();
+    assert!(a.probe().is_err());
+    assert!(server.clients().is_empty());
+    assert_eq!(approvals.load(Ordering::SeqCst), 2);
+    ai.clear_trust().unwrap();
+    assert!(a.probe().is_err());
+    assert!(Client::resume(ai, &p).is_err());
+}
+
+#[test]
+fn resumed_probe_checks_the_key_at_a_new_address_after_restart() {
+    let (hd, hi) = identity();
+    let (_cd, ci) = identity();
+    let old = host(hi.clone(), yes(), empty());
+    let original = peer(&hi, &old);
+    let client = Client::connect(ci.clone(), &original, yes()).unwrap();
+    // Keep the old port occupied while starting the new listener so the OS
+    // cannot hand back the same port for this test.
+    let restarted = host(Identity::load_or_create(hd.path()).unwrap(), yes(), empty());
+    drop(old);
+    assert!(client.probe().is_err());
+    let mut moved = original;
+    moved.address = restarted.local_addr();
+    Client::resume(ci.clone(), &moved).unwrap().probe().unwrap();
+    assert_eq!(restarted.clients()[0].id, ci.id());
+
+    let (_od, oi) = identity();
+    let impostor = host(oi, yes(), empty());
+    moved.address = impostor.local_addr();
+    let error = Client::resume(ci, &moved).unwrap().probe().unwrap_err();
+    assert!(error.contains("identity changed"));
+    assert!(impostor.clients().is_empty());
+}
+
+#[test]
+fn legacy_probe_rejection_is_distinct_from_an_unreachable_peer() {
+    let (_hd, hi) = identity();
+    let (_cd, ci) = identity();
+    let server = host(hi.clone(), yes(), empty());
+    let mut p = peer(&hi, &server);
+    Client::connect(ci.clone(), &p, yes()).unwrap();
+
+    let legacy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    p.address = legacy.local_addr().unwrap();
+    let responder = std::thread::spawn(move || {
+        let stream = legacy.accept().unwrap().0;
+        let mut ch =
+            wire::Channel::handshake(wire::Io::new(stream).unwrap(), &hi, false, None).unwrap();
+        assert!(matches!(ch.recv_msg(None), Ok(wire::Msg::Probe { .. })));
+        // The v2 decoder rejects an unrecognized encrypted control tag.
+        ch.error("invalid protocol message");
+    });
+    assert_eq!(
+        Client::resume(ci, &p).unwrap().probe().unwrap_err(),
+        PROBE_UNSUPPORTED
+    );
+    responder.join().unwrap();
+}
+
 // Catches lost samples/options, DTO omissions, mismatched SAS, reprompting and lost persisted keys.
 #[test]
 fn encrypted_roundtrip_and_persisted_pairing() {

@@ -63,21 +63,16 @@ impl Strings {
     }
 
     /// "copied — paste with Ctrl+V" (Cmd+V on macOS).
-    pub fn copied(&self) -> String {
+    pub fn copied(&self, elevated_app: Option<&str>) -> String {
         let keys = if cfg!(target_os = "macos") {
             "Cmd+V"
         } else {
             self.paste_keys
         };
-        fill(self.copied, &[("paste", keys)])
-    }
-
-    /// "RustDesk runs as administrator … paste with Ctrl+V" (Windows only).
-    pub fn out_of_reach(&self, app: &str) -> String {
-        fill(
-            self.out_of_reach,
-            &[("app", app), ("paste", self.paste_keys)],
-        )
+        match elevated_app {
+            Some(app) => fill(self.out_of_reach, &[("app", app), ("paste", keys)]),
+            None => fill(self.copied, &[("paste", keys)]),
+        }
     }
 
     /// The push-to-talk key as the first steps name it.
@@ -698,11 +693,12 @@ mod tests {
             assert!(s.model_loading.contains("{model}") && s.model_loading.contains("{size}"));
             assert!(s.update_install.contains("{version}"));
             assert!(s.guide_hold.contains("{key}"));
-            assert!(!s.copied().contains('{'));
+            assert!(!s.copied(None).contains('{'));
         }
         if !cfg!(target_os = "macos") {
-            assert!(DE.copied().contains("Strg+V"));
-            assert!(EN.copied().contains("Ctrl+V"));
+            assert!(DE.copied(None).contains("Strg+V"));
+            assert!(EN.copied(None).contains("Ctrl+V"));
+            assert!(EN.copied(Some("RustDesk")).contains("RustDesk"));
         }
     }
 }

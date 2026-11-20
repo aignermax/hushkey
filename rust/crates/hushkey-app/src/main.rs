@@ -36,6 +36,8 @@ mod macos;
 mod network;
 mod network_dialog;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod settings;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod setup;
 #[cfg_attr(
     not(any(windows, target_os = "linux", target_os = "macos")),
@@ -63,6 +65,30 @@ mod platform {
     pub use crate::macos::*;
     #[cfg(windows)]
     pub use crate::win::*;
+
+    #[cfg(not(windows))]
+    #[derive(Clone, Copy)]
+    pub struct InsertTarget;
+
+    #[cfg(not(windows))]
+    impl InsertTarget {
+        pub fn capture() -> Self {
+            Self
+        }
+        pub fn may_hide_key_release(self) -> Option<String> {
+            None
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn insert_into(
+        _: InsertTarget,
+        text: &str,
+        paste: bool,
+        restore: bool,
+    ) -> Result<Restore, String> {
+        insert(text, paste, restore)
+    }
 }
 
 /// A log line (the app's log file, and stderr).
@@ -79,6 +105,15 @@ fn main() -> std::process::ExitCode {
     // SAFETY: first thing in main, before any other thread exists.
     unsafe { hushkey_core::init_process() };
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--settings-window"] {
+        return match settings::run_window() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Settings window: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     let result = match setup::Start::from_args(&args) {
         Ok(setup::Start::App { after_update }) => {
             // Opened from wherever it was downloaded: install, then run

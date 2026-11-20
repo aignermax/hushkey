@@ -17,30 +17,70 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-/// The program behind the focused window when it runs as administrator
-/// and hushkey does not; None when it is within reach, or cannot be told.
-pub fn foreground_out_of_reach() -> Option<String> {
-    static SELF_ELEVATED: OnceLock<bool> = OnceLock::new();
-    if *SELF_ELEVATED.get_or_init(|| unsafe { elevated(GetCurrentProcess()) } == Some(true)) {
-        return None;
+/// Captured by the key hook. Opening the process and reading its token
+/// are left to the inserter thread so the hook can return immediately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsertTarget {
+    window: usize,
+    pid: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Delivery {
+    Automatic,
+    Clipboard,
+    RustDesk,
+    Elevated(String),
+}
+
+impl InsertTarget {
+    pub fn capture() -> Self {
+        unsafe {
+            let window = GetForegroundWindow();
+            let mut pid = 0;
+            GetWindowThreadProcessId(window, &mut pid);
+            Self {
+                window: window as usize,
+                pid,
+            }
+        }
     }
-    unsafe {
-        let window = GetForegroundWindow();
-        if window.is_null() {
-            return None;
+
+    fn delivery(self, current: Self, name: &str, elevated: bool) -> Delivery {
+        if self.pid == 0 || self != current {
+            Delivery::Clipboard
+        } else if elevated {
+            Delivery::Elevated(name.to_owned())
+        } else if name.eq_ignore_ascii_case("rustdesk") {
+            // A local clipboard read does not acknowledge a remote paste.
+            // Keep a normal, synchronizable copy until the user pastes it.
+            Delivery::RustDesk
+        } else {
+            Delivery::Automatic
         }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(window, &mut pid);
-        if pid == 0 {
-            return None;
+    }
+
+    pub(super) fn resolve(self) -> Delivery {
+        static SELF_ELEVATED: OnceLock<bool> = OnceLock::new();
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, self.pid);
+            if process.is_null() {
+                return Delivery::Clipboard;
+            }
+            let own = *SELF_ELEVATED.get_or_init(|| elevated(GetCurrentProcess()) == Some(true));
+            let out_of_reach = !own && elevated(process) == Some(true);
+            let name = program_name(process);
+            CloseHandle(process);
+            self.delivery(Self::capture(), &name, out_of_reach)
         }
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return None;
+    }
+
+    pub fn may_hide_key_release(self) -> Option<String> {
+        match self.resolve() {
+            Delivery::Elevated(app) => Some(app),
+            Delivery::RustDesk => Some("RustDesk".into()),
+            _ => None,
         }
-        let name = (elevated(process) == Some(true)).then(|| program_name(process));
-        CloseHandle(process);
-        name
     }
 }
 
@@ -79,6 +119,37 @@ unsafe fn program_name(process: HANDLE) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rustdesk_uses_a_persistent_copy_even_without_elevation() {
+        let target = InsertTarget { window: 1, pid: 2 };
+        assert_eq!(
+            target.delivery(target, "RuStDeSk", false),
+            Delivery::RustDesk
+        );
+        assert_eq!(
+            target.delivery(target, "notepad", false),
+            Delivery::Automatic
+        );
+        assert_eq!(
+            target.delivery(target, "notepad", true),
+            Delivery::Elevated("notepad".into())
+        );
+    }
+
+    #[test]
+    fn a_changed_window_after_release_gets_no_keys() {
+        let target = InsertTarget { window: 1, pid: 2 };
+        for current in [
+            InsertTarget { window: 3, pid: 2 },
+            InsertTarget { window: 1, pid: 3 },
+        ] {
+            assert_eq!(
+                target.delivery(current, "notepad", false),
+                Delivery::Clipboard
+            );
+        }
+    }
 
     #[test]
     fn a_normal_process_is_not_elevated_or_cannot_be_told() {

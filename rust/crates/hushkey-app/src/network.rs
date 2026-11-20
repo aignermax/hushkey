@@ -8,7 +8,25 @@ use hushkey_net::{Approval, Client, Identity, Peer, Server};
 
 use crate::{config, strings};
 
+/// The selected transcription destination, from the client's point of view.
+/// Only a reply to an authenticated probe can establish measured reachability.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) enum Link {
+    Local,
+    Connecting,
+    Waiting,
+    Online { rtt_ms: u64 },
+    Legacy,
+    Offline,
+    Revoked,
+}
+
 pub enum Event {
+    Checked {
+        generation: u64,
+        peer: Peer,
+        result: Result<CheckedPeer, String>,
+    },
     Approval {
         request: Approval,
         hosting: bool,
@@ -125,6 +143,50 @@ impl Network {
             notify(Event::Connected { generation, result });
         });
     }
+
+    /// Recover only the saved device. Discovery provides an address hint;
+    /// the probe checks the pinned key before the app adopts a new address.
+    pub fn check(&self, peer: Peer, generation: u64, rediscover: bool) {
+        let (identity, notify) = (self.identity.clone(), self.notify.clone());
+        std::thread::spawn(move || {
+            let mut peer = peer;
+            let mut result = check_peer(&identity, &peer);
+            if result.is_err() && rediscover {
+                if let Ok(peers) = hushkey_net::discover(&identity, Duration::from_secs(2)) {
+                    if let Some(moved) = peers
+                        .into_iter()
+                        .find(|p| p.id == peer.id && p.address != peer.address)
+                    {
+                        let candidate = Peer {
+                            address: moved.address,
+                            ..peer.clone()
+                        };
+                        if let Ok(checked) = check_peer(&identity, &candidate) {
+                            result = Ok(checked);
+                            peer = candidate;
+                        }
+                    }
+                }
+            }
+            notify(Event::Checked {
+                generation,
+                peer,
+                result,
+            });
+        });
+    }
+}
+
+pub type CheckedPeer = (Option<Duration>, Arc<Recoverable>);
+
+fn check_peer(identity: &Identity, peer: &Peer) -> Result<CheckedPeer, String> {
+    let client = Client::resume(identity.clone(), peer)?;
+    let rtt = match client.probe() {
+        Ok(elapsed) => Some(elapsed),
+        Err(e) if e == hushkey_net::PROBE_UNSUPPORTED => None,
+        Err(e) => return Err(e),
+    };
+    Ok((rtt, Arc::new(Recoverable::new(Arc::new(Remote(client))))))
 }
 
 fn approval(notify: Notify, hosting: bool) -> hushkey_net::Approve {
@@ -378,6 +440,35 @@ exit $p.ExitCode
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn saved_destination_recovers_after_host_restart_without_approval_or_audio() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let client_dir = tempfile::tempdir().unwrap();
+        let host = Identity::load_or_create(host_dir.path()).unwrap();
+        let client = Identity::load_or_create(client_dir.path()).unwrap();
+        let start = |address, allow| {
+            Server::start(
+                host.clone(),
+                address,
+                Arc::new(move |_| allow),
+                Arc::new(|_, _| panic!("a connection check must never submit audio")),
+            )
+            .unwrap()
+        };
+        let server = start("127.0.0.1:0".parse().unwrap(), true);
+        let peer = Peer {
+            name: host.name(),
+            id: host.id(),
+            address: server.local_addr(),
+        };
+        Client::connect(client.clone(), &peer, Arc::new(|_| true)).unwrap();
+        drop(server);
+        assert!(check_peer(&client, &peer).is_err());
+        let _server = start(peer.address, false);
+        let (rtt, _) = check_peer(&client, &peer).expect("recover the saved connection");
+        assert!(rtt.is_some());
+    }
 
     #[test]
     #[ignore = "requires HUSHKEY_TEST_MODEL and HUSHKEY_TEST_SPEECH"]

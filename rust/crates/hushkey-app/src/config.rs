@@ -36,6 +36,20 @@ pub enum Updates {
     Off,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn is_light(&self) -> bool {
+        *self == Self::Light
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BrainSettings {
@@ -77,6 +91,8 @@ pub struct Config {
     /// Advertise and accept pairing requests, never audio without consent.
     pub server_enabled: bool,
     pub updates: Updates,
+    #[serde(skip_serializing_if = "Theme::is_light")]
+    pub theme: Theme,
     /// Show the first steps (hold the key, speak, let go) until the first
     /// dictation. Set for a new install only: missing means not wanted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -99,6 +115,7 @@ impl Default for Config {
             remote: None,
             server_enabled: true,
             updates: Updates::Auto,
+            theme: Theme::Light,
             guide: false,
         }
     }
@@ -273,6 +290,20 @@ mod tests {
         assert_eq!(partial.key, "f9");
         assert_eq!(partial.language.as_deref(), Some("de"));
         assert_eq!(partial.model, "large-v3-turbo");
+    }
+
+    #[test]
+    fn existing_profiles_use_light_and_dark_survives_restart() {
+        let mut config = Config::parse(r#"{"key":"f9","updates":"pre"}"#).unwrap();
+        assert_eq!(config.theme, Theme::Light);
+        assert!(serde_json::to_value(&config)
+            .unwrap()
+            .get("theme")
+            .is_none());
+        config.theme = Theme::Dark;
+        config.restore_clipboard = false;
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(Config::parse(&json).unwrap(), config);
     }
 
     #[test]

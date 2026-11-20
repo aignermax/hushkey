@@ -167,11 +167,6 @@ pub fn insert(text: &str, paste: bool, restore: bool) -> Result<Restore, String>
     }
 }
 
-/// Windows only: no window here is out of hushkey's reach.
-pub fn foreground_out_of_reach() -> Option<String> {
-    None
-}
-
 /// Put `text` on the clipboard (a history entry the user picked).
 pub fn copy(text: &str) -> Result<(), String> {
     insert::write_clipboard(text, false)

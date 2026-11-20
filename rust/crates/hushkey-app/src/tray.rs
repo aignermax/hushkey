@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use crate::config::{self, Config, Insert, Mode};
+use crate::config::{self, Config, Insert, Mode, Theme, Updates};
 use crate::history::{self, Entry};
 use crate::icon::{self, Badge};
 use crate::strings::{self, Strings, KEY_LABELS, LANGUAGES, MODELS};
@@ -21,6 +21,9 @@ pub enum Action {
     Key(&'static str),
     Language(Option<&'static str>),
     Insert(Insert),
+    RestoreClipboard(bool),
+    Theme(Theme),
+    Updates(Updates),
     Copy(usize),
     Listen,
     Autostart,
@@ -29,6 +32,7 @@ pub enum Action {
     Update,
     /// Remove what the Python hushkey left behind.
     RemoveOld,
+    NetworkWindow,
     NetworkDiscover,
     NetworkConnect(hushkey_net::Peer),
     NetworkLocal,
@@ -245,8 +249,11 @@ impl Tray {
         let status = MenuItem::new(s.loading, false, None);
 
         let menu = Menu::new();
+        let settings = MenuItem::new(label("Settings…", "Einstellungen…"), true, None);
+        actions.insert(settings.id().clone(), Action::NetworkWindow);
         menu.append_items(&[
             &status,
+            &settings,
             &PredefinedMenuItem::separator(),
             &model_menu,
             &network,
@@ -268,6 +275,8 @@ impl Tray {
             .map_err(err)?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
+            // AppIndicator hosts on Linux expose the menu instead of click events.
+            .with_menu_on_left_click(cfg!(target_os = "linux"))
             .with_tooltip("hushkey")
             .with_icon(image(Badge::Loading))
             .build()
@@ -305,6 +314,17 @@ impl Tray {
 
     pub fn action(&self, id: &MenuId) -> Option<Action> {
         self.actions.get(id).cloned()
+    }
+
+    pub fn icon_action(event: TrayIconEvent) -> Option<Action> {
+        match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => Some(Action::NetworkWindow),
+            _ => None,
+        }
     }
 
     /// Replace discovery results, retaining each complete peer in its action.
@@ -455,5 +475,30 @@ impl Tray {
             let _ = self.history.append(&item);
             self.history_items.push(item);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn left_click_opens_settings_once_and_right_click_leaves_it_to_the_menu() {
+        let click = |button, button_state| TrayIconEvent::Click {
+            id: tray_icon::TrayIconId::new("hushkey"),
+            position: Default::default(),
+            rect: Default::default(),
+            button,
+            button_state,
+        };
+        use MouseButton::{Left, Right};
+        use MouseButtonState::{Down, Up};
+        assert_eq!(Tray::icon_action(click(Left, Down)), None);
+        assert_eq!(
+            Tray::icon_action(click(Left, Up)),
+            Some(Action::NetworkWindow)
+        );
+        assert_eq!(Tray::icon_action(click(Right, Down)), None);
+        assert_eq!(Tray::icon_action(click(Right, Up)), None);
     }
 }

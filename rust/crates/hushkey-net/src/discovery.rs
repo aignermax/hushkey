@@ -2,12 +2,28 @@ use crate::{server::State, *};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap},
+    io::ErrorKind,
     net::{Ipv4Addr, UdpSocket},
     sync::atomic::Ordering,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 const MAX: usize = 1024;
+
+// A UDP reply to a peer that has already closed its discovery socket can
+// surface as an asynchronous receive error, especially on Windows.
+fn transient_receive(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::Interrupted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+    )
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Packet {
@@ -94,17 +110,10 @@ pub(crate) fn listen(state: Arc<State>, address: SocketAddr) -> Result<JoinHandl
                             }
                         }
                     }
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock
-                                | std::io::ErrorKind::TimedOut
-                                | std::io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => {
-                        state.stop.store(true, Ordering::Release);
-                        break;
-                    }
+                    Err(e) if transient_receive(e.kind()) => {}
+                    // An interface may temporarily disappear. Keep the TCP
+                    // service running and retry the discovery socket.
+                    Err(_) => thread::sleep(Duration::from_millis(100)),
                 }
             }
         })
@@ -165,13 +174,7 @@ pub fn discover(identity: &Identity, timeout: Duration) -> Result<Vec<Peer>, Str
                     }
                 }
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) => {}
+            Err(e) if transient_receive(e.kind()) => {}
             Err(e) => return Err(format!("discovery receive: {e}")),
         }
     }
@@ -181,4 +184,17 @@ pub fn discover(identity: &Identity, timeout: Duration) -> Result<Vec<Peer>, Str
     let mut result: Vec<_> = peers.into_values().collect();
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_departed_discovery_peer_does_not_end_the_scan() {
+        assert!(transient_receive(ErrorKind::ConnectionReset));
+        assert!(transient_receive(ErrorKind::ConnectionRefused));
+        assert!(transient_receive(ErrorKind::HostUnreachable));
+        assert!(!transient_receive(ErrorKind::PermissionDenied));
+    }
 }

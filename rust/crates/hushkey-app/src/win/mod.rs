@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::config;
 use crate::log;
-pub use elevation::foreground_out_of_reach;
+pub use elevation::InsertTarget;
 pub use hotkey::{forget_press, since_last_seen, KeyEvent};
 pub use insert::Restore;
 pub use overlay::Overlay;
@@ -130,29 +130,53 @@ pub fn tapped(key: &str) {
 /// typed. Caps Lock is off meanwhile: with it on, some windows (Windows
 /// Terminal among them) do not take the paste chord as one, and typed
 /// letters would come out inverted.
-pub fn insert(text: &str, paste: bool, restore: bool) -> Result<Restore, String> {
+pub fn insert_into(
+    target: InsertTarget,
+    text: &str,
+    paste: bool,
+    restore: bool,
+) -> Result<Restore, String> {
+    match target.resolve() {
+        elevation::Delivery::Clipboard | elevation::Delivery::RustDesk => {
+            return copy_for_paste(text, None)
+        }
+        elevation::Delivery::Elevated(app) => return copy_for_paste(text, Some(app)),
+        elevation::Delivery::Automatic => {}
+    }
     let caps = insert::caps_lock_on();
     if caps {
         insert::tap_key(VK_CAPITAL as u16);
     }
-    let result = insert_as_is(text, paste, restore);
+    let result = insert_as_is(target, text, paste, restore);
     if caps {
         // Queued after the chord (or the typing): it applies once the
         // target has seen them.
         insert::tap_key(VK_CAPITAL as u16);
     }
-    result
+    result.or_else(|e| {
+        log::line(&format!("insert failed ({e}); copying for manual paste"));
+        copy_for_paste(text, None).map_err(|copy_error| format!("{e}; {copy_error}"))
+    })
 }
 
-fn insert_as_is(text: &str, paste: bool, restore: bool) -> Result<Restore, String> {
+fn copy_for_paste(text: &str, elevated: Option<String>) -> Result<Restore, String> {
+    copy(text.trim_end())?;
+    Ok(Restore::ManualPaste(elevated))
+}
+
+fn insert_as_is(
+    target: InsertTarget,
+    text: &str,
+    paste: bool,
+    restore: bool,
+) -> Result<Restore, String> {
     if paste {
-        insert::paste(text, restore).or_else(|e| {
-            log::line(&format!("paste failed ({e}); typing instead"));
-            insert::type_text(text).map(|()| Restore::Nothing)
-        })
-    } else {
-        insert::type_text(text).map(|()| Restore::Nothing)
+        match insert::paste(target, text, restore) {
+            Ok(result) => return Ok(result),
+            Err(e) => log::line(&format!("paste failed ({e}); typing instead")),
+        }
     }
+    insert::type_text(target, text).map(|()| Restore::Nothing)
 }
 
 /// Put `text` on the clipboard (a history entry the user picked, or a

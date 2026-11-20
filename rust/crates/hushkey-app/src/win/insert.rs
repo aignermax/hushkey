@@ -13,6 +13,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
 
 use super::clipboard::{self, window_pid, Offer};
+use super::InsertTarget;
 
 /// How long the target may take to fetch a pasted dictation before the
 /// previous clipboard is given up rather than restored.
@@ -65,7 +66,7 @@ pub fn caps_lock_on() -> bool {
 }
 
 /// Type `text` as Unicode key events.
-pub fn type_text(text: &str) -> Result<(), String> {
+pub fn type_text(target: InsertTarget, text: &str) -> Result<(), String> {
     let mut inputs = Vec::new();
     for line_or_break in text.split_inclusive('\n') {
         let (line, newline) = match line_or_break.strip_suffix('\n') {
@@ -83,6 +84,9 @@ pub fn type_text(text: &str) -> Result<(), String> {
     }
     // In blocks, so a long dictation does not flood the input queue.
     for block in inputs.chunks(200) {
+        if target != InsertTarget::capture() {
+            return Err("the focused window changed while typing".into());
+        }
         send(block)?;
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -136,7 +140,7 @@ pub fn foreground_is_terminal() -> bool {
     }
 }
 
-fn paste_chord() -> Result<(), String> {
+fn paste_chord() -> [INPUT; 4] {
     let modifier = if foreground_is_terminal() {
         VK_SHIFT
     } else {
@@ -147,18 +151,21 @@ fn paste_chord() -> Result<(), String> {
     } else {
         b'V' as VIRTUAL_KEY
     };
-    send(&[
+    [
         key(modifier, 0, 0),
         key(letter, 0, 0),
         key(letter, 0, KEYEVENTF_KEYUP),
         key(modifier, 0, KEYEVENTF_KEYUP),
-    ])
+    ]
 }
 
 /// What became of the previous clipboard.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Restore {
     Restored,
+    /// A normal, persistent copy for manual paste, with the elevated
+    /// program's name when that was the reason.
+    ManualPaste(Option<String>),
     /// There was no text to restore, or restoring was off.
     Nothing,
     /// The target did not fetch the dictation in time: restoring could
@@ -172,14 +179,14 @@ pub enum Restore {
 impl Restore {
     /// Whether the text reached a window: a paste nobody fetched did not.
     pub fn arrived(&self) -> bool {
-        *self != Restore::NotFetched
+        !matches!(self, Restore::NotFetched | Restore::ManualPaste(_))
     }
 }
 
 /// Paste `text` into the focused window. With `restore`, the previous
 /// clipboard text comes back once the target has fetched the dictation.
 /// An error means nothing was pasted (the caller may type instead).
-pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
+pub fn paste(target: InsertTarget, text: &str, restore: bool) -> Result<Restore, String> {
     let previous = if restore {
         clipboard::read_text()
     } else {
@@ -198,7 +205,12 @@ pub fn paste(text: &str, restore: bool) -> Result<Restore, String> {
         }
     };
     offer.arm();
-    if let Err(e) = paste_chord() {
+    let chord = paste_chord();
+    if target != InsertTarget::capture() {
+        offer.close();
+        return super::copy_for_paste(text, None);
+    }
+    if let Err(e) = send(&chord) {
         offer.close();
         if let Some(previous) = &previous {
             let _ = clipboard::write_text(previous, true);

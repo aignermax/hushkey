@@ -21,6 +21,7 @@ use hushkey_core::{
     Microphone, RecordConfig, RecordSession, TranscribeOptions, Transcriber,
 };
 use tray_icon::menu::MenuEvent;
+use tray_icon::TrayIconEvent;
 
 use crate::config::{self, Config, Insert, Mode, Updates};
 use crate::history::History;
@@ -28,10 +29,16 @@ use crate::icon::Badge;
 use crate::log;
 use crate::network::{self, Network, Recoverable};
 use crate::network_dialog;
-use crate::platform::{self, autostart, Hotkey, KeyEvent, Overlay, Restore};
+use crate::platform::{self, autostart, Hotkey, InsertTarget, KeyEvent, Overlay, Restore};
 use crate::strings::{self, Strings, MODELS};
 use crate::tray::{Action, Tray};
 use crate::update::{self, Release};
+
+mod connections;
+mod settings;
+use crate::network::Link;
+use connections::Connections;
+use settings::Settings;
 
 /// A press shorter than this is a tap: no dictation, and Caps Lock keeps
 /// its normal job of toggling.
@@ -44,9 +51,8 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 /// mid-sentence is far worse than one that ends late. A release that was
 /// missed ends the dictation at the next press and release anyway.
 const RELEASE_UNSEEN: Duration = Duration::from_secs(120);
-/// No repeats for this long while a window run as administrator has the
-/// focus: the key is out of sight there (see `win::elevation`), its release
-/// too, so the dictation ends rather than run on unseen.
+/// A RustDesk session can capture keyboard events, and an elevated window
+/// can hide them from the hook. End a dictation if repeats disappear there.
 const OUT_OF_SIGHT: Duration = Duration::from_millis(1200);
 /// A pause in the held key's repeats worth a line in the log.
 const NOTABLE_PAUSE: Duration = Duration::from_millis(1500);
@@ -75,7 +81,8 @@ enum Msg {
     #[cfg(windows)]
     Firewall(Result<(), String>),
     RevokeConfirmed(bool),
-    Key(KeyEvent),
+    KeyDown,
+    KeyUp(InsertTarget),
     /// Engine load number `.0` finished (or failed).
     Loaded(u64, Result<Arc<Engine>, String>),
     /// What the recording has heard so far.
@@ -87,8 +94,11 @@ enum Msg {
     Listen(u64, Event),
     /// The inserter finished one text.
     Inserted(Result<Restore, String>),
-    /// An update check found this (`.1`: asked for from the menu).
-    UpdateChecked(Result<Option<Release>, String>, bool),
+    UpdateChecked {
+        result: Result<Option<Release>, String>,
+        asked: bool,
+        policy: Updates,
+    },
     /// An update was put in place: the program to start (`None`: the
     /// password dialog was dismissed), or why not.
     UpdateInstalled(Result<Option<std::path::PathBuf>, String>),
@@ -153,8 +163,9 @@ pub fn run(after_update: bool) -> ExitCode {
     let history = History::load(&config::state_dir().join("history.json"));
     tray.set_history(history.entries());
     let paste = Arc::new(AtomicBool::new(config.insert == Insert::Paste));
+    let restore_clipboard = Arc::new(AtomicBool::new(config.restore_clipboard));
     let (inserter, inserter_thread) =
-        spawn_inserter(paste.clone(), config.restore_clipboard, tx.clone());
+        spawn_inserter(paste.clone(), restore_clipboard.clone(), tx.clone());
     log::line(&format!(
         "started, key {}, model {}",
         config.key, config.model
@@ -168,10 +179,13 @@ pub fn run(after_update: bool) -> ExitCode {
         overlay,
         history,
         paste,
+        restore_clipboard,
         inserter: Some(inserter),
         inserter_thread: Some(inserter_thread),
         engine: None,
         network,
+        connections: Connections::new(),
+        settings: Settings::new(),
         backend: None,
         connecting: false,
         discovering: false,
@@ -185,6 +199,7 @@ pub fn run(after_update: bool) -> ExitCode {
         longest_pause: Duration::ZERO,
         previewed: false,
         record_generation: 0,
+        dictation_target: None,
         listening: None,
         listen_generation: 0,
         draining: None,
@@ -205,19 +220,20 @@ pub fn run(after_update: bool) -> ExitCode {
         app.tray
             .network_identity(&network.identity.name(), &network.identity.id());
     }
-    if let Some(peer) = app.config.remote.clone() {
+    if app.config.remote.is_some() {
+        app.open_settings();
         // Remote-only clients never need to download or load a local model.
         if app.config.mode == Mode::Listen {
             app.config.mode = Mode::PushToTalk;
             app.save(|c| c.mode = Mode::PushToTalk);
         }
-        app.connect_remote(peer);
+        app.begin_check();
     } else {
         app.load_engine();
     }
     if let Some(e) = network_error {
-        // Keep client functionality, but don't show a failed listener as on.
-        app.config.server_enabled = false;
+        // Preserve the requested host role so the listener can recover.
+        app.connections.host_error = Some(e.clone());
         app.tray.sync(&app.config, autostart::enabled());
         app.failure_notice(&format!("Network: {e}"));
         log::line(&format!("network unavailable: {e}"));
@@ -227,20 +243,28 @@ pub fn run(after_update: bool) -> ExitCode {
 
 fn install_hotkey(key: &str, tx: Sender<Msg>) -> Result<Hotkey, String> {
     Hotkey::install(key, move |event| {
-        let _ = tx.send(Msg::Key(event));
+        let _ = tx.send(match event {
+            KeyEvent::Down => Msg::KeyDown,
+            KeyEvent::Up => Msg::KeyUp(InsertTarget::capture()),
+        });
     })
 }
 
 /// One thread inserts, so dictations never interleave.
 fn spawn_inserter(
     paste: Arc<AtomicBool>,
-    restore: bool,
+    restore_clipboard: Arc<AtomicBool>,
     tx: Sender<Msg>,
-) -> (Sender<String>, JoinHandle<()>) {
-    let (text_tx, text_rx) = mpsc::channel::<String>();
+) -> (Sender<(InsertTarget, String)>, JoinHandle<()>) {
+    let (text_tx, text_rx) = mpsc::channel::<(InsertTarget, String)>();
     let thread = std::thread::spawn(move || {
-        for text in text_rx {
-            let result = platform::insert(&text, paste.load(Ordering::Relaxed), restore);
+        for (target, text) in text_rx {
+            let result = platform::insert_into(
+                target,
+                &text,
+                paste.load(Ordering::Relaxed),
+                restore_clipboard.load(Ordering::Relaxed),
+            );
             let _ = tx.send(Msg::Inserted(result));
         }
     });
@@ -257,10 +281,13 @@ struct App {
     history: History,
     /// Paste (true) or type, as the menu last said; read by the inserter.
     paste: Arc<AtomicBool>,
-    inserter: Option<Sender<String>>,
+    restore_clipboard: Arc<AtomicBool>,
+    inserter: Option<Sender<(InsertTarget, String)>>,
     inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
     network: Option<Network>,
+    connections: Connections,
+    settings: Settings,
     backend: Option<Arc<Recoverable>>,
     connecting: bool,
     discovering: bool,
@@ -276,6 +303,8 @@ struct App {
     /// This dictation showed some text while recording.
     previewed: bool,
     record_generation: u64,
+    /// The window at key release, kept through a remote retry of the same audio.
+    dictation_target: Option<InsertTarget>,
     listening: Option<ListenSession>,
     /// Numbers listening sessions, so events of one already stopped are
     /// told apart from those of the current one.
@@ -353,6 +382,13 @@ impl App {
         self.config.mode = Mode::PushToTalk;
         self.save(|c| c.mode = Mode::PushToTalk);
         self.connecting = true;
+        self.connections.checking = false;
+        self.connections.link = Link::Connecting;
+        self.connections.client_status = format!(
+            "{} · {}",
+            peer.name,
+            network::words(self.s, "Verbindung wird aufgebaut …", "Connecting …")
+        );
         self.connect_generation += 1;
         let text = network::words(
             self.s,
@@ -379,6 +415,9 @@ impl App {
             return;
         }
         let title = format!("Hush-Key · LAN · {}", request.code);
+        if hosting {
+            self.connections.request = Some(request.peer.clone());
+        }
         let dialog = network_dialog::request(
             &title,
             &network::consent(self.s, &request, hosting),
@@ -392,6 +431,17 @@ impl App {
 
     fn network_event(&mut self, event: network::Event) {
         match event {
+            network::Event::Checked {
+                generation,
+                peer,
+                result,
+            } => {
+                if generation == self.connect_generation
+                    && self.config.remote.as_ref().is_some_and(|p| p.id == peer.id)
+                {
+                    self.end_check(peer, result);
+                }
+            }
             network::Event::Approval {
                 request,
                 hosting,
@@ -416,6 +466,15 @@ impl App {
                 match result {
                     Ok(peers) => {
                         self.tray.set_network_peers(&peers);
+                        self.connections.peers = peers.clone();
+                        self.connections.search_status = format!(
+                            "{}: {}",
+                            network::words(self.s, "Gefundene Rechner", "Computers found"),
+                            peers.len()
+                        );
+                        if self.connections.quiet_search {
+                            return;
+                        }
                         if peers.is_empty() {
                             self.failure_notice(network::words(self.s,
                                 "Keine Rechner gefunden. Auf dem anderen PC Hush-Key starten und LAN-Berechnung anbieten. Firewall: TCP/UDP 47957 im privaten Netz erlauben. Gast-WLAN kann die Suche blockieren.",
@@ -431,7 +490,12 @@ impl App {
                             );
                         }
                     }
-                    Err(e) => self.failure_notice(&format!("Network: {e}")),
+                    Err(e) => {
+                        self.connections.search_status = e.clone();
+                        if !self.connections.quiet_search {
+                            self.failure_notice(&format!("Network: {e}"));
+                        }
+                    }
                 }
             }
             network::Event::Connected { generation, result } => {
@@ -441,6 +505,15 @@ impl App {
                 self.connecting = false;
                 match result {
                     Ok((peer, backend)) => {
+                        self.connections.paused = false;
+                        self.connections.link = Link::Waiting;
+                        self.connections.client_status = network::words(
+                            self.s,
+                            "Gekoppelt · Datentest steht aus",
+                            "Paired · awaiting data test",
+                        )
+                        .into();
+                        self.connections.next_check = Instant::now();
                         let retained = self.has_failed()
                             && self.config.remote.as_ref().is_some_and(|p| p.id == peer.id);
                         self.load_generation += 1; // ignore a superseded local model load
@@ -472,6 +545,15 @@ impl App {
                         );
                     }
                     Err(e) => {
+                        self.connections.link = Link::Offline;
+                        self.connections.client_status = format!(
+                            "{}: {e}",
+                            network::words(
+                                self.s,
+                                "Verbindung fehlgeschlagen",
+                                "Connection failed"
+                            )
+                        );
                         self.idle();
                         self.failure_notice(&format!("Remote: {e}"));
                         if self.backend.is_none() {
@@ -490,6 +572,11 @@ impl App {
             if !platform::pump() {
                 return self.quit();
             }
+            while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                if let Some(action) = Tray::icon_action(event) {
+                    self.menu(action);
+                }
+            }
             while let Ok(event) = MenuEvent::receiver().try_recv() {
                 if let Some(action) = self.tray.action(&event.id) {
                     if action == Action::Quit {
@@ -502,6 +589,8 @@ impl App {
                 self.handle(msg);
             }
             self.dialogs.retain(|(_, dialog)| !dialog.done());
+            self.poll_settings();
+            self.poll_connections();
             if self.recording.is_none()
                 && self.listening.is_none()
                 && !self.busy
@@ -519,12 +608,13 @@ impl App {
                 self.longest_pause = self.longest_pause.max(quiet.unwrap_or_default());
             }
             if self.recording.is_some() && quiet.is_some_and(|q| q > OUT_OF_SIGHT) {
-                if let Some(app) = platform::foreground_out_of_reach() {
+                let target = InsertTarget::capture();
+                if let Some(app) = target.may_hide_key_release() {
                     log::line(&format!(
-                        "the key is out of sight in {app}, which runs as administrator; ending the dictation"
+                        "the key is out of sight in {app}; ending the dictation"
                     ));
                     platform::forget_press();
-                    self.key_up();
+                    self.key_up(target);
                 }
             }
             if let Some(quiet) = quiet.filter(|q| *q > RELEASE_UNSEEN) {
@@ -534,7 +624,7 @@ impl App {
                         "the key's release was not seen ({} ms without its repeats); ending the dictation",
                         quiet.as_millis()
                     ));
-                    self.key_up();
+                    self.key_up(InsertTarget::capture());
                 }
             }
             if Instant::now() > self.next_update_check {
@@ -592,22 +682,9 @@ impl App {
         ExitCode::SUCCESS
     }
 
-    fn insert(&mut self, text: String) {
-        if let Some(app) = platform::foreground_out_of_reach() {
-            // Nothing can be typed into it; the clipboard reaches it (and,
-            // for a remote desktop, the machine at the other end).
-            log::line(&format!("{app} runs as administrator: copied, not pasted"));
-            match platform::copy(text.trim_end()) {
-                Ok(()) => self.notice_for(GREY, &self.s.out_of_reach(&app), FAILURE_NOTICE),
-                Err(e) => log::line(&format!("copy failed: {e}")),
-            }
-            if !self.busy && self.recording.is_none() && !self.hearing {
-                self.idle();
-            }
-            return;
-        }
+    fn insert(&mut self, target: InsertTarget, text: String) {
         if let Some(inserter) = &self.inserter {
-            if inserter.send(text).is_ok() {
+            if inserter.send((target, text)).is_ok() {
                 self.pending_inserts += 1;
             }
         }
@@ -685,6 +762,15 @@ impl App {
                 if allowed {
                     self.connect_generation += 1;
                     self.connecting = false;
+                    self.connections.checking = false;
+                    self.connections.paused = true;
+                    self.connections.link = Link::Revoked;
+                    self.connections.client_status = network::words(
+                        self.s,
+                        "Freigabe widerrufen · zum Koppeln auf Verbinden klicken",
+                        "Permission revoked · choose Connect to pair again",
+                    )
+                    .into();
                     for (_, dialog) in &self.dialogs {
                         dialog.cancel();
                     }
@@ -740,8 +826,8 @@ impl App {
                     self.failure_notice(&text);
                 }
             }
-            Msg::Key(KeyEvent::Down) => self.key_down(),
-            Msg::Key(KeyEvent::Up) => self.key_up(),
+            Msg::KeyDown => self.key_down(),
+            Msg::KeyUp(target) => self.key_up(target),
             Msg::RecordingError(generation, message) => {
                 if self.recording.is_some() && generation == self.record_generation {
                     self.overlay.show(
@@ -782,6 +868,7 @@ impl App {
                 }
                 self.busy = false;
                 self.tray.recovery_available(false);
+                let target = self.dictation_target.take();
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     // Silence from the microphone shows as no preview.
@@ -801,7 +888,7 @@ impl App {
                     // Kept before inserting: a misdirected paste is recoverable.
                     self.history.add(&text);
                     self.tray.set_history(self.history.entries());
-                    self.insert(text + " ");
+                    self.insert(target.unwrap_or_else(InsertTarget::capture), text + " ");
                 }
             }
             Msg::Dictated(_, Err(e)) => {
@@ -823,8 +910,17 @@ impl App {
                 self.pending_inserts = self.pending_inserts.saturating_sub(1);
                 let arrived = result.as_ref().is_ok_and(platform::Restore::arrived);
                 match result {
+                    #[cfg(windows)]
+                    Ok(Restore::ManualPaste(app)) => {
+                        log::line("dictation copied for manual paste");
+                        let hint = self.s.copied(app.as_deref());
+                        self.notice_for(GREY, &hint, FAILURE_NOTICE);
+                    }
                     Ok(restore) => log::line(&format!("inserted, clipboard: {restore:?}")),
-                    Err(e) => log::line(&format!("insert failed: {e}")),
+                    Err(e) => {
+                        log::line(&format!("insert failed: {e}"));
+                        self.failure_notice(&format!("{}: {e}", self.s.failed));
+                    }
                 }
                 if arrived && self.config.guide {
                     // The first dictation is in: the first steps are done.
@@ -840,7 +936,11 @@ impl App {
                     self.idle();
                 }
             }
-            Msg::UpdateChecked(result, asked) => match result {
+            Msg::UpdateChecked {
+                result,
+                asked,
+                policy,
+            } if policy == self.config.updates => match result {
                 Ok(release) => {
                     if let Some(r) = &release {
                         log::line(&format!("update available: v{}", r.version));
@@ -858,6 +958,7 @@ impl App {
                     }
                 }
             },
+            Msg::UpdateChecked { .. } => {} // The user changed channels during the check.
             Msg::UpdateInstalled(Ok(None)) => {
                 log::line("update cancelled at the password dialog");
                 self.updating = false;
@@ -948,6 +1049,7 @@ impl App {
     /// A notice that something did not work, long enough to be read; the
     /// details are in the log.
     fn failure_notice(&mut self, text: &str) {
+        self.settings.feedback = Some((Instant::now(), text.to_owned()));
         self.notice_for(GREY, text, FAILURE_NOTICE);
     }
 
@@ -1093,7 +1195,7 @@ impl App {
         }
     }
 
-    fn key_up(&mut self) {
+    fn key_up(&mut self, target: InsertTarget) {
         let held = self.pressed_at.take().map(|t| t.elapsed());
         let tap = held.is_some_and(|held| held < MIN_HOLD);
         if tap {
@@ -1123,6 +1225,7 @@ impl App {
             ));
         }
         self.busy = true;
+        self.dictation_target = Some(target);
         let text = network::overlay_text(self.config.remote.as_ref(), self.s.transcribing);
         self.overlay.show(ORANGE, &text);
         self.tray.show(Badge::Transcribing, &text);
@@ -1139,34 +1242,21 @@ impl App {
 
     fn menu(&mut self, action: Action) {
         match action {
-            Action::NetworkDiscover => {
-                if !self.discovering {
-                    if let Some(network) = &self.network {
-                        self.discovering = true;
-                        self.tray.network_searching(true);
-                        network.discover();
-                        self.notice(
-                            GREY,
-                            network::words(
-                                self.s,
-                                "Suche Hush-Key-Rechner im LAN …",
-                                "Discovering Hush-Key computers on the LAN …",
-                            ),
-                        );
-                    } else {
-                        self.failure_notice(network::words(
-                            self.s,
-                            "Netzwerk nicht verfügbar. Bitte Log prüfen und Hush-Key neu starten.",
-                            "Network unavailable. Check the log and restart Hush-Key.",
-                        ));
-                    }
-                }
+            Action::NetworkWindow => self.open_settings(),
+            Action::NetworkDiscover => self.find_servers(false),
+            Action::NetworkConnect(peer) => {
+                self.settings.window.show();
+                self.connect_remote(peer);
             }
-            Action::NetworkConnect(peer) => self.connect_remote(peer),
             Action::NetworkLocal => {
                 if self.can_switch() {
                     self.stop_listening(false);
                     self.config.remote = None;
+                    self.connect_generation += 1;
+                    self.connections.checking = false;
+                    self.connections.paused = false;
+                    self.connections.client_status.clear();
+                    self.connections.link = Link::Local;
                     self.backend = None;
                     self.save(|c| c.remote = None);
                     self.load_engine();
@@ -1176,9 +1266,10 @@ impl App {
                 let enabled = !self.config.server_enabled;
                 if let Some(network) = &mut self.network {
                     if let Err(e) = network.set_enabled(enabled) {
+                        self.connections.host_error = Some(e.clone());
                         self.failure_notice(&format!("Server: {e}"));
-                        self.tray.sync(&self.config, autostart::enabled());
-                        return;
+                    } else {
+                        self.connections.host_error = None;
                     }
                 } else {
                     self.failure_notice(network::words(
@@ -1200,6 +1291,9 @@ impl App {
                 }
                 self.config.server_enabled = enabled;
                 self.save(|c| c.server_enabled = enabled);
+                if enabled {
+                    self.settings.window.show();
+                }
             }
             Action::NetworkRevoke => {
                 if !self.revoking {
@@ -1235,6 +1329,7 @@ impl App {
                     if let Some(backend) = &self.backend {
                         backend.discard();
                     }
+                    self.dictation_target = None;
                     self.tray.recovery_available(false);
                     self.overlay.hide();
                     self.idle();
@@ -1257,6 +1352,14 @@ impl App {
                 }
             }
             Action::Key(name) => {
+                if self.recording.is_some() || self.pressed_at.is_some() {
+                    self.failure_notice(network::words(
+                        self.s,
+                        "Zum Ändern zuerst die Sprechtaste loslassen.",
+                        "Release the talk key before changing it.",
+                    ));
+                    return;
+                }
                 // One watcher per process: the old one goes first.
                 self.hotkey = None;
                 match install_hotkey(name, self.tx.clone()) {
@@ -1270,6 +1373,7 @@ impl App {
                     Err(e) => {
                         log::line(&format!("key not changed: {e}"));
                         self.hotkey = install_hotkey(&self.config.key, self.tx.clone()).ok();
+                        self.failure_notice(&e);
                     }
                 }
             }
@@ -1288,10 +1392,28 @@ impl App {
                 self.paste.store(mode == Insert::Paste, Ordering::Relaxed);
                 self.save(|c| c.insert = mode);
             }
+            Action::RestoreClipboard(restore) => {
+                self.config.restore_clipboard = restore;
+                self.restore_clipboard.store(restore, Ordering::Relaxed);
+                self.save(|c| c.restore_clipboard = restore);
+            }
+            Action::Theme(theme) => {
+                self.config.theme = theme;
+                self.save(|c| c.theme = theme);
+            }
+            Action::Updates(policy) => {
+                if self.config.updates != policy {
+                    self.config.updates = policy;
+                    self.save(|c| c.updates = policy);
+                    self.update = None;
+                    self.tray.offer_update(None);
+                    self.next_update_check = Instant::now();
+                }
+            }
             Action::Copy(i) => {
                 if let Some(entry) = self.history.entries().get(i) {
                     match platform::copy(&entry.text) {
-                        Ok(()) => self.notice(GREY, &self.s.copied()),
+                        Ok(()) => self.notice(GREY, &self.s.copied(None)),
                         Err(e) => log::line(&format!("copy failed: {e}")),
                     }
                 }
@@ -1301,6 +1423,7 @@ impl App {
                 let on = !autostart::enabled();
                 if let Err(e) = autostart::set(on) {
                     log::line(&format!("autostart: {e}"));
+                    self.failure_notice(&e);
                 }
             }
             Action::OpenLogs => platform::open_folder(&config::state_dir()),
@@ -1330,13 +1453,22 @@ impl App {
         // A program some other package manager put in /usr is that one's
         // to update (hushkey's own .deb updates through apt, see
         // update::install).
+        let policy = self.config.updates;
         if !platform::setup::updates_itself() {
-            let _ = self.tx.send(Msg::UpdateChecked(Ok(None), asked));
+            let _ = self.tx.send(Msg::UpdateChecked {
+                result: Ok(None),
+                asked,
+                policy,
+            });
             return;
         }
-        let (tx, pre) = (self.tx.clone(), update::wants_pre(self.config.updates));
+        let (tx, pre) = (self.tx.clone(), update::wants_pre(policy));
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::UpdateChecked(update::check(pre), asked));
+            let _ = tx.send(Msg::UpdateChecked {
+                result: update::check(pre),
+                asked,
+                policy,
+            });
         });
     }
 
@@ -1354,9 +1486,15 @@ impl App {
 
     /// Change the settings file as it is now (the user may have edited it),
     /// not as it was at start.
-    fn save(&self, change: impl FnOnce(&mut Config)) {
+    fn save(&mut self, change: impl FnOnce(&mut Config)) {
         if let Err(e) = Config::update(change) {
             log::line(&format!("settings not saved: {e}"));
+            let label = network::words(
+                self.s,
+                "Einstellungen konnten nicht gespeichert werden",
+                "Settings could not be saved",
+            );
+            self.failure_notice(&format!("{label}: {e}"));
         }
     }
 
@@ -1518,7 +1656,7 @@ impl App {
             // One listening session is one entry in the history.
             self.history.extend(text);
             self.tray.set_history(self.history.entries());
-            self.insert(text.to_string() + " ");
+            self.insert(InsertTarget::capture(), text.to_string() + " ");
         }
         log::line(&format!("utterance: {} chars", text.chars().count()));
     }

@@ -92,11 +92,13 @@ the usual system dialog.
 While you speak, a small pill at the top of the screen with the mouse shows
 what has been heard so far.
 
-The tray menu holds the settings: **model** (tiny … large-v3; large-v3-turbo
-is the default and a good balance), **key** (Caps Lock, Right Ctrl, F8, F9,
-Scroll Lock), **language** (or auto-detect), **insert method** (paste via the
-clipboard, which is restored afterwards, or typed keystrokes), **start at
-login**, **logs**, and **updates**.
+Click the tray icon to open **Settings**. On Linux, choose **Settings…** in
+the indicator menu. **Dictation** holds the talk key, language, local model
+and insertion settings. **Connections** shows the selected server, measured
+response time, host readiness and active clients. **General** holds startup,
+updates, appearance and the running program's version and build identifier.
+Changes take effect in the running app. Close the window to keep dictating
+from the tray. Right-click the tray icon for shortcuts and recent dictations.
 
 ## Use another computer's GPU
 
@@ -104,15 +106,18 @@ Install this version of Hush-Key on both computers. On the powerful computer,
 keep **Network → Offer LAN computation (approval required)** enabled and wait
 for its local model to load. On the laptop:
 
-1. Choose **Network → Find network computers**. The search uses local IPv4
-   broadcasts; no account, cloud directory or internet relay is involved.
-2. Open the Network menu again and select the computer by name and device ID.
+1. Open **Settings → Connections** and switch to the client view. Refresh the
+   list of computers on your LAN.
+2. Select the computer by name and device ID and click **Connect**.
 3. Both computers show the same eight-digit comparison code and a privacy
    notice. Compare the codes and click **OK on both computers**. Cancel if
    they differ. Device names and discovery responses alone are not trusted.
-4. Dictate as usual. **Remote · computer name** appears in the preview and
-   computation status. Text is inserted on the laptop, including into a
-   focused remote-desktop window where that software forwards input.
+4. **Test connection** sends an encrypted message and displays the reply time.
+   The host window lists active clients. Its model status shows when it is
+   ready to transcribe. These checks continue after you close the window.
+5. Dictate as usual. **Remote · computer name** appears in the preview.
+   On Windows, release the key over RustDesk and wait for the clipboard hint.
+   Press **Ctrl+V** in the remote session with RustDesk clipboard sync enabled.
 
 Permissions and the selected computer survive restarts. Selecting a computer
 as a server does not grant it access to your own computation; the reverse
@@ -132,10 +137,10 @@ both devices must approve a new pairing. Disabling the server immediately
 stops discovery replies and disconnects its clients.
 
 If a final request fails, the current recording stays temporarily in memory.
-Use **Retry failed dictation** or **Discard failed dictation** in the Network
-menu; a new dictation cannot overwrite it. There is no automatic destination
-switch or automatic replay. If its address changes or permission needs renewal,
-rediscover and reconnect to the same device ID; the retained audio survives.
+Use **Retry** or **Discard** in the connection window. Hush-Key checks the
+selected host periodically and looks for its saved identity if its address
+changes. A restored connection leaves the choice to resend the recording
+with you. If permission was revoked, click **Connect** to pair again.
 A server processes one network request at a time. Final requests wait a bounded
 time for previews to finish; excess preview requests report busy. Remote requests are
 limited to ten minutes of audio. A running computation can finish after a

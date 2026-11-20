@@ -5,7 +5,7 @@ mod discovery;
 mod identity;
 mod server;
 mod wire;
-pub use client::Client;
+pub use client::{Client, PROBE_UNSUPPORTED};
 pub use discovery::discover;
 use hushkey_core::{TranscribeOptions, Transcript};
 pub use identity::Identity;

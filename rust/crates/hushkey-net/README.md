@@ -27,6 +27,19 @@ their own consent. Requests are never retried internally: a lost reply is an err
 and caller-side insertion must happen only once after a successful return.
 Cancellation closes the connection and discards any eventual result.
 
+`Client::resume` restores a locally pinned host at a saved or rediscovered
+address. `Client::probe` verifies its Noise identity, then times an encrypted
+ping and reply. The host checks its existing compute grant before replying.
+Probes run independently of inference and never open pairing dialogs.
+Version 2 hosts that predate probes return `PROBE_UNSUPPORTED`. Their existing
+pairing and transcription exchanges remain compatible.
+
+`Server::clients` lists the authenticated devices that paired, started a
+transcription session, or probed in the preceding 15 seconds. Send a probe
+every few seconds while connected to maintain presence between dictations.
+Each entry includes the client's observed TCP source address. The source port
+is ephemeral. Disabling the host or revoking trust clears presence immediately.
+
 Callbacks are synchronous user code and cannot be safely forcibly stopped.
 Network waits and handler lifetimes are bounded; a blocked callback holds its
 bounded worker slot until it returns. A running inference may finish after

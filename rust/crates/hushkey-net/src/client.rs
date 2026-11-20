@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// An authenticated v2 host that predates the optional presence exchange.
+pub const PROBE_UNSUPPORTED: &str = "this host version does not support connection checks";
+
 /// Cloneable pinned peer handle. A fresh encrypted connection carries each request.
 #[derive(Clone)]
 pub struct Client {
@@ -22,6 +25,39 @@ impl Client {
             identity,
             peer: peer.clone(),
         })
+    }
+    /// Restore a previously pinned identity at a saved or rediscovered address.
+    /// This reads local trust only. Call `probe` to verify the remote endpoint.
+    pub fn resume(identity: Identity, peer: &Peer) -> Result<Self, String> {
+        validate_peer(peer)?;
+        require_pin(&identity, peer, identity.epoch()?)?;
+        Ok(Self {
+            identity,
+            peer: peer.clone(),
+        })
+    }
+
+    /// Time one encrypted ping and reply after verifying the host's static key.
+    /// This never requests pairing or compute. Both grants must still be valid.
+    pub fn probe(&self) -> Result<Duration, String> {
+        let epoch = self.identity.epoch()?;
+        require_pin(&self.identity, &self.peer, epoch)?;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut ch = authenticated_channel(&self.identity, &self.peer, None, Some(deadline))?;
+        let ping = Msg::Probe {
+            name: self.identity.name(),
+        };
+        let start = Instant::now();
+        ch.send_msg(&ping, None)?;
+        let reply = ch.recv_msg(None);
+        let rtt = start.elapsed();
+        require_pin(&self.identity, &self.peer, epoch)?;
+        match reply {
+            Ok(Msg::Pong) => Ok(rtt),
+            Err(e) if e == "remote: invalid protocol message" => Err(PROBE_UNSUPPORTED.into()),
+            Err(e) => Err(e),
+            _ => Err("invalid probe reply".into()),
+        }
     }
     /// No automatic retries. Cancellation discards any late reply.
     pub fn transcribe(
@@ -93,6 +129,13 @@ impl Client {
         wire::decode_result(&result)
     }
 }
+fn require_pin(id: &Identity, p: &Peer, epoch: u64) -> Result<(), String> {
+    if id.authorized(Role::PinnedServer, &p.id, epoch)? {
+        Ok(())
+    } else {
+        Err("host is not paired; reconnect explicitly to pair".into())
+    }
+}
 fn validate_peer(p: &Peer) -> Result<(), String> {
     if !valid_id(&p.id)
         || !valid_name(&p.name)
@@ -104,23 +147,36 @@ fn validate_peer(p: &Peer) -> Result<(), String> {
     }
     Ok(())
 }
+fn authenticated_channel(
+    id: &Identity,
+    p: &Peer,
+    abort: Option<&dyn Fn() -> bool>,
+    deadline: Option<Instant>,
+) -> Result<Channel, String> {
+    if abort.is_some_and(|f| f()) {
+        return Err("request cancelled".into());
+    }
+    let stream = TcpStream::connect_timeout(&p.address, Duration::from_secs(2))
+        .map_err(|e| format!("cannot connect to peer: {e}"))?;
+    let mut io = Io::new(stream)?;
+    if let Some(deadline) = deadline {
+        io.until = deadline;
+    }
+    let ch = Channel::handshake(io, id, true, abort)?;
+    if ch.remote != p.id {
+        return Err("peer identity changed: authenticated key does not match selected peer".into());
+    }
+    Ok(ch)
+}
 fn open(
     id: &Identity,
     p: &Peer,
     confirm: Option<Approve>,
     abort: Option<&dyn Fn() -> bool>,
 ) -> Result<Channel, String> {
-    if abort.is_some_and(|f| f()) {
-        return Err("request cancelled".into());
-    }
     let trust_epoch = id.epoch()?;
     let server_pinned = id.authorized(Role::PinnedServer, &p.id, trust_epoch)?;
-    let stream = TcpStream::connect_timeout(&p.address, Duration::from_secs(2))
-        .map_err(|e| format!("cannot connect to peer: {e}"))?;
-    let mut ch = Channel::handshake(Io::new(stream)?, id, true, abort)?;
-    if ch.remote != p.id {
-        return Err("peer identity changed: authenticated key does not match selected peer".into());
-    }
+    let mut ch = authenticated_channel(id, p, abort, None)?;
     ch.send_msg(
         &Msg::Hello {
             name: id.name(),
