@@ -11,6 +11,7 @@ pub struct Strings {
     pub hearing: &'static str,
     pub failed: &'static str,
     pub model_menu: &'static str,
+    pub model_auto: &'static str,
     pub key_menu: &'static str,
     pub lang_menu: &'static str,
     pub lang_auto: &'static str,
@@ -53,6 +54,14 @@ pub struct Strings {
 }
 
 impl Strings {
+    pub fn model_choices(&self) -> impl Iterator<Item = (&'static str, String)> {
+        std::iter::once((crate::config::AUTO_MODEL, self.model_auto.to_owned())).chain(
+            MODELS
+                .iter()
+                .map(|&(name, size)| (name, format!("{name} ({size})"))),
+        )
+    }
+
     /// "Start with Windows", or "Start at login" elsewhere.
     pub fn autostart(&self) -> &'static str {
         if cfg!(windows) {
@@ -96,6 +105,7 @@ pub static EN: Strings = Strings {
     hearing: "hearing you …",
     failed: "error",
     model_menu: "Model",
+    model_auto: "Automatic",
     key_menu: "Push-to-talk key",
     lang_menu: "Language",
     lang_auto: "Auto-detect",
@@ -140,6 +150,7 @@ pub static DE: Strings = Strings {
     hearing: "hört dich …",
     failed: "Fehler",
     model_menu: "Modell",
+    model_auto: "Automatisch",
     key_menu: "Push-to-talk-Taste",
     lang_menu: "Sprache",
     lang_auto: "Automatisch erkennen",
@@ -184,6 +195,7 @@ pub static IT: Strings = Strings {
     hearing: "ti sento …",
     failed: "errore",
     model_menu: "Modello",
+    model_auto: "Automatico",
     key_menu: "Tasto push-to-talk",
     lang_menu: "Lingua",
     lang_auto: "Rilevamento automatico",
@@ -228,6 +240,7 @@ pub static ES: Strings = Strings {
     hearing: "te escucho …",
     failed: "error",
     model_menu: "Modelo",
+    model_auto: "Automático",
     key_menu: "Tecla para hablar",
     lang_menu: "Idioma",
     lang_auto: "Detección automática",
@@ -272,6 +285,7 @@ pub static FR: Strings = Strings {
     hearing: "je vous écoute …",
     failed: "erreur",
     model_menu: "Modèle",
+    model_auto: "Automatique",
     key_menu: "Touche push-to-talk",
     lang_menu: "Langue",
     lang_auto: "Détection automatique",
@@ -316,6 +330,7 @@ pub static ZH: Strings = Strings {
     hearing: "正在听你说 …",
     failed: "错误",
     model_menu: "模型",
+    model_auto: "自动",
     key_menu: "按住说话键",
     lang_menu: "语言",
     lang_auto: "自动检测",
@@ -364,6 +379,7 @@ pub static KN: Strings = Strings {
     hearing: "ನಿಮ್ಮನ್ನು ಕೇಳುತ್ತಿದೆ …",
     failed: "ದೋಷ",
     model_menu: "ಮಾದರಿ",
+    model_auto: "ಸ್ವಯಂಚಾಲಿತ",
     key_menu: "ಮಾತನಾಡಲು ಒತ್ತುವ ಕೀ",
     lang_menu: "ಭಾಷೆ",
     lang_auto: "ಸ್ವಯಂ ಪತ್ತೆ",

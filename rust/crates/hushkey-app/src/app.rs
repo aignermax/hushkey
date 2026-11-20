@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use hushkey_brain::{OpenAiChat, OpenAiConfig};
 use hushkey_core::{
-    model, Brain, CommandSet, Engine, EngineConfig, Event, EventSink, ListenConfig, ListenSession,
-    Microphone, RecordConfig, RecordSession, TranscribeOptions, Transcriber,
+    Brain, CommandSet, Engine, Event, EventSink, ListenConfig, ListenSession, Microphone,
+    RecordConfig, RecordSession, TranscribeOptions, Transcriber,
 };
 use tray_icon::menu::MenuEvent;
 use tray_icon::TrayIconEvent;
@@ -35,6 +35,7 @@ use crate::tray::{Action, Tray};
 use crate::update::{self, Release};
 
 mod connections;
+mod model_selection;
 mod settings;
 mod updates;
 use crate::network::Link;
@@ -84,8 +85,10 @@ enum Msg {
     RevokeConfirmed(bool),
     KeyDown,
     KeyUp(InsertTarget),
+    /// The automatic choice is known and its files are about to be opened.
+    LoadingModel(u64, &'static str),
     /// Engine load number `.0` finished (or failed).
-    Loaded(u64, Result<Arc<Engine>, String>),
+    Loaded(u64, Result<(String, Arc<Engine>), String>),
     /// What the recording has heard so far.
     Preview(u64, String),
     RecordingError(u64, String),
@@ -180,6 +183,7 @@ pub fn run(after_update: bool) -> ExitCode {
         inserter: Some(inserter),
         inserter_thread: Some(inserter_thread),
         engine: None,
+        loaded_model: None,
         network,
         connections: Connections::new(),
         settings: Settings::new(),
@@ -281,6 +285,7 @@ struct App {
     inserter: Option<Sender<(InsertTarget, String)>>,
     inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
+    loaded_model: Option<String>,
     network: Option<Network>,
     connections: Connections,
     settings: Settings,
@@ -687,52 +692,58 @@ impl App {
 
     fn load_engine(&mut self) {
         self.engine = None;
+        self.loaded_model = None;
         self.backend = None;
         if let Some(network) = &self.network {
             *network.engine.lock().unwrap_or_else(|p| p.into_inner()) = None;
         }
         self.load_generation += 1;
         let generation = self.load_generation;
-        let size = MODELS
-            .iter()
-            .find(|(name, _)| *name == self.config.model)
-            .map_or("?", |(_, size)| size);
-        let text = strings::fill(
-            self.s.model_loading,
-            &[("model", &self.config.model), ("size", size)],
-        );
+        let model = self.config.model.clone();
+        let use_gpu = self.config.use_gpu;
+        self.show_loading((model != config::AUTO_MODEL).then_some(model.as_str()));
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = model_selection::load(&model, use_gpu, |name| {
+                let _ = tx.send(Msg::LoadingModel(generation, name));
+            })
+            .map(|(name, engine)| {
+                log::line(&format!(
+                    "Whisper acceleration: {:?}",
+                    engine.acceleration()
+                ));
+                // Only a GPU has pipelines to build.
+                if engine.on_gpu() {
+                    warm_up(&engine);
+                }
+                (name.to_owned(), Arc::new(engine))
+            })
+            .map_err(|e| e.to_string());
+            let _ = tx.send(Msg::Loaded(generation, result));
+        });
+    }
+
+    fn show_loading(&mut self, model: Option<&str>) {
+        let text = match model {
+            Some(model) => {
+                let size = MODELS
+                    .iter()
+                    .find(|(name, _)| *name == model)
+                    .map_or("?", |(_, size)| size);
+                strings::fill(self.s.model_loading, &[("model", model), ("size", size)])
+            }
+            None => self.s.loading.into(),
+        };
         self.tray.show(Badge::Loading, &text);
         if self.config.guide && self.recording.is_none() && !self.busy {
             // A new install downloads its model first, which takes a
             // while: say so where it is seen, not only in the tray.
             self.overlay.show(GREY, &text);
         }
-        let (config, tx) = (self.config.clone(), self.tx.clone());
-        std::thread::spawn(move || {
-            let result = (|| {
-                let model =
-                    model::ensure_whisper_model(&config.model).map_err(|e| e.to_string())?;
-                let mut engine = EngineConfig::new(model);
-                engine.use_gpu = config.use_gpu;
-                // Listening needs it, and it keeps whisper from inventing
-                // text in a dictation's pauses.
-                engine.vad_model = Some(model::ensure_vad_model().map_err(|e| e.to_string())?);
-                let engine = Engine::new(engine)
-                    .map(Arc::new)
-                    .map_err(|e| e.to_string())?;
-                log::line(&format!(
-                    "Whisper acceleration: {:?}",
-                    engine.acceleration()
-                ));
-                // Only a GPU has pipelines to build; on the CPU this would
-                // just be seconds of work.
-                if engine.on_gpu() {
-                    warm_up(&engine);
-                }
-                Ok(engine)
-            })();
-            let _ = tx.send(Msg::Loaded(generation, result));
-        });
+    }
+
+    pub(super) fn effective_model(&self) -> Option<&str> {
+        self.loaded_model.as_deref()
     }
 
     /// The language for the next transcription: the menu's choice, or
@@ -794,12 +805,18 @@ impl App {
                 ),
                 Err(e) => self.failure_notice(&e),
             },
+            Msg::LoadingModel(generation, name) => {
+                if generation == self.load_generation {
+                    self.show_loading(Some(name));
+                }
+            }
             Msg::Loaded(generation, result) if generation != self.load_generation => {
                 // Superseded by a later switch while it loaded.
                 drop(result);
             }
-            Msg::Loaded(_, Ok(engine)) => {
-                log::line("model loaded");
+            Msg::Loaded(_, Ok((name, engine))) => {
+                log::line(&format!("model loaded: {name}"));
+                self.loaded_model = Some(name);
                 if let Some(network) = &self.network {
                     *network.engine.lock().unwrap_or_else(|p| p.into_inner()) =
                         Some(engine.clone());

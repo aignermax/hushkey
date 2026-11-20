@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Resolve the local Whisper model against the current hardware at load time.
+pub const AUTO_MODEL: &str = "auto";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Insert {
@@ -88,7 +91,7 @@ pub struct BrainSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Whisper model name or file.
+    /// Automatic selection, a Whisper model name, or a local model file.
     pub model: String,
     /// Language code; detected when absent.
     pub language: Option<String>,
@@ -123,7 +126,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            model: "large-v3-turbo".into(),
+            model: AUTO_MODEL.into(),
             language: None,
             key: "caps_lock".into(),
             insert: Insert::Paste,
@@ -285,6 +288,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_is_the_default_but_updates_preserve_explicit_model_and_gpu_choices() {
+        let fresh = Config::parse("{}").unwrap();
+        assert_eq!(fresh.model, AUTO_MODEL);
+        assert!(fresh.use_gpu);
+        for model in ["large-v3-turbo", "tiny", "models/custom.bin"] {
+            let config =
+                Config::parse(&format!(r#"{{"model":"{model}","use_gpu":false}}"#)).unwrap();
+            assert_eq!(config.model, model);
+            assert!(!config.use_gpu);
+        }
+    }
+
+    #[test]
     fn update_channels_preserve_existing_settings_and_manual_preferences() {
         assert_eq!(Config::parse("{}").unwrap().updates, Updates::Auto);
         for (value, automatic, previews) in [
@@ -329,7 +345,7 @@ mod tests {
         let partial = Config::parse(r#"{"key": "f9", "language": "de"}"#).unwrap();
         assert_eq!(partial.key, "f9");
         assert_eq!(partial.language.as_deref(), Some("de"));
-        assert_eq!(partial.model, "large-v3-turbo");
+        assert_eq!(partial.model, AUTO_MODEL);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use egui::{Event, PointerButton, Pos2, RawInput, Rect, Shape};
 fn snapshot() -> Snapshot {
     serde_json::from_value(serde_json::json!({
         "german": false, "version": "1.0.0", "build": "test", "ready": "Ready",
-        "acceleration": "CPU", "history": [], "update": "Idle", "feedback": null,
+        "local_recognition": "tiny · CPU", "history": [], "update": "Idle", "feedback": null,
         "preferences": {
             "key": "right_ctrl", "language": null, "model": "tiny", "insert": "paste",
             "restore_clipboard": true, "listening": false, "autostart": false,
@@ -105,6 +105,29 @@ impl Window {
             );
         }
     }
+}
+
+#[test]
+fn automatic_model_can_be_reselected_and_shows_the_loaded_engine_on_both_pages() {
+    let mut state = snapshot();
+    state.preferences.language = Some("en".into());
+    let mut window = Window::new(1000., 900., &state);
+    window.click(&state, "Dictation");
+    window.click(&state, "tiny");
+    window.frame(&state, vec![]);
+    assert_eq!(
+        window.click(&state, "Automatic"),
+        vec![Intent::Model(crate::config::AUTO_MODEL.into())]
+    );
+
+    state.preferences.model = crate::config::AUTO_MODEL.into();
+    state.local_recognition = "large-v3-turbo · Test GPU · Vulkan".into();
+    window.frame(&state, vec![]);
+    window.label("Automatic");
+    window.label("Currently · large-v3-turbo · Test GPU · Vulkan");
+    window.click(&state, "Connections");
+    window.click(&state, "As host");
+    window.label("large-v3-turbo · Test GPU · Vulkan");
 }
 
 #[test]

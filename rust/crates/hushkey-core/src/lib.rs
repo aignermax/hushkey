@@ -16,6 +16,7 @@ mod engine;
 mod error;
 mod event;
 mod filter;
+mod hardware;
 mod listen;
 pub mod model;
 mod resample;
@@ -35,6 +36,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use event::{Event, EventSink};
 pub use filter::is_non_speech;
+pub use hardware::{recommend_hardware, HardwareRecommendation};
 pub use listen::{ListenConfig, ListenSession};
 pub use resample::Resampler;
 pub use session::{RecordConfig, RecordSession};

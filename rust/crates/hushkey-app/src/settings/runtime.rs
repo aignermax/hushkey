@@ -177,11 +177,13 @@ impl SettingsWindow {
                 self.session = None;
                 if !status.success() {
                     self.error = Some(format!("window process exited with {status}"));
+                    return;
                 }
             }
             Err(error) => {
                 self.stop();
                 self.error = Some(error.to_string());
+                return;
             }
         }
         if reopen {
@@ -267,6 +269,56 @@ impl eframe::App for Window {
     }
 }
 
+#[cfg(windows)]
+fn direct3d_settings_device(
+    adapter_name: Option<&str>,
+) -> Option<eframe::egui_wgpu::WgpuSetupExisting> {
+    use eframe::egui_wgpu::WgpuSetupExisting;
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12,
+        // FXC is supplied by Windows, so portable installs need no DXC DLLs.
+        backend_options: wgpu::BackendOptions {
+            dx12: wgpu::Dx12BackendOptions {
+                shader_compiler: wgpu::Dx12Compiler::Fxc,
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let mut adapters = instance.enumerate_adapters(wgpu::Backends::DX12);
+    // DXGI enumerates the Microsoft Basic Render Driver (WARP) as a CPU
+    // adapter. Try it if the display driver is missing or device creation fails.
+    adapters.sort_by_key(|adapter| adapter.get_info().device_type == wgpu::DeviceType::Cpu);
+    let requested = adapter_name.map(str::to_lowercase);
+    for adapter in adapters {
+        let name = adapter.get_info().name;
+        if requested
+            .as_ref()
+            .is_some_and(|part| !name.to_lowercase().contains(part))
+        {
+            continue;
+        }
+        let descriptor = wgpu::DeviceDescriptor {
+            label: Some("hushkey settings"),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        };
+        match pollster::block_on(adapter.request_device(&descriptor, None)) {
+            Ok((device, queue)) => {
+                return Some(WgpuSetupExisting {
+                    instance,
+                    adapter,
+                    device,
+                    queue,
+                })
+            }
+            Err(e) => crate::log::line(&format!("settings Direct3D 12 device {name} failed: {e}")),
+        }
+    }
+    None
+}
+
 pub(crate) fn run_window() -> Result<(), String> {
     let (incoming, requests) = mpsc::channel();
     let context = Arc::new(OnceLock::<egui::Context>::new());
@@ -304,11 +356,35 @@ pub(crate) fn run_window() -> Result<(), String> {
         viewport,
         ..Default::default()
     };
+    #[cfg(windows)]
+    let options = {
+        crate::log::open();
+        let mut options = options;
+        let name = std::env::var("WGPU_ADAPTER_NAME").ok();
+        if let Some(setup) = direct3d_settings_device(name.as_deref()) {
+            options.renderer = eframe::Renderer::Wgpu;
+            options.wgpu_options.wgpu_setup = setup.into();
+        } else {
+            crate::log::line("no usable Direct3D 12 settings device; trying OpenGL");
+            options.renderer = eframe::Renderer::Glow;
+        }
+        options
+    };
     let to_tray = replies.clone();
     let result = eframe::run_native(
         "hushkey",
         options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            if let Some(render) = &cc.wgpu_render_state {
+                let info = render.adapter.get_info();
+                crate::log::line(&format!(
+                    "settings window renderer: Direct3D 12, {} ({:?})",
+                    info.name, info.device_type
+                ));
+            } else {
+                crate::log::line("settings window renderer: OpenGL");
+            }
             let _ = context.set(cc.egui_ctx.clone());
             Ok(Box::new(Window {
                 view: View::default(),
@@ -318,12 +394,51 @@ pub(crate) fn run_window() -> Result<(), String> {
             }))
         }),
     );
-    if let Err(error) = result {
+    if let Err(error) = &result {
         let _ = replies.send(Reply::Failed(error.to_string()));
     }
     drop(replies);
     writer
         .join()
         .map_err(|_| "settings pipe writer stopped".to_owned())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    result.map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_window_with_a_pending_focus_is_reported_without_relaunch() {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--invalid-test-harness-option")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(!child.wait().unwrap().success());
+        let mut window = SettingsWindow::new();
+        window.session = Some(Session {
+            child,
+            wake: mpsc::sync_channel(1).0,
+            pending: Arc::default(),
+            replies: mpsc::channel().1,
+            focus_requested: 1,
+            focus_confirmed: 0,
+            last: None,
+        });
+        assert!(!window.visible());
+        assert!(window.take_error().unwrap().contains("process exited"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the Windows Direct3D 12 software renderer"]
+    fn settings_device_runs_on_warp() {
+        let setup = direct3d_settings_device(Some("Microsoft Basic Render Driver")).unwrap();
+        let adapter = setup.adapter.get_info();
+        assert_eq!(adapter.backend, wgpu::Backend::Dx12);
+        assert_eq!(adapter.device_type, wgpu::DeviceType::Cpu);
+    }
 }

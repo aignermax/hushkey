@@ -1,4 +1,5 @@
 use super::{autostart, network, Action, App, Duration, Instant, Mode};
+use crate::config::AUTO_MODEL;
 use crate::settings::{
     selected_peer, Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot,
 };
@@ -102,6 +103,7 @@ impl App {
                 Some(&(c, _)) => Action::Language(c),
                 None => return,
             },
+            Intent::Model(model) if model == AUTO_MODEL => Action::Model(AUTO_MODEL),
             Intent::Model(model) => match MODELS.iter().find(|(m, _)| *m == model) {
                 Some(&(m, _)) => Action::Model(m),
                 None => return,
@@ -187,7 +189,7 @@ impl App {
                 .iter()
                 .map(|entry| entry.text.clone())
                 .collect(),
-            acceleration: self.acceleration_label(),
+            local_recognition: self.local_recognition_label(),
             preferences: Preferences {
                 key: self.config.key.clone(),
                 language: self.config.language.clone(),
@@ -231,16 +233,13 @@ impl App {
         }
     }
 
-    fn acceleration_label(&self) -> String {
+    fn local_recognition_label(&self) -> String {
         use hushkey_core::Acceleration;
         let w = |de, en| network::words(self.s, de, en);
-        if let Some(peer) = &self.config.remote {
-            return format!("{} · {}", w("Erkennung auf", "Recognition on"), peer.name);
-        }
-        let Some(engine) = &self.engine else {
+        let (Some(engine), Some(model)) = (&self.engine, self.effective_model()) else {
             return w("Modell nicht bereit", "Model not ready").into();
         };
-        match engine.acceleration() {
+        let device: String = match engine.acceleration() {
             Acceleration::Gpu { backend, device } if !device.is_empty() && device != backend => {
                 format!("{device} · {backend}")
             }
@@ -258,7 +257,8 @@ impl App {
             )
             .into(),
             Acceleration::Unknown => w("Gerät nicht ermittelt", "Device undetermined").into(),
-        }
+        };
+        format!("{model} · {device}")
     }
 
     fn dictation_status(&self) -> &'static str {

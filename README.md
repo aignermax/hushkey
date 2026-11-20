@@ -22,7 +22,7 @@ Or take the file for your system straight from the
 
 | System | File | What it is |
 |---|---|---|
-| **Windows** 10+, 64-bit | `hushkey-setup-windows-x86_64.exe` | Setup, ~5 MB: installs the program. (`hushkey-windows-x86_64.exe` is the program itself, ~12 MB; run once, it installs itself too.) |
+| **Windows** 10+, 64-bit | `hushkey-setup-windows-x86_64.exe` | Windows installer. You can also run the standalone `hushkey-windows-x86_64.exe`. |
 | **Linux** Debian/Ubuntu, 64-bit | `hushkey_<version>_amd64.deb` | Package: `sudo apt install ./hushkey_*.deb` |
 | **Linux** Debian/Ubuntu, ARM | `hushkey_<version>_arm64.deb` | Same, for a Raspberry Pi and the like |
 | **Linux** any distribution | `hushkey-linux-x86_64`, `…-aarch64` | Plain program: `chmod +x` it, then `./hushkey --install` |
@@ -100,6 +100,17 @@ updates, appearance and the running program's version and build identifier.
 Changes take effect in the running app. Close the window to keep dictating
 from the tray. Right-click the tray icon for shortcuts and recent dictations.
 
+On a new installation, **Settings → Dictation → Local model** starts on
+**Automatic**. Before loading a local model, hushkey checks the devices its
+recognition backend can use and their available memory. It chooses a model
+for that hardware and shows the loaded model and actual device in Settings.
+Turn off GPU use to have Automatic pick a CPU model. To enable hardware-based
+selection on an existing installation, change its saved model to **Automatic**.
+
+On Windows, Settings uses Direct3D 12 and can display the same window with
+Microsoft's WARP software renderer when a hardware adapter is unavailable.
+The GPU preference under **Dictation** controls speech recognition.
+
 ## Use another computer's GPU
 
 Install this version of Hush-Key on both computers. On the powerful computer,
@@ -172,8 +183,10 @@ by default. You can turn them off and still check manually.
 
 When a newer eligible version is available, the settings window shows an
 update notice. Choose **Install update** to download it, verify it against
-the release's `SHA256SUMS`, and restart HushKey. The tray also offers the
-update. On a Debian package installation, apt installs the verified `.deb`
+the release's `SHA256SUMS`, and restart HushKey. You can also right-click
+the Windows tray icon and choose **Check for updates**, then **Install update**.
+This also works if an older version cannot open Settings.
+On a Debian package installation, apt installs the verified `.deb`
 after the system's password dialog.
 
 ## Advanced settings

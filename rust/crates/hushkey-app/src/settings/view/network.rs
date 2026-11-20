@@ -387,15 +387,21 @@ fn host(ui: &mut Ui, p: Palette, lang: Locale, state: &Snapshot, intents: &mut V
         lang.t("Lokale Spracherkennung", "Local speech recognition"),
     );
     p.card(ui, |ui| {
-        let model = format!("{} {}", lang.t("Modell", "Model"), state.preferences.model);
-        device(ui, p, Icon::Monitor, &host.name, &model, |ui| {
-            let (label, color) = if host.model_ready {
-                (lang.t("Bereit", "Ready"), p.green)
-            } else {
-                (lang.t("Nicht bereit", "Not ready"), p.muted)
-            };
-            ui.label(bold(label, 12., color));
-        });
+        device(
+            ui,
+            p,
+            Icon::Monitor,
+            &host.name,
+            &state.local_recognition,
+            |ui| {
+                let (label, color) = if host.model_ready {
+                    (lang.t("Bereit", "Ready"), p.green)
+                } else {
+                    (lang.t("Nicht bereit", "Not ready"), p.muted)
+                };
+                ui.label(bold(label, 12., color));
+            },
+        );
     });
     ui.add_space(10.);
     if p.action(

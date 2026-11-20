@@ -12,7 +12,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 use crate::config::{self, Config, Insert, Mode, Theme, Updates};
 use crate::history::{self, Entry};
 use crate::icon::{self, Badge};
-use crate::strings::{self, Strings, KEY_LABELS, LANGUAGES, MODELS};
+use crate::strings::{self, Strings, KEY_LABELS, LANGUAGES};
 
 /// What a menu entry does.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,14 +108,9 @@ impl Tray {
             actions.insert(item.id().clone(), action);
             item
         };
-        let models: Vec<_> = MODELS
-            .iter()
-            .map(|(name, size)| {
-                (
-                    check(&format!("{name} ({size})"), Action::Model(name)),
-                    *name,
-                )
-            })
+        let models: Vec<_> = s
+            .model_choices()
+            .map(|(name, label)| (check(&label, Action::Model(name)), name))
             .collect();
         let keys: Vec<_> = KEY_LABELS
             .iter()

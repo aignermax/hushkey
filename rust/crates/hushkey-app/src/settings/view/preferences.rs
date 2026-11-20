@@ -1,7 +1,7 @@
 use eframe::egui::{self, Align, ComboBox, Frame, Layout, Margin, Ui};
 
-use crate::config::{Insert, Theme};
-use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
+use crate::config::{Insert, Theme, AUTO_MODEL};
+use crate::strings::{DE, EN, KEY_LABELS, LANGUAGES};
 
 use super::style::{bold, text, Palette};
 use super::{Intent, Locale, Snapshot, UpdateStatus};
@@ -139,11 +139,18 @@ pub(super) fn dictation(
                 "Used for dictation on this computer.",
             ),
             |ui| {
-                let choices = MODELS
-                    .iter()
-                    .map(|(name, size)| (*name, format!("{name}  ({size})")));
-                if let Some(value) = choose(ui, model, &pref.model.as_str(), &pref.model, choices) {
-                    intents.push(Intent::Model(value.into()));
+                let strings = if state.german { &DE } else { &EN };
+                let current = pref.model.as_str();
+                let selected = if current == AUTO_MODEL {
+                    strings.model_auto
+                } else {
+                    current
+                };
+                let choices = strings
+                    .model_choices()
+                    .map(|(name, label)| (name.to_owned(), label));
+                if let Some(value) = choose(ui, model, &pref.model, selected, choices) {
+                    intents.push(Intent::Model(value));
                 }
             },
         );
@@ -152,11 +159,18 @@ pub(super) fn dictation(
             "GPU für lokale Diktate verwenden",
             "Use GPU for local dictation",
         );
-        let actual = format!(
-            "{} · {}",
-            lang.t("Aktuell", "Currently"),
-            state.acceleration
-        );
+        let actual = match &state.client.selected {
+            Some(peer) => format!(
+                "{} · {}",
+                lang.t("Erkennung auf", "Recognition on"),
+                peer.name
+            ),
+            None => format!(
+                "{} · {}",
+                lang.t("Aktuell", "Currently"),
+                state.local_recognition
+            ),
+        };
         p.row(ui, gpu, &actual, |ui| {
             ui.add_enabled_ui(state.client.selected.is_none(), |ui| {
                 if p.switch(ui, gpu, pref.use_gpu) {

@@ -17,7 +17,7 @@ pub(crate) struct Snapshot {
     pub version: String,
     pub build: String,
     pub ready: String,
-    pub acceleration: String,
+    pub local_recognition: String,
     pub history: Vec<String>,
     pub update: UpdateStatus,
     pub preferences: Preferences,
