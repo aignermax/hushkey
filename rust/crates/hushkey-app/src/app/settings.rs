@@ -280,7 +280,23 @@ impl App {
                 format!("{device} · {backend}")
             }
             Acceleration::Gpu { backend, .. } => backend.clone(),
+            Acceleration::Cpu if self.gpu_crashed && self.config.use_gpu => w(
+                "CPU · GPU beim letzten Start abgestürzt",
+                "CPU · GPU crashed at the last start",
+            )
+            .into(),
             Acceleration::Cpu => "CPU".into(),
+            Acceleration::LowGpuMemory {
+                free_mib,
+                needed_mib,
+            } => {
+                let (full, free, needed) = if network::german(self.s) {
+                    ("CPU · Grafikspeicher belegt", "frei", "nötig")
+                } else {
+                    ("CPU · graphics memory full", "free", "needed")
+                };
+                format!("{full} ({free_mib} MiB {free}, {needed_mib} MiB {needed})")
+            }
             Acceleration::CpuFallback => {
                 w("CPU · GPU nicht verfügbar", "CPU · GPU unavailable").into()
             }

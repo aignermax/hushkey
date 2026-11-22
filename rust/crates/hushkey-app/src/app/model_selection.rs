@@ -5,6 +5,7 @@ use std::path::Path;
 
 use hushkey_core::{model, recommend_hardware, Engine, EngineConfig, Error, Result};
 
+use super::gpu_crash;
 use crate::{config::AUTO_MODEL, log};
 
 pub(super) fn load(
@@ -14,7 +15,7 @@ pub(super) fn load(
 ) -> Result<(&str, Engine)> {
     if preference != AUTO_MODEL {
         let config = prepare(preference, allow_gpu, 0)?;
-        return Ok((preference, Engine::new(config)?));
+        return Ok((preference, open(config)?));
     }
 
     let choice = recommend_hardware(allow_gpu);
@@ -25,7 +26,7 @@ pub(super) fn load(
     loading(choice.model);
     let config = prepare(choice.model, choice.use_gpu, choice.gpu_device)?;
     let whisper_file = config.model.clone();
-    let first = match Engine::new(config) {
+    let first = match open(config) {
         Ok(engine) if !choice.use_gpu || engine.on_gpu() => return Ok((choice.model, engine)),
         Ok(engine) => {
             log::line(&format!("GPU choice ran on {:?}", engine.acceleration()));
@@ -48,7 +49,18 @@ pub(super) fn load(
         "automatic model falling back to {fallback} on CPU"
     ));
     loading(fallback);
-    Ok((fallback, Engine::new(prepare(fallback, false, 0)?)?))
+    Ok((fallback, open(prepare(fallback, false, 0)?)?))
+}
+
+/// Load an engine; on a GPU, also build its pipelines. Both can abort the
+/// process, so a GPU load is marked until it ends (see [`gpu_crash`]).
+fn open(config: EngineConfig) -> Result<Engine> {
+    let _marked = config.use_gpu.then(|| gpu_crash::marker().hold());
+    let engine = Engine::new(config)?;
+    if engine.on_gpu() {
+        super::warm_up(&engine);
+    }
+    Ok(engine)
 }
 
 fn cpu_retry(

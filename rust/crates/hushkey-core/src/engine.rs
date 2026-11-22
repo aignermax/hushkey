@@ -206,20 +206,28 @@ impl Engine {
         } else if trimmed && quantized_weights(&config.model) {
             Some(Acceleration::QuantizedCpu)
         } else {
-            None
+            low_gpu_memory(&config)
         };
-        let mut params = WhisperContextParameters::default();
-        params
-            .use_gpu(forced_cpu.is_none())
-            .gpu_device(config.gpu_device);
         let load_error = |reason: String| Error::ModelLoad {
             path: config.model.clone(),
             reason,
         };
-        let ctx = WhisperContext::new_with_params(model, params)
-            .map_err(|e| load_error(e.to_string()))?;
-        let (state, observed) = observe_state(|| ctx.create_state());
-        let state = state.map_err(|e| load_error(e.to_string()))?;
+        let (ctx, state, acceleration) = match forced_cpu {
+            Some(reason) => {
+                let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
+                (ctx, state, reason)
+            }
+            None => match load_whisper(model, true, config.gpu_device) {
+                Ok(loaded) => loaded,
+                // An allocation whisper.cpp reports instead of aborting on
+                // (cache, compute buffers): the CPU may still have room.
+                // The failed attempt's GPU buffers are freed by now.
+                Err(_) => {
+                    let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
+                    (ctx, state, Acceleration::CpuFallback)
+                }
+            },
+        };
         let vad = match &config.vad_model {
             None => None,
             Some(path) => {
@@ -249,7 +257,7 @@ impl Engine {
             state: Mutex::new(state),
             vad,
             config,
-            acceleration: forced_cpu.unwrap_or(observed),
+            acceleration,
             prompt_tokens: Mutex::new(None),
         })
     }
@@ -485,6 +493,33 @@ fn quantized_weights(path: &Path) -> bool {
     let word = |i: usize| u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
     // "ggml", n_vocab … n_mels (10 numbers), ftype.
     word(0) == 0x6767_6d6c && word(11) % 1000 > 1
+}
+
+/// CPU in place of a GPU that cannot hold the model: whisper.cpp would
+/// abort the process on the failed allocation instead of reporting it.
+fn low_gpu_memory(config: &EngineConfig) -> Option<Acceleration> {
+    use crate::hardware::{gpu_bytes_needed, gpu_memory_short, MIB};
+    let needed = gpu_bytes_needed(std::fs::metadata(&config.model).ok()?.len());
+    let free = gpu_memory_short(config.gpu_device, needed)?;
+    Some(Acceleration::LowGpuMemory {
+        free_mib: free / MIB,
+        needed_mib: needed / MIB,
+    })
+}
+
+/// A whisper.cpp context and its inference state, with the backend the
+/// state chose.
+fn load_whisper(
+    model: &str,
+    use_gpu: bool,
+    gpu_device: i32,
+) -> std::result::Result<(WhisperContext, WhisperState, Acceleration), String> {
+    let mut params = WhisperContextParameters::default();
+    params.use_gpu(use_gpu).gpu_device(gpu_device);
+    let ctx = WhisperContext::new_with_params(model, params).map_err(|e| e.to_string())?;
+    let (state, observed) = observe_state(|| ctx.create_state());
+    let state = state.map_err(|e| e.to_string())?;
+    Ok((ctx, state, observed))
 }
 
 #[cfg(test)]

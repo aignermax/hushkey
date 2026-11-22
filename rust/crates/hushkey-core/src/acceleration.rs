@@ -17,6 +17,11 @@ pub enum Acceleration {
     Cpu,
     /// The selected GPU was absent or failed to initialize.
     CpuFallback,
+    /// The selected GPU had too little free memory for this model.
+    LowGpuMemory {
+        free_mib: u64,
+        needed_mib: u64,
+    },
     /// This build omits the GPU shaders for quantized weights.
     QuantizedCpu,
     /// This build has no GPU backend.
