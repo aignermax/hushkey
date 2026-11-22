@@ -24,7 +24,10 @@ pub(super) fn load(
         choice.model, choice.evidence
     ));
     loading(choice.model);
-    let config = prepare(choice.model, choice.use_gpu, choice.gpu_device)?;
+    let mut config = prepare(choice.model, choice.use_gpu, choice.gpu_device)?;
+    // When the GPU cannot take it, the fallback below is a model chosen for
+    // the CPU, not this one loaded on the CPU first.
+    config.cpu_fallback = false;
     let whisper_file = config.model.clone();
     let first = match open(config) {
         Ok(engine) if !choice.use_gpu || engine.on_gpu() => return Ok((choice.model, engine)),
@@ -55,10 +58,16 @@ pub(super) fn load(
 /// Load an engine; on a GPU, also build its pipelines. Both can abort the
 /// process, so a GPU load is marked until it ends (see [`gpu_crash`]).
 fn open(config: EngineConfig) -> Result<Engine> {
-    let _marked = config.use_gpu.then(|| gpu_crash::marker().hold());
+    let marked = config
+        .cpu_reason()
+        .is_none()
+        .then(|| gpu_crash::marker().hold());
     let engine = Engine::new(config)?;
     if engine.on_gpu() {
         super::warm_up(&engine);
+        if let Some(marked) = marked {
+            marked.succeeded();
+        }
     }
     Ok(engine)
 }

@@ -1,4 +1,4 @@
-use super::{autostart, network, Action, App, Duration, Instant, Mode};
+use super::{autostart, gpu_crash, network, Action, App, Crashes, Duration, Instant, Mode};
 use crate::config::AUTO_MODEL;
 use crate::settings::{Client, Host, Intent, Link, Preferences, SettingsWindow, Snapshot};
 use crate::strings::{KEY_LABELS, LANGUAGES, MODELS};
@@ -164,8 +164,13 @@ impl App {
                 }
             }
             Intent::UseGpu(on) => {
-                if self.config.use_gpu != on && self.config.remote.is_none() && self.can_switch() {
+                if self.gpu_wanted() != on && self.config.remote.is_none() && self.can_switch() {
                     self.stop_listening(true);
+                    if on {
+                        // The user asks to try the GPU again after a crash.
+                        gpu_crash::marker().forget();
+                        self.gpu_crashes = Crashes::None;
+                    }
                     self.config.use_gpu = on;
                     self.save(|c| c.use_gpu = on);
                     self.load_engine();
@@ -212,7 +217,7 @@ impl App {
                 autostart: autostart::enabled(),
                 auto_updates: self.config.updates.automatic(),
                 include_prereleases: self.config.updates.includes_previews(),
-                use_gpu: self.config.use_gpu,
+                use_gpu: self.gpu_wanted(),
                 theme: self.config.theme,
             },
             host: Host {
@@ -280,9 +285,14 @@ impl App {
                 format!("{device} · {backend}")
             }
             Acceleration::Gpu { backend, .. } => backend.clone(),
-            Acceleration::Cpu if self.gpu_crashed && self.config.use_gpu => w(
-                "CPU · GPU beim letzten Start abgestürzt",
-                "CPU · GPU crashed at the last start",
+            Acceleration::Cpu if self.config.use_gpu && self.gpu_crashes != Crashes::None => w(
+                "CPU · GPU beim Laden abgestürzt",
+                "CPU · GPU crashed while loading",
+            )
+            .into(),
+            Acceleration::GpuFailed { .. } => w(
+                "CPU · GPU-Laden fehlgeschlagen",
+                "CPU · loading on the GPU failed",
             )
             .into(),
             Acceleration::Cpu => "CPU".into(),

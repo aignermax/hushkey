@@ -22,6 +22,11 @@ pub enum Acceleration {
         free_mib: u64,
         needed_mib: u64,
     },
+    /// Loading on the GPU failed with this error, and the model was loaded
+    /// again on the CPU.
+    GpuFailed {
+        reason: String,
+    },
     /// This build omits the GPU shaders for quantized weights.
     QuantizedCpu,
     /// This build has no GPU backend.

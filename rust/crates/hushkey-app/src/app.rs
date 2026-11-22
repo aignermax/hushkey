@@ -38,6 +38,7 @@ use crate::update::{self, Release};
 mod connections;
 mod gpu_crash;
 mod model_selection;
+use gpu_crash::Crashes;
 mod settings;
 mod updates;
 use crate::network::Link;
@@ -172,9 +173,15 @@ pub fn run(after_update: bool) -> ExitCode {
         "started, key {}, model {}",
         config.key, config.model
     ));
-    let gpu_crashed = gpu_crash::marker().take_crash();
-    if gpu_crashed {
-        log::line("the last run ended while loading the model on the GPU; this run uses the CPU");
+    let gpu_crashes = gpu_crash::marker().crashes();
+    match gpu_crashes {
+        Crashes::None => {}
+        Crashes::Last => log::line(
+            "the last run ended while loading the model on the GPU; this run uses the CPU",
+        ),
+        Crashes::Repeated => log::line(
+            "loading on the GPU crashed again; the CPU until the GPU is switched on in Settings",
+        ),
     }
     let mut app = App {
         s,
@@ -190,7 +197,8 @@ pub fn run(after_update: bool) -> ExitCode {
         inserter_thread: Some(inserter_thread),
         engine: None,
         loaded_model: None,
-        gpu_crashed,
+        gpu_crashes,
+        crash_told: false,
         network,
         connections: Connections::new(),
         settings: Settings::new(),
@@ -291,9 +299,12 @@ struct App {
     inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
     loaded_model: Option<String>,
-    /// The previous run ended while loading a model on the GPU: this one
-    /// loads on the CPU.
-    gpu_crashed: bool,
+    /// Earlier runs died loading a model on the GPU: this one keeps to the
+    /// CPU, until the GPU is switched on again in Settings.
+    gpu_crashes: Crashes,
+    /// The first model of this run has loaded, and with it came the notice
+    /// about a crash, if there was one.
+    crash_told: bool,
     network: Option<Network>,
     connections: Connections,
     settings: Settings,
@@ -687,7 +698,7 @@ impl App {
     }
 
     fn load_engine(&mut self) {
-        self.engine = None;
+        let previous = self.engine.take().map(|engine| Arc::downgrade(&engine));
         self.loaded_model = None;
         self.backend = None;
         if let Some(network) = &self.network {
@@ -696,10 +707,13 @@ impl App {
         self.load_generation += 1;
         let generation = self.load_generation;
         let model = self.config.model.clone();
-        let use_gpu = self.config.use_gpu && !self.gpu_crashed;
+        let use_gpu = self.gpu_wanted();
         self.show_loading((model != config::AUTO_MODEL).then_some(model.as_str()));
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            if let Some(previous) = previous {
+                wait_released(&previous);
+            }
             let result = model_selection::load(&model, use_gpu, |name| {
                 let _ = tx.send(Msg::LoadingModel(generation, name));
             })
@@ -734,20 +748,35 @@ impl App {
         }
     }
 
+    /// Whether models load on the GPU: switched on, and no crash there
+    /// keeps them off it.
+    pub(super) fn gpu_wanted(&self) -> bool {
+        self.config.use_gpu && self.gpu_crashes == Crashes::None
+    }
+
     /// Why a model meant for the GPU runs on the CPU, when the user would
     /// otherwise only notice that dictation got slower.
     fn cpu_notice(&self, engine: &Engine) -> Option<&'static str> {
         let w = |de, en| network::words(self.s, de, en);
-        match engine.acceleration() {
-            Acceleration::LowGpuMemory { .. } => Some(w(
+        match (engine.acceleration(), self.gpu_crashes) {
+            (Acceleration::LowGpuMemory { .. }, _) => Some(w(
                 "Grafikspeicher belegt: hushkey läuft auf der CPU und braucht etwas länger.",
                 "Graphics memory is full: hushkey runs on the CPU and takes a little longer.",
             )),
-            Acceleration::Cpu if self.gpu_crashed && self.config.use_gpu => Some(w(
+            (Acceleration::GpuFailed { .. }, _) => Some(w(
+                "Die GPU hat das Modell nicht geladen: hushkey läuft auf der CPU und braucht etwas länger.",
+                "The GPU did not load the model: hushkey runs on the CPU and takes a little longer.",
+            )),
+            _ if self.crash_told || !self.config.use_gpu => None,
+            (_, Crashes::None) => None,
+            (_, Crashes::Last) => Some(w(
                 "Der letzte Start auf der GPU ist abgestürzt: hushkey läuft diesmal auf der CPU.",
                 "The last start on the GPU crashed: hushkey runs on the CPU this time.",
             )),
-            _ => None,
+            (_, Crashes::Repeated) => Some(w(
+                "Die GPU ist wiederholt abgestürzt: hushkey bleibt auf der CPU, bis du die GPU in den Einstellungen wieder einschaltest.",
+                "The GPU crashed again: hushkey stays on the CPU until you switch the GPU on again in Settings.",
+            )),
         }
     }
 
@@ -827,6 +856,7 @@ impl App {
                 }
                 self.backend = Some(Arc::new(Recoverable::new(engine.clone())));
                 let cpu_notice = self.cpu_notice(&engine);
+                self.crash_told = true;
                 self.engine = Some(engine);
                 if self.config.mode == Mode::Listen {
                     self.set_listening(true);
@@ -1634,6 +1664,16 @@ fn brain(config: &Config) -> Result<Option<Box<dyn Brain>>, String> {
 /// first start, or after a driver update) builds its pipelines then, about
 /// 3 s on a laptop GPU. A quiet tone rather than silence, which whisper
 /// skips without running the model.
+/// Wait a while until the previous engine is gone: a listening session, a
+/// transcription or the LAN host may still hold it, and while its model is
+/// loaded the GPU looks too full for the next one.
+fn wait_released(previous: &std::sync::Weak<Engine>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while previous.strong_count() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn warm_up(engine: &Engine) {
     let started = Instant::now();
     let tone: Vec<f32> = (0..2 * 16_000)

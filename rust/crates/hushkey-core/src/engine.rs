@@ -37,6 +37,11 @@ pub struct EngineConfig {
     /// Silero VAD model: silence is masked before transcription, which keeps
     /// whisper from inventing text in pauses. `None` transcribes everything.
     pub vad_model: Option<PathBuf>,
+    /// Load on the CPU when the GPU cannot take the model (too little free
+    /// memory, or a failure whisper.cpp reports). `false` returns
+    /// [`Error::ModelLoad`] instead, for a caller that would then rather
+    /// choose a smaller model for the CPU.
+    pub cpu_fallback: bool,
 }
 
 impl EngineConfig {
@@ -48,6 +53,25 @@ impl EngineConfig {
             threads: 0,
             language: None,
             vad_model: None,
+            cpu_fallback: true,
+        }
+    }
+
+    /// Why [`Engine::new`] loads this model on the CPU without trying the
+    /// GPU, or `None` when it tries the GPU.
+    pub fn cpu_reason(&self) -> Option<Acceleration> {
+        // hushkey's Vulkan releases carry the shaders for f32/f16 weights
+        // only (rust/packaging/glslc-trim, which sets this variable for the
+        // build): there a quantized model runs on the CPU.
+        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
+        if !self.use_gpu {
+            Some(Acceleration::Cpu)
+        } else if !cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda")) {
+            Some(Acceleration::CpuBuild)
+        } else if trimmed && quantized_weights(&self.model) {
+            Some(Acceleration::QuantizedCpu)
+        } else {
+            low_gpu_memory(self)
         }
     }
 }
@@ -195,36 +219,32 @@ impl Engine {
         if !config.model.is_file() {
             return Err(Error::ModelNotFound(config.model.display().to_string()));
         }
-        // hushkey's Vulkan releases carry the shaders for f32/f16 weights
-        // only (rust/packaging/glslc-trim, which sets this variable for the
-        // build): there a quantized model runs on the CPU.
-        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
-        let forced_cpu = if !config.use_gpu {
-            Some(Acceleration::Cpu)
-        } else if !cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda")) {
-            Some(Acceleration::CpuBuild)
-        } else if trimmed && quantized_weights(&config.model) {
-            Some(Acceleration::QuantizedCpu)
-        } else {
-            low_gpu_memory(&config)
-        };
         let load_error = |reason: String| Error::ModelLoad {
             path: config.model.clone(),
             reason,
         };
-        let (ctx, state, acceleration) = match forced_cpu {
+        let (ctx, state, acceleration) = match config.cpu_reason() {
+            Some(Acceleration::LowGpuMemory {
+                free_mib,
+                needed_mib,
+            }) if !config.cpu_fallback => {
+                return Err(load_error(format!(
+                    "too little free GPU memory ({free_mib} MiB free, {needed_mib} MiB needed)"
+                )));
+            }
             Some(reason) => {
                 let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
                 (ctx, state, reason)
             }
             None => match load_whisper(model, true, config.gpu_device) {
                 Ok(loaded) => loaded,
+                Err(reason) if !config.cpu_fallback => return Err(load_error(reason)),
                 // An allocation whisper.cpp reports instead of aborting on
                 // (cache, compute buffers): the CPU may still have room.
                 // The failed attempt's GPU buffers are freed by now.
-                Err(_) => {
+                Err(reason) => {
                     let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
-                    (ctx, state, Acceleration::CpuFallback)
+                    (ctx, state, Acceleration::GpuFailed { reason })
                 }
             },
         };
