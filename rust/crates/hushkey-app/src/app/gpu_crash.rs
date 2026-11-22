@@ -3,9 +3,10 @@
 //! whatever it cannot foresee). So that such a crash does not take every
 //! later start with it, a marker file exists while a model loads or warms
 //! up on the GPU. One found at the next start means that load never ended:
-//! that run stays on the CPU. The run after tries the GPU again, once: if
-//! it crashes again, hushkey stays on the CPU until the user switches the
-//! GPU on again in Settings or an update arrives.
+//! that run stays on the CPU. The run after tries the GPU again: if that
+//! crashes too, hushkey stays on the CPU until the user switches the GPU
+//! on again in Settings or an update arrives. A GPU load that ends without
+//! a crash, however it ends, breaks the series.
 //!
 //! A load that ends any other way than with hushkey's own quit (SIGTERM
 //! and the menu both go through it) counts as a crash too: on Windows and
@@ -25,8 +26,11 @@ pub(super) enum Crashes {
     /// The last run died loading on the GPU: this run uses the CPU, the
     /// next one tries the GPU again.
     Last,
-    /// It happened again after that: the CPU until the user says otherwise.
-    Repeated,
+    /// The last run died loading on the GPU again: from now on the CPU,
+    /// until the user switches the GPU on again.
+    Again,
+    /// An earlier run gave up on the GPU.
+    GaveUp,
 }
 
 pub(super) struct Marker {
@@ -34,9 +38,16 @@ pub(super) struct Marker {
     /// The number of consecutive crashes, and the version they happened in.
     count: PathBuf,
     version: String,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
     /// GPU loads in progress: a model switch can start one while another
     /// still runs, and only the last to end may remove the file.
-    active: Mutex<usize>,
+    active: usize,
+    /// hushkey is quitting: a load that starts now is no crash either.
+    quitting: bool,
 }
 
 /// The marker in hushkey's state folder.
@@ -51,8 +62,12 @@ impl Marker {
             loading: dir.join("gpu-loading"),
             count: dir.join("gpu-crashes"),
             version: version.to_owned(),
-            active: Mutex::new(0),
+            state: Mutex::default(),
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// At start: counts a GPU load the last run did not finish, and says
@@ -64,10 +79,11 @@ impl Marker {
             count += 1;
             let _ = std::fs::write(&self.count, format!("{count} {}", self.version));
         }
-        match (crashed, count) {
-            (_, GIVE_UP..) => Crashes::Repeated,
-            (true, _) => Crashes::Last,
-            (false, _) => Crashes::None,
+        match (crashed, count >= GIVE_UP) {
+            (true, true) => Crashes::Again,
+            (false, true) => Crashes::GaveUp,
+            (true, false) => Crashes::Last,
+            (false, false) => Crashes::None,
         }
     }
 
@@ -80,44 +96,42 @@ impl Marker {
         }
     }
 
-    /// The user switched the GPU on: try it again.
+    /// Earlier crashes no longer count: the user switched the GPU on, or a
+    /// GPU load ended without one.
     pub(super) fn forget(&self) {
         let _ = std::fs::remove_file(&self.count);
     }
 
     /// Marks a GPU load until the returned guard is dropped.
     pub(super) fn hold(&self) -> Hold<'_> {
-        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
-        if *active == 0 {
+        let mut state = self.state();
+        if state.active == 0 && !state.quitting {
             // The state folder exists: the log opened in it at start.
             let _ = std::fs::write(&self.loading, b"");
         }
-        *active += 1;
+        state.active += 1;
         Hold(self)
     }
 
-    /// A clean exit during a GPU load is no crash.
+    /// A clean exit during a GPU load is no crash, nor is one that starts
+    /// while hushkey quits.
     pub(super) fn clear(&self) {
+        self.state().quitting = true;
         let _ = std::fs::remove_file(&self.loading);
     }
 }
 
 pub(super) struct Hold<'a>(&'a Marker);
 
-impl Hold<'_> {
-    /// The model loaded and ran on the GPU: earlier crashes no longer count.
-    pub(super) fn succeeded(self) {
-        self.0.forget();
-    }
-}
-
 impl Drop for Hold<'_> {
     fn drop(&mut self) {
-        let mut active = self.0.active.lock().unwrap_or_else(|p| p.into_inner());
-        *active -= 1;
-        if *active == 0 {
+        let mut state = self.0.state();
+        state.active -= 1;
+        if state.active == 0 {
             let _ = std::fs::remove_file(&self.0.loading);
         }
+        // The process lived through it, whether the GPU worked or not.
+        self.0.forget();
     }
 }
 
@@ -133,8 +147,6 @@ mod tests {
             let load = marker.hold();
             if crash {
                 std::mem::forget(load);
-            } else {
-                load.succeeded();
             }
         }
         crashes
@@ -147,7 +159,7 @@ mod tests {
         assert_eq!(start(dir, "1", true), Crashes::None);
         assert_eq!(start(dir, "1", false), Crashes::Last);
         assert_eq!(start(dir, "1", false), Crashes::None);
-        // The GPU worked again: a later crash is a first one.
+        // The GPU load ended normally: a later crash is a first one.
         assert_eq!(start(dir, "1", true), Crashes::None);
         assert_eq!(start(dir, "1", false), Crashes::Last);
     }
@@ -159,30 +171,32 @@ mod tests {
         assert_eq!(start(dir, "1", true), Crashes::None);
         assert_eq!(start(dir, "1", false), Crashes::Last);
         assert_eq!(start(dir, "1", true), Crashes::None);
-        assert_eq!(start(dir, "1", false), Crashes::Repeated);
-        assert_eq!(start(dir, "1", false), Crashes::Repeated);
+        assert_eq!(start(dir, "1", false), Crashes::Again);
+        assert_eq!(start(dir, "1", false), Crashes::GaveUp);
+        assert_eq!(start(dir, "1", false), Crashes::GaveUp);
         // An update tries the GPU again.
         assert_eq!(start(dir, "2", false), Crashes::None);
         assert_eq!(start(dir, "2", true), Crashes::None);
         assert_eq!(start(dir, "2", true), Crashes::Last);
         assert_eq!(start(dir, "2", true), Crashes::None);
-        assert_eq!(start(dir, "2", false), Crashes::Repeated);
+        assert_eq!(start(dir, "2", false), Crashes::Again);
         // So does switching the GPU on in Settings.
         Marker::new(dir, "2").forget();
         assert_eq!(start(dir, "2", false), Crashes::None);
     }
 
     #[test]
-    fn a_failed_load_is_no_crash_and_no_success() {
+    fn a_load_that_ends_without_a_crash_breaks_the_series() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
         assert_eq!(start(dir, "1", true), Crashes::None);
         let marker = Marker::new(dir, "1");
         assert_eq!(marker.crashes(), Crashes::Last);
-        // An error the engine reported: the marker goes, the count stays.
+        // A GPU load in that run (the GPU switched on again) that fails
+        // with an error, or runs: either way no crash.
         drop(marker.hold());
-        assert_eq!(marker.read_count(), 1);
-        assert_eq!(start(dir, "1", false), Crashes::None);
+        assert_eq!(marker.read_count(), 0);
+        assert!(!marker.loading.exists());
     }
 
     #[test]
@@ -198,12 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn quitting_during_a_load_is_no_crash() {
+    fn quitting_during_or_before_a_load_is_no_crash() {
         let dir = tempfile::tempdir().unwrap();
         let marker = Marker::new(dir.path(), "1");
         let load = marker.hold();
         marker.clear();
-        std::mem::forget(load); // the process ends with the load
+        // A load the quit overtook starts only now.
+        let late = marker.hold();
+        // The process ends with both.
+        std::mem::forget(load);
+        std::mem::forget(late);
         assert_eq!(Marker::new(dir.path(), "1").crashes(), Crashes::None);
     }
 }

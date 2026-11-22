@@ -68,19 +68,20 @@ pub(super) fn load(
 fn open(config: EngineConfig) -> Result<Arc<Engine>> {
     static LAST: Mutex<Weak<Engine>> = Mutex::new(Weak::new());
     let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while last.strong_count() > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
+    if last.strong_count() > 0 {
+        log::line("the previous model is still in use; loading the next beside it");
+    }
     // Decided once: the engine goes to the GPU exactly when it is marked.
     let cpu_reason = config.cpu_reason();
-    let marked = cpu_reason.is_none().then(|| gpu_crash::marker().hold());
+    let _marked = cpu_reason.is_none().then(|| gpu_crash::marker().hold());
     let engine = Arc::new(Engine::with_cpu_reason(config, cpu_reason)?);
     *last = Arc::downgrade(&engine);
-    if engine.on_gpu() && super::warm_up(&engine) {
-        if let Some(marked) = marked {
-            marked.succeeded();
-        }
+    if engine.on_gpu() {
+        super::warm_up(&engine);
     }
     Ok(engine)
 }

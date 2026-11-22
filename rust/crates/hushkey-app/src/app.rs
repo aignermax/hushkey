@@ -179,8 +179,11 @@ pub fn run(after_update: bool) -> ExitCode {
         Crashes::Last => log::line(
             "the last run ended while loading the model on the GPU; this run uses the CPU",
         ),
-        Crashes::Repeated => log::line(
+        Crashes::Again => log::line(
             "loading on the GPU crashed again; the CPU until the GPU is switched on in Settings",
+        ),
+        Crashes::GaveUp => log::line(
+            "the GPU stays off after repeated crashes; switching it on in Settings tries again",
         ),
     }
     let mut app = App {
@@ -765,13 +768,13 @@ impl App {
                 "The GPU did not load the model: hushkey runs on the CPU and takes a little longer.",
             )),
             _ if self.crash_told || !self.config.use_gpu => None,
-            (_, Crashes::None) => None,
+            (_, Crashes::None | Crashes::GaveUp) => None,
             (_, Crashes::Last) => Some(w(
                 "Der letzte Start auf der GPU ist abgestürzt: hushkey läuft diesmal auf der CPU.",
                 "The last start on the GPU crashed: hushkey runs on the CPU this time.",
             )),
-            (_, Crashes::Repeated) => Some(w(
-                "Die GPU ist wiederholt abgestürzt: hushkey bleibt auf der CPU, bis du die GPU in den Einstellungen wieder einschaltest.",
+            (_, Crashes::Again) => Some(w(
+                "Die GPU ist erneut abgestürzt: hushkey bleibt auf der CPU, bis du die GPU in den Einstellungen wieder einschaltest.",
                 "The GPU crashed again: hushkey stays on the CPU until you switch the GPU on again in Settings.",
             )),
         }
@@ -1660,8 +1663,8 @@ fn brain(config: &Config) -> Result<Option<Box<dyn Brain>>, String> {
 /// pay for the GPU's start: a Vulkan driver without its shader cache (the
 /// first start, or after a driver update) builds its pipelines then, about
 /// 3 s on a laptop GPU. A quiet tone rather than silence, which whisper
-/// skips without running the model. Whether it ran.
-fn warm_up(engine: &Engine) -> bool {
+/// skips without running the model.
+fn warm_up(engine: &Engine) {
     let started = Instant::now();
     let tone: Vec<f32> = (0..2 * 16_000)
         .map(|i| (i as f32 * 0.07).sin() * 0.02)
@@ -1671,16 +1674,10 @@ fn warm_up(engine: &Engine) -> bool {
         ..TranscribeOptions::accurate()
     };
     match engine.transcribe(&tone, &options) {
-        Ok(_) => {
-            log::line(&format!(
-                "model warmed up in {} ms",
-                started.elapsed().as_millis()
-            ));
-            true
-        }
-        Err(e) => {
-            log::line(&format!("warm-up failed: {e}"));
-            false
-        }
+        Ok(_) => log::line(&format!(
+            "model warmed up in {} ms",
+            started.elapsed().as_millis()
+        )),
+        Err(e) => log::line(&format!("warm-up failed: {e}")),
     }
 }

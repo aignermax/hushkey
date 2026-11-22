@@ -164,8 +164,13 @@ impl App {
                 }
             }
             Intent::UseGpu(on) => {
-                if self.gpu_wanted() != on && self.config.remote.is_none() && self.can_switch() {
-                    self.stop_listening(true);
+                // After a crash the switch shows the GPU off while the
+                // setting is still on: off then only saves the setting.
+                let reload = self.gpu_wanted() != on;
+                if (reload || self.config.use_gpu != on)
+                    && self.config.remote.is_none()
+                    && self.can_switch()
+                {
                     if on {
                         // The user asks to try the GPU again after a crash.
                         gpu_crash::marker().forget();
@@ -173,7 +178,10 @@ impl App {
                     }
                     self.config.use_gpu = on;
                     self.save(|c| c.use_gpu = on);
-                    self.load_engine();
+                    if reload {
+                        self.stop_listening(true);
+                        self.load_engine();
+                    }
                 }
                 return;
             }

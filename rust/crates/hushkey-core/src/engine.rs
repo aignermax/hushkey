@@ -60,6 +60,11 @@ impl EngineConfig {
     /// Why [`Engine::new`] loads this model on the CPU without trying the
     /// GPU, or `None` when it tries the GPU.
     pub fn cpu_reason(&self) -> Option<Acceleration> {
+        self.fixed_cpu_reason().or_else(|| low_gpu_memory(self))
+    }
+
+    /// The reasons for the CPU that do not change while hushkey runs.
+    fn fixed_cpu_reason(&self) -> Option<Acceleration> {
         // hushkey's Vulkan releases carry the shaders for f32/f16 weights
         // only (rust/packaging/glslc-trim, which sets this variable for the
         // build): there a quantized model runs on the CPU.
@@ -71,7 +76,7 @@ impl EngineConfig {
         } else if trimmed && quantized_weights(&self.model) {
             Some(Acceleration::QuantizedCpu)
         } else {
-            low_gpu_memory(self)
+            None
         }
     }
 }
@@ -234,6 +239,8 @@ impl Engine {
             path: config.model.clone(),
             reason,
         };
+        // The caller measured the GPU's memory; the rest is not theirs to say.
+        let cpu_reason = config.fixed_cpu_reason().or(cpu_reason);
         let (ctx, state, acceleration) = match cpu_reason {
             Some(Acceleration::LowGpuMemory {
                 free_mib,
