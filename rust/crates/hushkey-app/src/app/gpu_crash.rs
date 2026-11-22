@@ -6,6 +6,11 @@
 //! that run stays on the CPU. The run after tries the GPU again, once: if
 //! it crashes again, hushkey stays on the CPU until the user switches the
 //! GPU on again in Settings or an update arrives.
+//!
+//! A load that ends any other way than with hushkey's own quit (SIGTERM
+//! and the menu both go through it) counts as a crash too: on Windows and
+//! macOS that includes a logoff or shutdown within the seconds the first
+//! load takes after login.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};

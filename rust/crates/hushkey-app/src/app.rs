@@ -698,7 +698,7 @@ impl App {
     }
 
     fn load_engine(&mut self) {
-        let previous = self.engine.take().map(|engine| Arc::downgrade(&engine));
+        self.engine = None;
         self.loaded_model = None;
         self.backend = None;
         if let Some(network) = &self.network {
@@ -711,9 +711,6 @@ impl App {
         self.show_loading((model != config::AUTO_MODEL).then_some(model.as_str()));
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            if let Some(previous) = previous {
-                wait_released(&previous);
-            }
             let result = model_selection::load(&model, use_gpu, |name| {
                 let _ = tx.send(Msg::LoadingModel(generation, name));
             })
@@ -722,7 +719,7 @@ impl App {
                     "Whisper acceleration: {:?}",
                     engine.acceleration()
                 ));
-                (name.to_owned(), Arc::new(engine))
+                (name.to_owned(), engine)
             })
             .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Loaded(generation, result));
@@ -1663,18 +1660,8 @@ fn brain(config: &Config) -> Result<Option<Box<dyn Brain>>, String> {
 /// pay for the GPU's start: a Vulkan driver without its shader cache (the
 /// first start, or after a driver update) builds its pipelines then, about
 /// 3 s on a laptop GPU. A quiet tone rather than silence, which whisper
-/// skips without running the model.
-/// Wait a while until the previous engine is gone: a listening session, a
-/// transcription or the LAN host may still hold it, and while its model is
-/// loaded the GPU looks too full for the next one.
-fn wait_released(previous: &std::sync::Weak<Engine>) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while previous.strong_count() > 0 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn warm_up(engine: &Engine) {
+/// skips without running the model. Whether it ran.
+fn warm_up(engine: &Engine) -> bool {
     let started = Instant::now();
     let tone: Vec<f32> = (0..2 * 16_000)
         .map(|i| (i as f32 * 0.07).sin() * 0.02)
@@ -1684,10 +1671,16 @@ fn warm_up(engine: &Engine) {
         ..TranscribeOptions::accurate()
     };
     match engine.transcribe(&tone, &options) {
-        Ok(_) => log::line(&format!(
-            "model warmed up in {} ms",
-            started.elapsed().as_millis()
-        )),
-        Err(e) => log::line(&format!("warm-up failed: {e}")),
+        Ok(_) => {
+            log::line(&format!(
+                "model warmed up in {} ms",
+                started.elapsed().as_millis()
+            ));
+            true
+        }
+        Err(e) => {
+            log::line(&format!("warm-up failed: {e}"));
+            false
+        }
     }
 }

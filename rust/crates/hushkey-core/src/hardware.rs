@@ -116,7 +116,9 @@ pub(crate) fn gpu_bytes_needed(model_file_bytes: u64) -> u64 {
 /// Free bytes of the GPU whisper.cpp numbers `index`, when they are fewer
 /// than `needed`. whisper.cpp aborts the whole process when the weights do
 /// not fit, so this is asked before loading. An unknown device or memory
-/// figure is left to whisper.cpp.
+/// figure is left to whisper.cpp. An integrated GPU's figures cover all its
+/// memory heaps, system RAM included (ggml_backend_vk_get_device_memory),
+/// not just a small dedicated carve-out.
 pub(crate) fn gpu_memory_short(index: i32, needed: u64) -> Option<u64> {
     let gpus = registered_gpus();
     usize::try_from(index)

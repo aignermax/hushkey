@@ -209,6 +209,17 @@ unsafe extern "C" fn abort_requested(user: *mut c_void) -> bool {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Engine> {
+        let cpu_reason = config.cpu_reason();
+        Engine::with_cpu_reason(config, cpu_reason)
+    }
+
+    /// [`Engine::new`] with [`EngineConfig::cpu_reason`] asked by the
+    /// caller, who needs to know before the load whether it uses the GPU
+    /// (free memory may change in between).
+    pub fn with_cpu_reason(
+        config: EngineConfig,
+        cpu_reason: Option<Acceleration>,
+    ) -> Result<Engine> {
         install_log_hook();
         let model = config.model.to_str().ok_or_else(|| {
             Error::InvalidArgument(format!(
@@ -223,7 +234,7 @@ impl Engine {
             path: config.model.clone(),
             reason,
         };
-        let (ctx, state, acceleration) = match config.cpu_reason() {
+        let (ctx, state, acceleration) = match cpu_reason {
             Some(Acceleration::LowGpuMemory {
                 free_mib,
                 needed_mib,

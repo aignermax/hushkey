@@ -2,6 +2,8 @@
 //! choice can change models after a Whisper initialization failure.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use hushkey_core::{model, recommend_hardware, Engine, EngineConfig, Error, Result};
 
@@ -12,7 +14,7 @@ pub(super) fn load(
     preference: &str,
     allow_gpu: bool,
     loading: impl Fn(&'static str),
-) -> Result<(&str, Engine)> {
+) -> Result<(&str, Arc<Engine>)> {
     if preference != AUTO_MODEL {
         let config = prepare(preference, allow_gpu, 0)?;
         return Ok((preference, open(config)?));
@@ -57,14 +59,25 @@ pub(super) fn load(
 
 /// Load an engine; on a GPU, also build its pipelines. Both can abort the
 /// process, so a GPU load is marked until it ends (see [`gpu_crash`]).
-fn open(config: EngineConfig) -> Result<Engine> {
-    let marked = config
-        .cpu_reason()
-        .is_none()
-        .then(|| gpu_crash::marker().hold());
-    let engine = Engine::new(config)?;
-    if engine.on_gpu() {
-        super::warm_up(&engine);
+///
+/// One engine loads at a time, each once the one before it is gone: a
+/// listening session, a transcription or the LAN host may still hold the
+/// current model, and a quick second switch may still be loading one that
+/// is no longer wanted. While a model is loaded, the GPU looks too full for
+/// the next. (Downloads, before this, run side by side.)
+fn open(config: EngineConfig) -> Result<Arc<Engine>> {
+    static LAST: Mutex<Weak<Engine>> = Mutex::new(Weak::new());
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while last.strong_count() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Decided once: the engine goes to the GPU exactly when it is marked.
+    let cpu_reason = config.cpu_reason();
+    let marked = cpu_reason.is_none().then(|| gpu_crash::marker().hold());
+    let engine = Arc::new(Engine::with_cpu_reason(config, cpu_reason)?);
+    *last = Arc::downgrade(&engine);
+    if engine.on_gpu() && super::warm_up(&engine) {
         if let Some(marked) = marked {
             marked.succeeded();
         }
