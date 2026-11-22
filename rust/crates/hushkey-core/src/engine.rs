@@ -37,6 +37,11 @@ pub struct EngineConfig {
     /// Silero VAD model: silence is masked before transcription, which keeps
     /// whisper from inventing text in pauses. `None` transcribes everything.
     pub vad_model: Option<PathBuf>,
+    /// Load on the CPU when the GPU cannot take the model (too little free
+    /// memory, or a failure whisper.cpp reports). `false` returns
+    /// [`Error::ModelLoad`] instead, for a caller that would then rather
+    /// choose a smaller model for the CPU.
+    pub cpu_fallback: bool,
 }
 
 impl EngineConfig {
@@ -48,6 +53,30 @@ impl EngineConfig {
             threads: 0,
             language: None,
             vad_model: None,
+            cpu_fallback: true,
+        }
+    }
+
+    /// Why [`Engine::new`] loads this model on the CPU without trying the
+    /// GPU, or `None` when it tries the GPU.
+    pub fn cpu_reason(&self) -> Option<Acceleration> {
+        self.fixed_cpu_reason().or_else(|| low_gpu_memory(self))
+    }
+
+    /// The reasons for the CPU that do not change while hushkey runs.
+    fn fixed_cpu_reason(&self) -> Option<Acceleration> {
+        // hushkey's Vulkan releases carry the shaders for f32/f16 weights
+        // only (rust/packaging/glslc-trim, which sets this variable for the
+        // build): there a quantized model runs on the CPU.
+        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
+        if !self.use_gpu {
+            Some(Acceleration::Cpu)
+        } else if !cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda")) {
+            Some(Acceleration::CpuBuild)
+        } else if trimmed && quantized_weights(&self.model) {
+            Some(Acceleration::QuantizedCpu)
+        } else {
+            None
         }
     }
 }
@@ -185,6 +214,17 @@ unsafe extern "C" fn abort_requested(user: *mut c_void) -> bool {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Engine> {
+        let cpu_reason = config.cpu_reason();
+        Engine::with_cpu_reason(config, cpu_reason)
+    }
+
+    /// [`Engine::new`] with [`EngineConfig::cpu_reason`] asked by the
+    /// caller, who needs to know before the load whether it uses the GPU
+    /// (free memory may change in between).
+    pub fn with_cpu_reason(
+        config: EngineConfig,
+        cpu_reason: Option<Acceleration>,
+    ) -> Result<Engine> {
         install_log_hook();
         let model = config.model.to_str().ok_or_else(|| {
             Error::InvalidArgument(format!(
@@ -195,31 +235,37 @@ impl Engine {
         if !config.model.is_file() {
             return Err(Error::ModelNotFound(config.model.display().to_string()));
         }
-        // hushkey's Vulkan releases carry the shaders for f32/f16 weights
-        // only (rust/packaging/glslc-trim, which sets this variable for the
-        // build): there a quantized model runs on the CPU.
-        let trimmed = option_env!("HUSHKEY_TRIMMED_SHADERS").is_some();
-        let forced_cpu = if !config.use_gpu {
-            Some(Acceleration::Cpu)
-        } else if !cfg!(any(feature = "vulkan", feature = "metal", feature = "cuda")) {
-            Some(Acceleration::CpuBuild)
-        } else if trimmed && quantized_weights(&config.model) {
-            Some(Acceleration::QuantizedCpu)
-        } else {
-            None
-        };
-        let mut params = WhisperContextParameters::default();
-        params
-            .use_gpu(forced_cpu.is_none())
-            .gpu_device(config.gpu_device);
         let load_error = |reason: String| Error::ModelLoad {
             path: config.model.clone(),
             reason,
         };
-        let ctx = WhisperContext::new_with_params(model, params)
-            .map_err(|e| load_error(e.to_string()))?;
-        let (state, observed) = observe_state(|| ctx.create_state());
-        let state = state.map_err(|e| load_error(e.to_string()))?;
+        // The caller measured the GPU's memory; the rest is not theirs to say.
+        let cpu_reason = config.fixed_cpu_reason().or(cpu_reason);
+        let (ctx, state, acceleration) = match cpu_reason {
+            Some(Acceleration::LowGpuMemory {
+                free_mib,
+                needed_mib,
+            }) if !config.cpu_fallback => {
+                return Err(load_error(format!(
+                    "too little free GPU memory ({free_mib} MiB free, {needed_mib} MiB needed)"
+                )));
+            }
+            Some(reason) => {
+                let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
+                (ctx, state, reason)
+            }
+            None => match load_whisper(model, true, config.gpu_device) {
+                Ok(loaded) => loaded,
+                Err(reason) if !config.cpu_fallback => return Err(load_error(reason)),
+                // An allocation whisper.cpp reports instead of aborting on
+                // (cache, compute buffers): the CPU may still have room.
+                // The failed attempt's GPU buffers are freed by now.
+                Err(reason) => {
+                    let (ctx, state, _) = load_whisper(model, false, 0).map_err(load_error)?;
+                    (ctx, state, Acceleration::GpuFailed { reason })
+                }
+            },
+        };
         let vad = match &config.vad_model {
             None => None,
             Some(path) => {
@@ -249,7 +295,7 @@ impl Engine {
             state: Mutex::new(state),
             vad,
             config,
-            acceleration: forced_cpu.unwrap_or(observed),
+            acceleration,
             prompt_tokens: Mutex::new(None),
         })
     }
@@ -485,6 +531,33 @@ fn quantized_weights(path: &Path) -> bool {
     let word = |i: usize| u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
     // "ggml", n_vocab … n_mels (10 numbers), ftype.
     word(0) == 0x6767_6d6c && word(11) % 1000 > 1
+}
+
+/// CPU in place of a GPU that cannot hold the model: whisper.cpp would
+/// abort the process on the failed allocation instead of reporting it.
+fn low_gpu_memory(config: &EngineConfig) -> Option<Acceleration> {
+    use crate::hardware::{gpu_bytes_needed, gpu_memory_short, MIB};
+    let needed = gpu_bytes_needed(std::fs::metadata(&config.model).ok()?.len());
+    let free = gpu_memory_short(config.gpu_device, needed)?;
+    Some(Acceleration::LowGpuMemory {
+        free_mib: free / MIB,
+        needed_mib: needed / MIB,
+    })
+}
+
+/// A whisper.cpp context and its inference state, with the backend the
+/// state chose.
+fn load_whisper(
+    model: &str,
+    use_gpu: bool,
+    gpu_device: i32,
+) -> std::result::Result<(WhisperContext, WhisperState, Acceleration), String> {
+    let mut params = WhisperContextParameters::default();
+    params.use_gpu(use_gpu).gpu_device(gpu_device);
+    let ctx = WhisperContext::new_with_params(model, params).map_err(|e| e.to_string())?;
+    let (state, observed) = observe_state(|| ctx.create_state());
+    let state = state.map_err(|e| e.to_string())?;
+    Ok((ctx, state, observed))
 }
 
 #[cfg(test)]

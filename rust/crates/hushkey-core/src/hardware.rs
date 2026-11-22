@@ -103,7 +103,29 @@ fn registered_gpus() -> Vec<Gpu> {
     }
 }
 
-const MIB: u64 = 1 << 20;
+pub(crate) const MIB: u64 = 1 << 20;
+
+/// GPU memory a model needs: its weights (the file is nearly all weights)
+/// plus the inference state. Measured with whisper.cpp 1.8: large-v3-turbo
+/// 1624 MB weights + 406 MB state, medium 1533 + 512, tiny 77 + 193. The
+/// state grows with the decoder; a fixed part covers tiny's decode buffer.
+pub(crate) fn gpu_bytes_needed(model_file_bytes: u64) -> u64 {
+    model_file_bytes + model_file_bytes * 3 / 10 + 256 * MIB
+}
+
+/// Free bytes of the GPU whisper.cpp numbers `index`, when they are fewer
+/// than `needed`. whisper.cpp aborts the whole process when the weights do
+/// not fit, so this is asked before loading. An unknown device or memory
+/// figure is left to whisper.cpp. An integrated GPU's figures cover all its
+/// memory heaps, system RAM included (ggml_backend_vk_get_device_memory),
+/// not just a small dedicated carve-out.
+pub(crate) fn gpu_memory_short(index: i32, needed: u64) -> Option<u64> {
+    let gpus = registered_gpus();
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| gpus.get(index))
+        .and_then(|gpu| gpu.short_of(needed))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum GpuModel {
@@ -132,6 +154,17 @@ impl Gpu {
             768.. => Some(GpuModel::Base),
             _ => None,
         }
+    }
+
+    /// The free bytes, when `needed` exceeds them. A device reporting no
+    /// capacity (older Metal) is unknown, not full.
+    fn short_of(&self, needed: u64) -> Option<u64> {
+        if self.total == 0 {
+            return None;
+        }
+        // Usage above the budget underflows to a huge free figure.
+        let free = if self.free > self.total { 0 } else { self.free };
+        (free < needed).then_some(free)
     }
 
     fn evidence(&self, index: usize) -> String {
@@ -277,6 +310,36 @@ mod tests {
             choose(&[metal(8192, 8192)], 8, None).model,
             "large-v3-turbo"
         );
+    }
+
+    #[test]
+    fn a_full_gpu_is_short_and_an_unknown_one_is_not() {
+        let turbo = gpu_bytes_needed(1_624_555_275);
+        // The reported case: an 8 GB card with a 9B LLM loaded beside it.
+        assert_eq!(gpu(74, 8192).short_of(turbo), Some(74 * MIB));
+        assert_eq!(gpu(8192, 8192).short_of(turbo), None);
+        assert_eq!(gpu(8193, 8192).short_of(turbo), Some(0));
+        assert_eq!(gpu(0, 0).short_of(turbo), None);
+    }
+
+    #[test]
+    fn the_estimate_covers_the_measured_models() {
+        // (file bytes, measured weights + state in MB)
+        for (file, measured_mb) in [
+            (1_624_555_275, 1624 + 406),
+            (1_533_763_059, 1533 + 512),
+            (77_691_713, 77 + 193),
+        ] {
+            let needed = gpu_bytes_needed(file);
+            let measured = measured_mb * 1_000_000;
+            // Headroom for the backend's own scratch buffers at inference.
+            assert!(
+                needed > measured + 64 * MIB,
+                "{file}: {needed} vs {measured}"
+            );
+            // Not so generous that a card that fits is sent to the CPU.
+            assert!(needed < measured + measured / 4 + 256 * MIB);
+        }
     }
 
     #[cfg(not(any(feature = "vulkan", feature = "cuda", feature = "metal")))]

@@ -2,19 +2,22 @@
 //! choice can change models after a Whisper initialization failure.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use hushkey_core::{model, recommend_hardware, Engine, EngineConfig, Error, Result};
 
+use super::gpu_crash;
 use crate::{config::AUTO_MODEL, log};
 
 pub(super) fn load(
     preference: &str,
     allow_gpu: bool,
     loading: impl Fn(&'static str),
-) -> Result<(&str, Engine)> {
+) -> Result<(&str, Arc<Engine>)> {
     if preference != AUTO_MODEL {
         let config = prepare(preference, allow_gpu, 0)?;
-        return Ok((preference, Engine::new(config)?));
+        return Ok((preference, open(config)?));
     }
 
     let choice = recommend_hardware(allow_gpu);
@@ -23,9 +26,12 @@ pub(super) fn load(
         choice.model, choice.evidence
     ));
     loading(choice.model);
-    let config = prepare(choice.model, choice.use_gpu, choice.gpu_device)?;
+    let mut config = prepare(choice.model, choice.use_gpu, choice.gpu_device)?;
+    // When the GPU cannot take it, the fallback below is a model chosen for
+    // the CPU, not this one loaded on the CPU first.
+    config.cpu_fallback = false;
     let whisper_file = config.model.clone();
-    let first = match Engine::new(config) {
+    let first = match open(config) {
         Ok(engine) if !choice.use_gpu || engine.on_gpu() => return Ok((choice.model, engine)),
         Ok(engine) => {
             log::line(&format!("GPU choice ran on {:?}", engine.acceleration()));
@@ -48,7 +54,36 @@ pub(super) fn load(
         "automatic model falling back to {fallback} on CPU"
     ));
     loading(fallback);
-    Ok((fallback, Engine::new(prepare(fallback, false, 0)?)?))
+    Ok((fallback, open(prepare(fallback, false, 0)?)?))
+}
+
+/// Load an engine; on a GPU, also build its pipelines. Both can abort the
+/// process, so a GPU load is marked until it ends (see [`gpu_crash`]).
+///
+/// One engine loads at a time, each once the one before it is gone: a
+/// listening session, a transcription or the LAN host may still hold the
+/// current model, and a quick second switch may still be loading one that
+/// is no longer wanted. While a model is loaded, the GPU looks too full for
+/// the next. (Downloads, before this, run side by side.)
+fn open(config: EngineConfig) -> Result<Arc<Engine>> {
+    static LAST: Mutex<Weak<Engine>> = Mutex::new(Weak::new());
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while last.strong_count() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if last.strong_count() > 0 {
+        log::line("the previous model is still in use; loading the next beside it");
+    }
+    // Decided once: the engine goes to the GPU exactly when it is marked.
+    let cpu_reason = config.cpu_reason();
+    let _marked = cpu_reason.is_none().then(|| gpu_crash::marker().hold());
+    let engine = Arc::new(Engine::with_cpu_reason(config, cpu_reason)?);
+    *last = Arc::downgrade(&engine);
+    if engine.on_gpu() {
+        super::warm_up(&engine);
+    }
+    Ok(engine)
 }
 
 fn cpu_retry(

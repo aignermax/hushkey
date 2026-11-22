@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use hushkey_brain::{OpenAiChat, OpenAiConfig};
 use hushkey_core::{
-    Brain, CommandSet, Engine, Event, EventSink, ListenConfig, ListenSession, Microphone,
-    RecordConfig, RecordSession, TranscribeOptions, Transcriber,
+    Acceleration, Brain, CommandSet, Engine, Event, EventSink, ListenConfig, ListenSession,
+    Microphone, RecordConfig, RecordSession, TranscribeOptions, Transcriber,
 };
 use tray_icon::menu::MenuEvent;
 use tray_icon::TrayIconEvent;
@@ -36,7 +36,9 @@ use crate::tray::{Action, Tray};
 use crate::update::{self, Release};
 
 mod connections;
+mod gpu_crash;
 mod model_selection;
+use gpu_crash::Crashes;
 mod settings;
 mod updates;
 use crate::network::Link;
@@ -171,6 +173,19 @@ pub fn run(after_update: bool) -> ExitCode {
         "started, key {}, model {}",
         config.key, config.model
     ));
+    let gpu_crashes = gpu_crash::marker().crashes();
+    match gpu_crashes {
+        Crashes::None => {}
+        Crashes::Last => log::line(
+            "the last run ended while loading the model on the GPU; this run uses the CPU",
+        ),
+        Crashes::Again => log::line(
+            "loading on the GPU crashed again; the CPU until the GPU is switched on in Settings",
+        ),
+        Crashes::GaveUp => log::line(
+            "the GPU stays off after repeated crashes; switching it on in Settings tries again",
+        ),
+    }
     let mut app = App {
         s,
         hotkey: Some(hotkey),
@@ -185,6 +200,8 @@ pub fn run(after_update: bool) -> ExitCode {
         inserter_thread: Some(inserter_thread),
         engine: None,
         loaded_model: None,
+        gpu_crashes,
+        crash_told: false,
         network,
         connections: Connections::new(),
         settings: Settings::new(),
@@ -285,6 +302,12 @@ struct App {
     inserter_thread: Option<JoinHandle<()>>,
     engine: Option<Arc<Engine>>,
     loaded_model: Option<String>,
+    /// Earlier runs died loading a model on the GPU: this one keeps to the
+    /// CPU, until the GPU is switched on again in Settings.
+    gpu_crashes: Crashes,
+    /// The first model of this run has loaded, and with it came the notice
+    /// about a crash, if there was one.
+    crash_told: bool,
     network: Option<Network>,
     connections: Connections,
     settings: Settings,
@@ -664,6 +687,7 @@ impl App {
         if let Some(thread) = self.inserter_thread.take() {
             let _ = thread.join();
         }
+        gpu_crash::marker().clear();
         log::line("quit");
         ExitCode::SUCCESS
     }
@@ -686,7 +710,7 @@ impl App {
         self.load_generation += 1;
         let generation = self.load_generation;
         let model = self.config.model.clone();
-        let use_gpu = self.config.use_gpu;
+        let use_gpu = self.gpu_wanted();
         self.show_loading((model != config::AUTO_MODEL).then_some(model.as_str()));
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -698,11 +722,7 @@ impl App {
                     "Whisper acceleration: {:?}",
                     engine.acceleration()
                 ));
-                // Only a GPU has pipelines to build.
-                if engine.on_gpu() {
-                    warm_up(&engine);
-                }
-                (name.to_owned(), Arc::new(engine))
+                (name.to_owned(), engine)
             })
             .map_err(|e| e.to_string());
             let _ = tx.send(Msg::Loaded(generation, result));
@@ -725,6 +745,38 @@ impl App {
             // A new install downloads its model first, which takes a
             // while: say so where it is seen, not only in the tray.
             self.overlay.show(GREY, &text);
+        }
+    }
+
+    /// Whether models load on the GPU: switched on, and no crash there
+    /// keeps them off it.
+    pub(super) fn gpu_wanted(&self) -> bool {
+        self.config.use_gpu && self.gpu_crashes == Crashes::None
+    }
+
+    /// Why a model meant for the GPU runs on the CPU, when the user would
+    /// otherwise only notice that dictation got slower.
+    fn cpu_notice(&self, engine: &Engine) -> Option<&'static str> {
+        let w = |de, en| network::words(self.s, de, en);
+        match (engine.acceleration(), self.gpu_crashes) {
+            (Acceleration::LowGpuMemory { .. }, _) => Some(w(
+                "Grafikspeicher belegt: hushkey läuft auf der CPU und braucht etwas länger.",
+                "Graphics memory is full: hushkey runs on the CPU and takes a little longer.",
+            )),
+            (Acceleration::GpuFailed { .. }, _) => Some(w(
+                "Die GPU hat das Modell nicht geladen: hushkey läuft auf der CPU und braucht etwas länger.",
+                "The GPU did not load the model: hushkey runs on the CPU and takes a little longer.",
+            )),
+            _ if self.crash_told || !self.config.use_gpu => None,
+            (_, Crashes::None | Crashes::GaveUp) => None,
+            (_, Crashes::Last) => Some(w(
+                "Der letzte Start auf der GPU ist abgestürzt: hushkey läuft diesmal auf der CPU.",
+                "The last start on the GPU crashed: hushkey runs on the CPU this time.",
+            )),
+            (_, Crashes::Again) => Some(w(
+                "Die GPU ist erneut abgestürzt: hushkey bleibt auf der CPU, bis du die GPU in den Einstellungen wieder einschaltest.",
+                "The GPU crashed again: hushkey stays on the CPU until you switch the GPU on again in Settings.",
+            )),
         }
     }
 
@@ -803,11 +855,16 @@ impl App {
                         Some(engine.clone());
                 }
                 self.backend = Some(Arc::new(Recoverable::new(engine.clone())));
+                let cpu_notice = self.cpu_notice(&engine);
+                self.crash_told = true;
                 self.engine = Some(engine);
                 if self.config.mode == Mode::Listen {
                     self.set_listening(true);
                 } else {
                     self.idle();
+                }
+                if let Some(text) = cpu_notice {
+                    self.notice(GREY, text);
                 }
             }
             Msg::Loaded(_, Err(e)) => {
